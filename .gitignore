@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Builds
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# Env & secrets — NEVER commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+
+# Test & coverage
+coverage/
+.vitest/
+test-results/
+playwright-report/
+blob-report/
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Turbo
+.turbo/
+
+# Local data (FS storage adapter, pids, etc.)
+.data/
+*.pid
+
+# Drizzle local meta if generated outside package (keep migrations committed)
+# (no blanket ignore for packages/db/migrations)
