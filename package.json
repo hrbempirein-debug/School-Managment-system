@@ -1,0 +1,33 @@
+{
+  "name": "school-management-saas",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@12.4.1",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=10.0.0"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter @sms/api --filter @sms/web --filter @sms/worker run dev",
+    "dev:api": "pnpm --filter @sms/api run dev",
+    "dev:web": "pnpm --filter @sms/web run dev",
+    "dev:worker": "pnpm --filter @sms/worker run dev",
+    "build": "pnpm turbo run build",
+    "typecheck": "pnpm turbo run typecheck",
+    "lint": "pnpm turbo run lint",
+    "test": "pnpm turbo run test",
+    "db:migrate": "pnpm --filter @sms/db run migrate",
+    "db:migrate:down": "pnpm --filter @sms/db run migrate:down",
+    "db:seed": "pnpm --filter @sms/db run seed",
+    "db:bootstrap": "node scripts/bootstrap-check.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "dotenv": "^16.4.7",
+    "pg": "^8.13.1",
+    "prettier": "^3.3.0",
+    "turbo": "^2.5.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "@sms/events",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "dependencies": {
+    "@sms/contracts": "workspace:*",
+    "@sms/core": "workspace:*",
+    "@sms/db": "workspace:*",
+    "bullmq": "^5.20.0",
+    "ioredis": "^5.4.2",
+    "drizzle-orm": "^0.38.0"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

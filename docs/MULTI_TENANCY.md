@@ -62,18 +62,19 @@ tenant_id UUID NOT NULL REFERENCES tenants(id)
 -- + RLS enabled
 ALTER TABLE stu_students ENABLE ROW LEVEL SECURITY;
 ALTER TABLE stu_students FORCE ROW LEVEL SECURITY;  -- owner/postgres also filtered
+-- Isolate on signed ticket claims (see DECISIONS ADR-014); no raw GUCs.
 CREATE POLICY tenant_isolation ON stu_students
-  USING (tenant_id = current_setting('app.tenant_id', true)::uuid)
-  WITH CHECK (tenant_id = current_setting('app.tenant_id', true)::uuid);
+  USING (tenant_id = app_ctx_tenant())
+  WITH CHECK (tenant_id = app_ctx_tenant());
 ```
 
 Rules:
 - `FORCE ROW LEVEL SECURITY` on all tenant tables so even superuser-owned app connections are filtered unless they set a context.
 - Application connects as a non-superuser role `app_rw` that **cannot bypass RLS** (`BYPASSRLS` denied, not owner of tables — owner is `migrator` role).
-- Platform tables (`plt_*`) use a separate policy keyed on `current_setting('app.platform_access', 'true') = 'on'` set only by platform routes.
+- Context is a **signed ticket** in `app.rls` minted only by `app_ctx_mint()` against real membership/assignment rows; the legacy `app.platform_access`/`app.current_*`/`app.system_access` GUCs are retired (they were forgeable via `set_config`), see DECISIONS ADR-014.
 - Migrations run as `migrator` (table owner, can alter policies); runtime as `app_rw`.
 - Helper in `packages/db` forces every query through `withTenant(ctx, tx => …)` — API refuses ad-hoc pool queries without context (lint rule + code review).
-- RLS + `SET LOCAL` is PgBouncer-transaction-pooling safe.
+- Tickets are `set_config('app.rls', …, true)` transaction-local, so this is PgBouncer-transaction-pooling safe.
 
 Defense-in-depth layers: (1) route permission, (2) repository requires ctx, (3) SQL always filters `tenant_id` via RLS, (4) composite indexes start with `tenant_id`, (5) tests attempt cross-tenant access expecting failure.
 

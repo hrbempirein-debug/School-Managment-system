@@ -82,7 +82,7 @@ Denied-by-default: routes without explicit permission declaration fail startup v
 
 ## 6. Platform access to tenant data
 
-- Platform routes live under `/api/v1/platform/…`, require platform permission, set `app.platform_access=on` RLS bypass context **only inside those transactions**, and require `reason` (ticket id) body/header → audit `platform.access.grant`.
+- Platform routes live under `/api/v1/platform/…`, require platform permission, and run under a **signed platform ticket** (minted by `app_ctx_mint('platform', …)` only when the actor has a real `platform_role_assignments` row; see DECISIONS ADR-014) — the legacy `app.platform_access=on` GUC was forgeable and is retired. Platform actions require `reason` (ticket id) body/header → audit `platform.access.grant`.
 - Platform staff cannot use tenant portals with platform roles (separate session claim).
 
 ## 7. Session & token model

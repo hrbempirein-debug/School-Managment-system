@@ -1,0 +1,25 @@
+{
+  "name": "@sms/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/worker.ts",
+    "start": "tsx src/worker.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@sms/config": "workspace:*",
+    "@sms/contracts": "workspace:*",
+    "@sms/core": "workspace:*",
+    "@sms/db": "workspace:*",
+    "@sms/events": "workspace:*",
+    "@sms/jobs": "workspace:*",
+    "@sms/redis": "workspace:*",
+    "@sms/tenancy": "workspace:*",
+    "bullmq": "^5.20.0",
+    "ioredis": "^5.4.2",
+    "drizzle-orm": "^0.38.0"
+  }
+}

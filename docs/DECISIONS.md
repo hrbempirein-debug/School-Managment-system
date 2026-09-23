@@ -177,4 +177,35 @@ New ADRs appended; never rewrite history — supersede with a new numbered ADR.
 
 **Decision.** `packages/config` parses `process.env` with Zod at boot; fail fast on missing vars. Feature flags and school-level toggles stored in DB (`cfg_*` tables), not constants. No secrets in repo; `.env.example` placeholders only.
 
-**Consequences.** Every new env var must be added to `.env.example` and config schema in the same PR.
+**Consequences.** Every new env var must be added to `.env.example` and config schema in the same PR.---
+
+## ADR-013 — RLS scope: auth tables intentionally NOT RLS-enforced
+
+**Date:** 2026-09-22 | **Status:** Accepted
+
+**Decision.** `auth_identities` (and only the pre-auth lookup path over it) deliberately bypasses row-level security. RLS is enforced on every tenant-scoped (and platform-scoped) table via the shared `app_*_rls` helper functions, but the login/reset flows must read an identity by `(provider, provider_key)` **before any session or tenant context exists**, so those queries run under the `app_system_access`/system GUC without an active tenant.
+
+**Reason.** A login lookup cannot be tenant-scoped: the caller has not yet provided `X-Tenant-Id` and there is no active session at that point. The system-scope identity read is narrow (only `provider` + `provider_key` + `password_hash` + foreign-key to `user_id`), never exposes emails or profile data, is rate-limited, and the actual user/tenant authorization still flows through RLS-protected tables. The RLS grants reference this narrow read-only view.
+
+**Consequences.** Auth code must never add future wide reads on `auth_identities`; any new pre-auth lookup must use the same system-scope helper. If a post-auth path ever needs identity data it must go through the RLS-protected joins instead. This is the single accepted read path outside RLS in Phase 1.
+
+---
+
+## ADR-014 — Replace forgeable GUC RLS boundary with signed context tickets
+
+**Date:** 2026-09-23 | **Status:** Accepted (replaces ADR-013's GUC trust model for all non-`auth_identities` tables)
+
+**Decision.** Phase-1 protected every scoped table with `current_setting('app.current_tenant' | 'app.current_user' | 'app.platform_access' | 'app.system_access')`. That boundary was forgeable: `school_app_rw` may call `set_config(...)` itself, so any holder of the runtime connection could self-grant platform/system authority and read/write any tenant's rows. This ADR replaces that trust model:
+
+- **Signed context ticket.** `app.rls` now carries `base64(json claims).hex(hmac-sha256(claims, 48-byte secret))`, TTL 300s. Claims `{s: scope, u: user_id, t: tenant_id}`. A ticket can only be produced by SECURITY DEFINER `app_ctx_mint(scope, user, tenant)`, and mintage is **gated by data**: `tenant` requires an `active` membership row; `platform` requires a `platform_role_assignments` row; `account` requires a userId (identity asserted by the app session, see residual risk); `none` = no claims. All legacy `app.*context*` GUC reads were removed from policies — forging them now buys nothing (verified by integration test 2).
+- **Privileged executor escape.** `app_privileged() = current_user IN ('school_migrator')` (SECURITY INVOKER) is the only non-ticket path. It is unreachable by `school_app_rw` (cannot `SET ROLE`, verified by test 3) and is used by the worker/dispatcher/migrations and `app_ctx_mint`/`app_auth_login_lookup` SECURITY DEFINER functions.
+- **Secrets.** `app_rls_secrets` is a single-row FORCE RLS table with explicit `REVOKE ALL FROM school_app_rw`, read only inside definer functions.
+- **Credentials hardened.** `auth_identities` (previously not RLS-enforced under ADR-013) is now FORCE RLS and self-visible/writable only; the pre-auth login lookup is narrowed to `app_auth_login_lookup(provider, provider_key)` returning only `(user_id, password_hash)`.
+- **Privileged-only deletes.** No DELETE policies existed, so FORCE RLS silently denied all deletes even for the executor. Added `*_delete` policies (privileged/`app_privileged()` only). `school_app_rw` still has no DELETE access anywhere.
+- **Transaction-local.** Tickets are set via `set_config('app.rls', ..., true)`; they reset at COMMIT/ROLLBACK, so pooled connections can never leak context. `app_ctx_claims()` is exception-safe (malformed/base64-broken input → NULL).
+
+**Reason.** PostgreSQL forbids untrusted clients from `SET ROLE` or writing GUCs the server reads for *internal* logic, but RLS policy expressions evaluate client-set GUCs directly — an inherently forgeable signal. The correct primitive is a server-side-verified artifact (HMAC) minted only through validation-gated definer functions, with unforgeable `current_user` as the escape hatch for the trusted executor.
+
+**Residual risks (accepted for Phase 2A, tracked for a later phase).** (1) A raw-SQL holder of the one shared `school_app_rw` credential can mint a ticket for *any* identity that has a real membership/assignment — the database cannot cryptographically distinguish users behind a single runtime role. (2) `users_insert` remains `WITH CHECK (true)` so registration can create rows before any context exists. Both are limitation-of-model issues that only per-user connection roles or a dedicated platform pool can fully close.
+
+**Consequences.** `app_ctx_*` helper names are the contract for new policies; new secret-bearing tables must mirror `app_rls_secrets` (FORCE RLS + REVOKE). `@sms/db` `withGuc` mints tickets; `@sms/tenancy` exposes `setAccountScope/setTenantScope/setPlatformScope`; `@sms/auth` login reads via `app_auth_login_lookup`. Regression suite: `packages/db/src/security/trust-boundary.test.ts` (opt-in `RUN_RUNTIME_SECURITY_TESTS=1`) covers all 12 mandated checks against the real roles on `school_saas_dev`.
