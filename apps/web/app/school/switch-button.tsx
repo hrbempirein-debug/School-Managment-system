@@ -3,13 +3,8 @@
 import { useEffect, useState } from 'react';
 import type { MembershipsResponse } from '@sms/contracts';
 import { Button } from '@sms/ui';
-import { API_BASE_URL, apiFetch } from '@/lib/api';
-
-function getCsrf(): string {
-  if (typeof document === 'undefined') return '';
-  const match = document.cookie.match(/(?:^|;\s*)csrf=([^;]+)/);
-  return match ? decodeURIComponent(match[1] ?? '') : '';
-}
+import { API_BASE_URL } from '@/lib/api';
+import { getCsrf, clientFetch } from '@/lib/http';
 
 export function SwitchButton() {
   const [memberships, setMemberships] = useState<MembershipsResponse['memberships']>([]);
@@ -17,7 +12,7 @@ export function SwitchButton() {
   const [message, setMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    void apiFetch<MembershipsResponse>('/api/v1/me/memberships')
+    void clientFetch<MembershipsResponse>('/api/v1/me/memberships')
       .then((res) => setMemberships(res.memberships))
       .catch(() => setMemberships([]));
   }, []);

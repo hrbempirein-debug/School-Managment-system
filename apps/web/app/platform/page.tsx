@@ -1,12 +1,12 @@
 import type { MeResponse } from '@sms/contracts';
-import { apiFetch } from '@/lib/api';
+import { serverFetch } from '@/lib/server';
 
 export const dynamic = 'force-dynamic';
 
 export default async function PlatformPage() {
   let me: MeResponse | null = null;
   try {
-    me = await apiFetch<MeResponse>('/api/v1/me');
+    me = await serverFetch<MeResponse>('/api/v1/me');
   } catch {
     return <Unauthenticated />;
   }

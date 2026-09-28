@@ -4,12 +4,19 @@ interface ButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'typ
   children: ReactNode;
   size?: 'small' | 'medium';
   type?: 'button' | 'submit' | 'reset';
+  variant?: 'primary' | 'secondary' | 'danger';
 }
 
-export function Button({ children, size = 'medium', className = '', ...props }: ButtonProps) {
+const VARIANT_CLASSES = {
+  primary: 'bg-blue-600 text-white',
+  secondary: 'border border-gray-300 bg-white text-gray-700',
+  danger: 'bg-red-600 text-white',
+} as const;
+
+export function Button({ children, size = 'medium', variant = 'primary', className = '', ...props }: ButtonProps) {
   return (
     <button
-      className={`rounded-md bg-blue-600 text-white disabled:opacity-50 ${
+      className={`rounded-md disabled:opacity-50 ${VARIANT_CLASSES[variant]} ${
         size === 'small' ? 'px-3 py-1.5 text-sm' : 'px-4 py-2'
       } ${className}`}
       {...props}
