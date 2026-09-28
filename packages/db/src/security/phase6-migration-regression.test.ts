@@ -56,6 +56,22 @@ const upTo = (n: number) => (f: string): boolean => {
 };
 
 /**
+ * Every migration file the real runner would consider, in the order it applies them.
+ *
+ * `applyMigrations` itself uses `/^[0-9]+_.+\.sql$/` filtered and sorted, so this
+ * mirrors that exactly. The assertions below are expressed against this list rather
+ * than against a hardcoded count or a literal pair of filenames, because pinning the
+ * total meant that adding ANY later migration - not just 0018/0019 - turned this
+ * suite red without any of its actual properties changing. Deriving the expectation
+ * keeps the property under test ("everything from 0018 onwards is applied, and
+ * nothing before it is") and stops the count being a tripwire.
+ */
+const migrationFiles = async (): Promise<string[]> =>
+  (await readdir(migrationsDir))
+    .filter((f) => /^[0-9]+_.+\.sql$/.test(f))
+    .sort();
+
+/**
  * The line that restores the freeze after the backfill. Removing this one line is
  * the negative control: the file still migrates every row, it just leaves a
  * published result's body editable by any privileged session afterwards.
@@ -326,7 +342,14 @@ describeDb('Phase 6 migration regression: 0018/0019 backfill a real pre-0018 dat
 
     // The real runner, the real files, from 0018 onwards.
     const res = await applyMigrations(url, migrationsDir);
-    expect(res.applied).toEqual([M18, M19]);
+    // Everything numbered 0018 or later, and nothing earlier: this database was
+    // pre-0018s, so a file below 0018 appearing here would mean the runner re-applied
+    // applied history. Derived, so a later 00NN migration does not break the suite.
+    const allFiles = await migrationFiles();
+    const expectedTail = allFiles.filter((f) => Number(f.slice(0, f.indexOf('_'))) >= 18);
+    expect(expectedTail[0]).toBe(M18);
+    expect(expectedTail).toContain(M19);
+    expect(res.applied).toEqual(expectedTail);
 
     // --- 1. the card now has the body it never had, one line per mark ---
     const lines = await q<{
@@ -431,7 +454,10 @@ describeDb('Phase 6 migration regression: 0018/0019 backfill a real pre-0018 dat
     const before = await fingerprint();
     const res = await applyMigrations(url, migrationsDir);
     expect(res.applied).toEqual([]);
-    expect(res.skipped).toHaveLength(19);
+    // Every migration file the runner knows about was skipped, so nothing was
+    // re-applied and none is missing from the journal. Derived from the directory
+    // rather than a literal, so adding a migration does not need this test edited.
+    expect(res.skipped).toEqual(await migrationFiles());
     expect(await fingerprint()).toEqual(before);
   });
 
