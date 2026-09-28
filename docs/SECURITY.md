@@ -66,8 +66,10 @@ Buckets: IP (global), session, tenant, endpoint class (auth, ai, write); 429 + R
 
 - No secrets in git (`.gitignore` covers `.env*` except `.env.example`).
 - Runtime secrets from environment/secret manager; Zod config fails boot if missing.
-- Encryption at rest for MFA secrets & PAT hashes: AES-256-GCM with app master key (env), key id stored for rotation.
-- Rotation runbook in DEPLOYMENT.md.
+- **Passwords are hashed, not encrypted** (argon2id, `packages/auth/src/password.ts`).
+- **Session and API tokens are hashed, not encrypted** (sha256 digests, `packages/auth/src/sessions.ts`). A token is never recoverable from storage by design, so a stolen database cannot leak a usable session.
+- **NOT YET IMPLEMENTED — encryption at rest for third-party/OAuth secrets.** `auth_identities.secret_enc` exists as a reserved nullable column and `APP_ENCRYPTION_KEY` is declared in `packages/config`, but **neither is read or written anywhere in the codebase**, and no encryption primitive exists. Do not read this document as claiming that third-party secrets are encrypted: they cannot be stored at all today, because OAuth/SSO is not implemented and `password` is the only provider. Implementing AES-256-GCM here is future work; it must add a key id for rotation, unique nonce per value, authenticated encryption, and tests, and it must keep plaintext out of the column.
+- No `key_id`/key-rotation support exists yet; the rotation runbook in DEPLOYMENT.md is therefore aspirational for secrets and applies to operational credentials today.
 
 ## 14. Dependency & supply chain
 

@@ -37,7 +37,7 @@ Conventions applied to **every** table unless noted:
 |---|---|---|
 | `users` | Global identity | `email citext unique`, `email_verified_at`, `status (active|disabled)`, `last_login_at` |
 | `user_profiles` | Profile separate from auth | `user_id PK/FK`, `full_name`, `phone`, `locale`, `avatar_file_id` |
-| `auth_identities` | Credentials | (`user_id`,`provider`) unique — `password` (argon2id hash), `totp_secret_enc`, `mfa_enabled`; REVOKE for mass exports |
+| `auth_identities` | Credentials | (`user_id`,`provider`) unique — `password` (argon2id hash), `secret_enc` (reserved, **unused**), `mfa_enabled` (always false today); REVOKE for mass exports |
 | `auth_sessions` | Server sessions | `id`, `user_id`, `active_tenant_id NULL`, `ip`, `user_agent_hash`, `expires_at`, `revoked_at`; idx user, expires |
 | `auth_tokens` | Reset/verify/invite/PAT | `user_id`, `type`, `token_hash unique`, `expires_at`, `consumed_at` |
 | `memberships` | User ∈ school | unique(`user_id`,`tenant_id`), `status (active|invited|suspended)`, `campus_id NULL`; idx tenant,status |
