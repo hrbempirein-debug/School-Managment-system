@@ -251,6 +251,54 @@ jobs:
         env:
           RUN_RUNTIME_SECURITY_TESTS: '1'
 
+      # ---------------------------------------------------------------------
+      # PHASE 2-5 COVERAGE. The four steps above each name ONE Phase 6 file.
+      # Before the recovery there were 42 test files gated on
+      # RUN_RUNTIME_SECURITY_TESTS and this gate named 4 of them, so 38 gated
+      # files - the whole of Phase 2, 3, 3.5, 4.1-4.4 and 5 - could not run in
+      # CI at all. `pnpm test` at the bottom does not help: it runs WITHOUT the
+      # variable, so every one of those files self-skipped. A suite that no CI
+      # step can execute is a suite nobody is maintaining.
+      #
+      # These three steps close that gap by running the gated suites AGGREGATELY
+      # per package, with the variable set on the step only. They strictly
+      # include the four individually-named steps above, so nothing is traded
+      # away for the broader coverage; the narrow names are kept because a
+      # failure in a named step is easier to read than a failure in an aggregate.
+      #
+      # SAFE TO RUN IN ANY ORDER BECAUSE
+      #   * `fileParallelism: false` in every vitest config serialises files
+      #     WITHIN a package, which is what lets them share one disposable
+      #     database without reading each other's fixtures mid-run; and
+      #   * every vitest run re-executes the globalSetup, which calls
+      #     `applyMigrations` against the disposable database. That is what
+      #     repairs the schema after the migration-regression step above DROPS
+      #     it, so the destructive suite does not have to be the last step.
+      #
+      # WHY THE MIGRATION REGRESSION IS EXCLUDED FROM THE DB STEP. It runs
+      # `drop schema public cascade` and rebuilds from the pre-0018 history. It
+      # must own the database, so it stays a step of its own above rather than
+      # sharing a step with suites that assert against fixtures inside that
+      # schema. This is the same rule as "never set the variable at job scope",
+      # for the same reason.
+      - name: Phase 3-4 DB security suites (RLS, lifecycle, placement, academics, timetable, portals, ledger)
+        run: >-
+          pnpm --filter @sms/db exec vitest run
+          src/security src/testing/runtime-db.test.ts
+          --exclude '**/phase6-migration-regression.test.ts'
+        env:
+          RUN_RUNTIME_SECURITY_TESTS: '1'
+
+      - name: Phase 2-5 API acceptance suites (onboarding, students, lifecycle, academics, homework, attendance, portal, admin bootstrap)
+        run: pnpm --filter @sms/api exec vitest run
+        env:
+          RUN_RUNTIME_SECURITY_TESTS: '1'
+
+      - name: Worker outbox and pipeline suites (outbox, documents, import, attendance, exam results)
+        run: pnpm --filter @sms/worker exec vitest run
+        env:
+          RUN_RUNTIME_SECURITY_TESTS: '1'
+
       # B-1: WHY THE DEFAULT SUITE NEEDS A ROOT .env AT ALL.
       #
       # `pnpm test` is `pnpm turbo run test`, and Turbo 2 filters the environment it
