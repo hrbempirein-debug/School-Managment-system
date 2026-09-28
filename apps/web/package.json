@@ -9,6 +9,12 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": [".next/**"]
+    }
+  },
   "dependencies": {
     "@sms/contracts": "workspace:*",
     "@sms/ui": "workspace:*",

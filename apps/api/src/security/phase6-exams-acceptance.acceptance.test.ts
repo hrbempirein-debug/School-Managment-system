@@ -881,8 +881,22 @@ describeDb('API Phase 6 exams & results acceptance (real app + DB + Redis)', () 
       // every one of these requests would pass the route's own compare-and-swap and
       // the loser would be turned away further in, by the published-exam guard
       // trigger, which reports `mark_correction_required`. Putting the score in the
-      // CAS makes the route the serialisation point, so the client is told the truth:
-      // `mark_conflict`, reload and retry.
+      // CAS makes the route a serialisation point, so the client is told the truth:
+      // a 409 meaning "the mark changed, reload and retry".
+      //
+      // There are in fact TWO serialisation points, and which one rejects a given
+      // loser depends on the interleaving:
+      //   - the route's CAS on `marks_obtained` (exams.ts)  -> `mark_conflict`
+      //   - the `mark_corrections` old-value guard trigger (0015_exams_results.sql:994)
+      //     -> mapped to `mark_correction_stale`
+      // The guard runs on the INSERT, which is *before* the route's UPDATE, so a
+      // loser whose INSERT happens to land after the winner's UPDATE is rejected by
+      // the guard and never reaches the CAS. Both codes carry the same meaning
+      // ("the mark changed since this correction was prepared; reload and retry"),
+      // so this test accepts either and does not pin a coin flip.
+      //
+      // Asserting the exact set still has teeth: a status-only guard would surface
+      // `mark_correction_required`, which is deliberately NOT in the allowed set.
       const attempts = [71, 73, 77, 79];
       const results = await Promise.all(
         attempts.map((score) =>
@@ -899,7 +913,10 @@ describeDb('API Phase 6 exams & results acceptance (real app + DB + Redis)', () 
       expect(created.length).toBeGreaterThan(0);
 
       // Every loser is a concurrency conflict, never a leaked storage-layer code.
-      for (const c of conflicts) expect(envelope(c)?.code).toBe('mark_conflict');
+      const conflictCodes = new Set(['mark_conflict', 'mark_correction_stale']);
+      for (const c of conflicts) {
+        expect(conflictCodes.has(envelope(c)?.code as string)).toBe(true);
+      }
 
       // The ledger stays a faithful record: the accepted corrections each observed a
       // distinct previous score, so the audit chain old→new has no forks, and the

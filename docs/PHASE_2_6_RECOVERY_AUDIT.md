@@ -402,7 +402,7 @@ section is the outcome.
 | P2 navigation references missing pages | **fixed** | 72 `apps/web` files recovered so all 13 nav hrefs resolve, plus `nav-routes.test.ts` which walks the real route tree so a future gap fails the build. |
 | P3 `APP_ENCRYPTION_KEY` validated but unused | **recorded, not changed** | Still unused. Recorded here so it is not mistaken for working encryption. Out of scope to invent a consumer. |
 | 16 of 63 test files unreachable from `pnpm test` | **fixed** | `@sms/web`, `@sms/core`, `@sms/permissions`, `@sms/storage` test tasks registered in `package.json` and the Turbo graph. |
-| 38 of 42 gated suites not runnable in CI | **fixed** | Three aggregate gate steps added to `.github/workflows/phase6-security.yml`. |
+| 38 of 42 gated suites not runnable in CI | **fixed in config, unverified in CI** | Three aggregate gate steps added to `.github/workflows/phase6-security.yml`. Every step's exact command was executed locally and passes, **but the workflow has never run on a real CI runner** — this repository has no git remote. See §13. |
 
 ### Additional defects found and fixed during recovery
 
@@ -419,12 +419,146 @@ section is the outcome.
   suites' rows. Both now scope to their own fixture users.
 - **Two suites' comments named the wrong database** (`school_saas_dev`); they run
   against the disposable `school_saas_test`.
+- **A concurrency test in the F-02 gate was pinned to a coin flip.** Re-validation
+  caught `phase6-exams-acceptance.acceptance.test.ts` → *"serialises concurrent
+  corrections on the score, not just the status (F-02)"* failing roughly 1 run in 5 with
+  `expected 'mark_correction_stale' to be 'mark_conflict'`. The cause is real and is not
+  a test-only artefact: **there are two legitimate serialisation points for the same
+  logical conflict**, and which one rejects a given loser depends purely on the
+  interleaving.
+  - The route's compare-and-swap on `marks_obtained`
+    (`apps/api/src/routes/school/exams.ts:1390-1413`) → `mark_conflict`.
+  - The `mark_corrections` old-value guard trigger, which runs on the **INSERT**
+    (`packages/db/migrations/0015_exams_results.sql:994`), i.e. *before* the route's
+    UPDATE — mapped to `mark_correction_stale` at `apps/api/src/routes/school/util.ts:109`.
+    A loser whose INSERT lands after the winner's UPDATE is therefore turned away by the
+    guard and never reaches the CAS at all.
+  Both carry the same meaning ("the mark changed; reload and retry"), so the test was
+  asserting which of two valid mechanisms won a race. The assertion now accepts the
+  exact set `{mark_conflict, mark_correction_stale}`, which keeps its teeth: a
+  status-only guard still surfaces `mark_correction_required`, which is deliberately not
+  in the set. Verified by negative control — removing the score predicate from the CAS
+  fails the test again (1 failed | 37 passed), so the loosened assertion still catches
+  the F-02 regression it exists to catch. Stability after the fix: 8/8 consecutive runs
+  of the F-02 file and 4/4 of the full 468-test API suite, against 1-in-5 failing before.
+  `mark_correction_stale` remains asserted by no test; see the open item in §13.
+- **The Turbo build cache was silently broken for the whole repo.** `turbo.json`
+  declared `"outputs": ["dist/**"]` for the `build` task, but `tsconfig.base.json` sets
+  `"noEmit": true` and neither `apps/api` nor `apps/worker` overrode it, so their
+  `build` scripts (`tsc -p tsconfig.json`) are typecheck gates that emit nothing. The
+  pattern therefore matched nothing for all three build tasks, which produced
+  `WARNING no output files found for task ...` on every build. The practical cost was
+  on `@sms/web`: `next build` emits `.next/**`, which the `dist/**` pattern did not
+  cover, so **the web bundle was never cached and every build re-ran it in full**
+  (1m21s forced vs 70ms cached after the fix). `turbo.json` now declares `outputs: []`
+  for the typecheck-only tasks, and `apps/web/package.json` declares
+  `"tasks": { "build": { "outputs": [".next/**"] } }` for the one task that really
+  produces artifacts. The dead `"outDir": "dist"` in both tsconfigs was removed rather
+  than left to imply an artifact that never appears. The `build` script name is
+  misleading for `apps/api`/`apps/worker` but was not renamed: `^build` is an edge in
+  the Turbo graph and in CI, so renaming it would be a wider change than the defect
+  warrants.
 
-### Environment note (not a code defect)
+### Environment notes (not code defects)
 
-The 23 `apps/worker/src/outbox-integration.test.ts` cases need a reachable Redis. On this
-host Redis runs inside WSL and answers `PONG` there, but Windows-side ioredis received
-`ECONNREFUSED` intermittently because the WSL relay only forwards while the VM is
-actively running. Holding the VM awake with a background `wsl` keep-alive makes the relay
-stable, and the suite then passes 23/23. This was an environment problem, not a product
-defect; CI provisions its own Redis 7 service and is unaffected.
+- **Redis.** The 23 `apps/worker/src/outbox-integration.test.ts` cases need a reachable
+  Redis. On this host Redis runs inside WSL and answers `PONG` there, but Windows-side
+  ioredis received `ECONNREFUSED` intermittently because the WSL relay only forwards
+  while the VM is actively running. Holding the VM awake with a background `wsl`
+  keep-alive makes the relay stable, and the suite then passes 23/23. This was an
+  environment problem, not a product defect; CI provisions its own Redis 7 service and
+  is unaffected.
+- **`school_saas_dev` was mutated by a smoke test, and the change is retained.**
+  Verifying the new `pnpm platform:bootstrap-admin` end to end caused it to run against
+  the development database, because `.env` already defines `PLATFORM_ADMIN_EMAIL` and
+  `PLATFORM_ADMIN_PASSWORD`. The command behaved exactly as designed: it created the
+  `platform_admin` role and its 8 permissions, assigned that role to the pre-existing
+  `admin@school.local` account, wrote one `system`-actor `platform.admin_bootstrap`
+  audit row, and **did not rotate or set the existing account's password**. No
+  credential was overwritten and no existing row was destroyed. This is the intended
+  effect of the command, the operator was asked and chose to keep it, and the audit row
+  is deliberately not deleted. It is recorded here so the privileged account in the dev
+  database is a known, intentional state rather than a surprise.
+
+---
+
+## 12. Final validation
+
+Run in this order on the recovered tree, against real PostgreSQL and a live Redis.
+
+| Step | Command | Result |
+| --- | --- | --- |
+| 1 | `pnpm install --frozen-lockfile` | pass; lockfile verified, 373 entries |
+| 2 | `pnpm typecheck` | 17/17 tasks |
+| 3 | `pnpm build` | 3/3 tasks, no Turbo output warnings |
+| 4 | `pnpm test` | 8/8 tasks (runtime suites self-skip by design) |
+| 5 | `pnpm db:migrate` | dev advanced 16 → 20; second run reported up to date |
+| 6 | migration regression (destructive, own DB) | 5/5 |
+| 7 | `packages/db` suites (16 files) | 323/323 |
+| 8 | `apps/api` suites (22 files) | 468/468 |
+| 9 | `apps/worker` suites (7 files) | 98/98 |
+| | **runtime security total** | **46 files / 894 tests** |
+
+Steps 6–9 ran sequentially with `RUN_RUNTIME_SECURITY_TESTS=1` set on each command only.
+`pnpm test` was run without it, confirming the default `pnpm test` path does not
+accidentally execute the destructive suite.
+
+**Live confirmation of the P0 on the real database**, not only in the test fixture: after
+`pnpm db:migrate`, `school_app_rw` → `schema_migrations` reports `SELECT`, `INSERT`,
+`UPDATE` and `DELETE` all **false**, `PUBLIC` **false**, and 20 migrations recorded.
+
+**Committed-state check.** The only untracked files are the 8 declared scratch/probe
+files. Every `*.test.ts` on disk is tracked (api 22/22, worker 7/7, web 14/14, db 20/20,
+core 1/1, permissions 1/1, storage 1/1), and no untracked `.ts`/`.tsx`/`.sql`/`.yml`
+exists outside that scratch set. The committed tree is therefore self-sufficient; the
+suites do not depend on anything left on disk but uncommitted.
+
+**Every new test was proven to have teeth** by a deliberate negative control, because a
+green test that cannot fail is worth nothing:
+
+| Control | Expected result | Observed |
+| --- | --- | --- |
+| Re-grant `schema_migrations` to the runtime role | P0 suite must fail | failed as designed |
+| Inject a nav href to a non-existent route | dead-link test must fail | failed, caught the bad href |
+| Change the detail response so the contract no longer parses | contract test must fail | failed on the mismatch |
+| Introduce password rotation into the bootstrap | idempotency suite must fail | failed on the rotation |
+| Misclassify a worker event's handling | registry suite must fail | 5/8 events failed |
+
+---
+
+## 13. Verdict: NO-GO
+
+The recovery itself is complete and every gate that can be run locally is green. It is
+still **NO-GO**, for a reason that is not about code quality:
+
+1. **The CI gate is unverified.** `.github/workflows/phase6-security.yml` has never
+   executed on a real runner because this repository has no git remote. All 7 gated
+   steps' exact commands were executed locally with the same environment and all pass,
+   so the steps are known to be *correct*; but "correct commands" and "an enforced gate"
+   are different claims, and only the first is proven. Until a runner executes the
+   workflow, the gate is an assertion, not a control. The operator reviewed this and
+   chose to accept the local evidence with the claim marked unverified rather than
+   create a remote.
+
+2. **P3 remains open.** `APP_ENCRYPTION_KEY` is declared and validated in
+   `packages/config/src/index.ts` and read by nothing; `auth_identities.secret_enc` is
+   likewise never written or read (its only other appearance is the audit redaction
+   list in `packages/audit/src/index.ts`). So no third-party secret is encrypted at
+   rest. This is pre-existing and was deliberately not changed — inventing a consumer
+   for the key would have been scope creep — but it is a real open finding, not a
+   documentation note.
+
+3. **One logical conflict returns two client-facing error codes.** A concurrent mark
+   correction is reported as `mark_conflict` or `mark_correction_stale` depending on the
+   interleaving (see §11). Both are 409 with equivalent messages, and the test now
+   accepts either, so nothing is failing. But a client that switches on `code` will
+   behave differently across runs for the same condition, and `mark_correction_stale` is
+   asserted by no test. Unifying the two onto one code is a public-contract decision, so
+   it was reported rather than changed unilaterally. Recommended: map the guard to
+   `mark_conflict` (it is the same condition) and delete the redundant alias.
+
+To reach GO: run `.github/workflows/phase6-security.yml` on a real runner and attach the
+result, either implement `APP_ENCRYPTION_KEY` consumption or record an explicit,
+reviewed risk acceptance for unencrypted third-party secrets at rest, and decide whether
+to unify the two concurrent-correction error codes.
+
