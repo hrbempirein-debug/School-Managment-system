@@ -15,6 +15,7 @@ import { writeSession, type RedisSession } from '@sms/auth';
 import { createRedis } from '@sms/redis';
 import { buildApp } from '../app.js';
 import { createTenantTransaction } from '../routes/tenants.js';
+import { mapDomainError } from '../routes/school/util.js';
 
 /**
  * Phase 6 API acceptance — the roadmap's own acceptance line:
@@ -884,19 +885,21 @@ describeDb('API Phase 6 exams & results acceptance (real app + DB + Redis)', () 
       // CAS makes the route a serialisation point, so the client is told the truth:
       // a 409 meaning "the mark changed, reload and retry".
       //
-      // There are in fact TWO serialisation points, and which one rejects a given
-      // loser depends on the interleaving:
+      // There are TWO independent serialisation points for this one logical
+      // condition, and which one rejects a given loser depends on the interleaving:
       //   - the route's CAS on `marks_obtained` (exams.ts)  -> `mark_conflict`
-      //   - the `mark_corrections` old-value guard trigger (0015_exams_results.sql:994)
-      //     -> mapped to `mark_correction_stale`
-      // The guard runs on the INSERT, which is *before* the route's UPDATE, so a
-      // loser whose INSERT happens to land after the winner's UPDATE is rejected by
-      // the guard and never reaches the CAS. Both codes carry the same meaning
-      // ("the mark changed since this correction was prepared; reload and retry"),
-      // so this test accepts either and does not pin a coin flip.
+      //   - the `mark_corrections` old-value guard trigger (0015_exams_results.sql),
+      //     which runs on the INSERT — i.e. BEFORE the route's UPDATE — so a loser
+      //     whose INSERT lands after the winner's UPDATE never reaches the CAS.
+      // The guard is mapped onto the same public code, so the client contract is
+      // deterministic: a concurrent correction conflict is ALWAYS `mark_conflict`,
+      // never a second code that varies with thread timing. Do not widen this to a
+      // set: a second accepted code would reintroduce the nondeterminism.
       //
-      // Asserting the exact set still has teeth: a status-only guard would surface
-      // `mark_correction_required`, which is deliberately NOT in the allowed set.
+      // Asserting the exact code still has teeth. A status-only guard would surface
+      // `mark_correction_required`, which is not `mark_conflict`, so removing the
+      // score predicate from the CAS still fails this test (negative-control
+      // verified). The deterministic guard-path proof is the sibling test below.
       const attempts = [71, 73, 77, 79];
       const results = await Promise.all(
         attempts.map((score) =>
@@ -912,11 +915,9 @@ describeDb('API Phase 6 exams & results acceptance (real app + DB + Redis)', () 
       expect(created.length + conflicts.length).toBe(attempts.length);
       expect(created.length).toBeGreaterThan(0);
 
-      // Every loser is a concurrency conflict, never a leaked storage-layer code.
-      const conflictCodes = new Set(['mark_conflict', 'mark_correction_stale']);
-      for (const c of conflicts) {
-        expect(conflictCodes.has(envelope(c)?.code as string)).toBe(true);
-      }
+      // Every loser is the same concurrency conflict, never a leaked storage-layer
+      // code and never a timing-dependent second code.
+      for (const c of conflicts) expect(envelope(c)?.code).toBe('mark_conflict');
 
       // The ledger stays a faithful record: the accepted corrections each observed a
       // distinct previous score, so the audit chain old→new has no forks, and the
@@ -937,6 +938,87 @@ describeDb('API Phase 6 exams & results acceptance (real app + DB + Redis)', () 
       expect(Number(ledger[ledger.length - 1]!.new_marks_obtained)).toBe(
         Number(stored.marks_obtained),
       );
+    });
+
+    it('exposes mark_conflict for the INSERT old-value guard, and keeps both guards', async () => {
+      // The concurrency test above proves the route CAS path. That test cannot prove
+      // the OTHER path deterministically, because which of the two guards rejects a
+      // given loser is a race. This test pins the guard path on its own, by provoking
+      // the real trigger directly and asserting the public code it maps to.
+      //
+      // Both serialization defences must remain, so assert their existence too: a
+      // future change that drops either one must fail here, not silently narrow the
+      // defence to a single point.
+      const trg = await one(
+        migratorDb,
+        sql`select count(*)::int as n from pg_trigger
+              where tgname = 'mark_corrections_validate_trg' and not tgisinternal`,
+      );
+      expect(trg.n).toBeGreaterThan(0);
+
+      // Provoke the guard for real: a correction row whose old_marks_obtained does not
+      // match the mark it claims to correct. Everything else is valid, so the
+      // old-value branch is the one that fires (0015_exams_results.sql).
+      const markRow = await one(
+        migratorDb,
+        sql`select mk.exam_subject_id, mk.student_id, mk.marks_obtained, es.max_marks
+              from marks mk
+              join exam_subjects es on es.tenant_id = mk.tenant_id and es.id = mk.exam_subject_id
+              where mk.id = ${markId}`,
+      );
+      const current = Number(markRow.marks_obtained);
+      const maxMarks = Number(markRow.max_marks);
+      // A value that is definitely NOT the mark's current score, so the old-value
+      // branch is the one that fires.
+      const staleOld = current + 1 <= maxMarks ? current + 1 : current - 1;
+      // A legal new score, distinct from staleOld, so this is a well-formed
+      // correction whose only defect is the stale old value.
+      let newValue = current >= maxMarks ? current - 1 : current + 1;
+      if (newValue === staleOld) newValue = staleOld + 1 <= maxMarks ? staleOld + 1 : staleOld - 1;
+
+      let raised: (Error & { code?: string; pgcode?: string; message: string }) | null = null;
+      try {
+        await migratorClient.query(
+          `insert into mark_corrections
+             (tenant_id, mark_id, exam_id, exam_subject_id, student_id,
+              old_marks_obtained, new_marks_obtained, reason, corrected_by)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [
+            tenantAId,
+            markId,
+            examId,
+            markRow.exam_subject_id,
+            markRow.student_id,
+            staleOld.toFixed(2),
+            newValue.toFixed(2),
+            'F-02 guard-path probe',
+            uid.principal,
+          ],
+        );
+      } catch (err) {
+        raised = err as Error & { code?: string; pgcode?: string };
+      }
+      // The guard is not optional: the bad row must be refused.
+      expect(raised).toBeTruthy();
+      expect(raised!.pgcode ?? raised!.code).toBe('55000');
+      expect(raised!.message).toMatch(/old value does not match the mark/i);
+
+      // ...and it must surface as the same public code as the route CAS, so the
+      // client contract is deterministic regardless of which guard won the race.
+      const mapped = mapDomainError(raised);
+      expect(mapped.status).toBe(409);
+      expect((mapped as unknown as { code?: string }).code).toBe('mark_conflict');
+      // No storage-layer text leaks to the client.
+      expect(mapped.message).toBe('The mark changed concurrently; reload and retry');
+
+      // The status guard is a DIFFERENT condition and must keep its own code, or
+      // this normalization would have erased a meaningful distinction. `mapDomainError`
+      // reads `code` (the SQLSTATE), which is what `pg` puts on a DatabaseError.
+      const statusGuard = mapDomainError({
+        code: '55000',
+        message: 'a published mark can only be changed through the correction workflow',
+      });
+      expect((statusGuard as unknown as { code?: string }).code).toBe('mark_correction_required');
     });
   });
 

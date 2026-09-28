@@ -106,7 +106,14 @@ const DOMAIN_ERRORS: ReadonlyArray<{ re: RegExp; code: string; status: number; m
   { re: /corrected mark .* exceeds max_marks/i, code: 'mark_exceeds_max', status: 409, message: 'Corrected marks cannot exceed the maximum marks for this exam subject' },
   { re: /the correction workflow applies to published results only/i, code: 'mark_correction_not_published', status: 409, message: 'The correction workflow applies to published results only' },
   { re: /mark correction must describe the corrected mark/i, code: 'mark_correction_mismatch', status: 409, message: 'Mark correction does not describe the corrected mark' },
-  { re: /mark correction old value does not match the mark/i, code: 'mark_correction_stale', status: 409, message: 'The mark changed since this correction was prepared; reload and retry' },
+  // Concurrency conflict, normalised. The `mark_corrections` old-value guard
+  // (trg in 0015_exams_results.sql) and the route's own compare-and-swap on
+  // `marks_obtained` (exams.ts) are two independent serialisation points for the SAME
+  // logical condition. The guard runs on the INSERT, so a loser whose INSERT lands
+  // after the winner's UPDATE is rejected here and never reaches the CAS. Both must
+  // therefore expose one public code, or a client switching on `code` would see
+  // different answers for one condition depending on interleaving.
+  { re: /mark correction old value does not match the mark/i, code: 'mark_conflict', status: 409, message: 'The mark changed concurrently; reload and retry' },
   { re: /mark corrections are append-only/i, code: 'mark_correction_immutable', status: 409, message: 'Mark corrections are append-only' },
   { re: /marks must be entered by an active membership in this tenant/i, code: 'mark_entry_inactive', status: 409, message: 'Marks must be entered by an active membership in this school' },
   { re: /a correction must be made by an active membership in this tenant/i, code: 'mark_correction_inactive', status: 409, message: 'A correction must be made by an active membership in this school' },
