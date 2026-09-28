@@ -16,6 +16,17 @@ import {
 } from './runtime-db.js';
 
 export default async function setup(): Promise<void> {
+  // The default `pnpm test` path is pure unit tests: it touches no database. A fresh
+  // clone has no `.env` (it is gitignored) and therefore no `DATABASE_URL_TEST`, so
+  // resolving it unconditionally made `pnpm test` fail on a clean checkout for reasons
+  // unrelated to the tests actually running. Only the opt-in runtime suites need the
+  // disposable database, so only they pay for it.
+  //
+  // This is a no-op ONLY when the opt-in is absent. If the opt-in IS requested, the
+  // existing strict validation still runs and still refuses to fall back to the
+  // development database.
+  if (process.env.RUN_RUNTIME_SECURITY_TESTS !== '1') return;
+
   const urls = resolveRuntimeDatabaseUrls();
 
   // Fail before connecting to anything if the target is not disposable.

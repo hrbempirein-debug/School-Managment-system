@@ -13,4 +13,10 @@
  */
 import { applyRuntimeDatabaseEnv, resolveRuntimeDatabaseUrls } from './runtime-db.js';
 
-applyRuntimeDatabaseEnv(resolveRuntimeDatabaseUrls());
+// Mirrors the opt-in guard in `global-setup.ts`. Without it, every worker in a default
+// `pnpm test` run would throw on a clean checkout that has no `.env`, failing the whole
+// package for tests that never touch a database. When the opt-in IS set, the strict
+// resolution below still runs and still refuses the development database.
+if (process.env.RUN_RUNTIME_SECURITY_TESTS === '1') {
+  applyRuntimeDatabaseEnv(resolveRuntimeDatabaseUrls());
+}
