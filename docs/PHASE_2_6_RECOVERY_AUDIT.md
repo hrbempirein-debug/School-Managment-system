@@ -400,9 +400,9 @@ section is the outcome.
 | P1 report-card preview 404 | **fixed** | Client repointed to `GET /api/v1/report-cards/:id`, which returns the stored artifact. See the correction in §6: no new table, no new generation path. |
 | P1 platform-admin bootstrap absent | **fixed** | `apps/api/src/cli/bootstrap-platform-admin.ts` + `pnpm platform:bootstrap-admin`. |
 | P2 navigation references missing pages | **fixed** | 72 `apps/web` files recovered so all 13 nav hrefs resolve, plus `nav-routes.test.ts` which walks the real route tree so a future gap fails the build. |
-| P3 `APP_ENCRYPTION_KEY` validated but unused | **recorded, not changed** | Still unused. Recorded here so it is not mistaken for working encryption. Out of scope to invent a consumer. |
+| P3 `APP_ENCRYPTION_KEY` validated but unused | **documented as unimplemented** | The audit traced the full lifecycle and concluded this is **B: future functionality documented prematurely**, not an incomplete requirement. `docs/SECURITY.md` and `.env.example` no longer claim active encryption, and `apps/api/src/security/security-doc-claims.test.ts` (7 tests, ungated) fails if the false claim returns. See §14. |
 | 16 of 63 test files unreachable from `pnpm test` | **fixed** | `@sms/web`, `@sms/core`, `@sms/permissions`, `@sms/storage` test tasks registered in `package.json` and the Turbo graph. |
-| 38 of 42 gated suites not runnable in CI | **fixed in config, unverified in CI** | Three aggregate gate steps added to `.github/workflows/phase6-security.yml`. Every step's exact command was executed locally and passes, **but the workflow has never run on a real CI runner** — this repository has no git remote. See §13. |
+| 38 of 42 gated suites not runnable in CI | **fixed in config, unverified in CI** | Three aggregate gate steps added to `.github/workflows/phase6-security.yml`. Every step's exact command was executed locally and in a clean worktree and passes, **but the workflow has never run on a real CI runner** — this repository has no git remote. See §14 and §15. |
 
 ### Additional defects found and fixed during recovery
 
@@ -434,14 +434,13 @@ section is the outcome.
     A loser whose INSERT lands after the winner's UPDATE is therefore turned away by the
     guard and never reaches the CAS at all.
   Both carry the same meaning ("the mark changed; reload and retry"), so the test was
-  asserting which of two valid mechanisms won a race. The assertion now accepts the
-  exact set `{mark_conflict, mark_correction_stale}`, which keeps its teeth: a
-  status-only guard still surfaces `mark_correction_required`, which is deliberately not
-  in the set. Verified by negative control — removing the score predicate from the CAS
-  fails the test again (1 failed | 37 passed), so the loosened assertion still catches
-  the F-02 regression it exists to catch. Stability after the fix: 8/8 consecutive runs
-  of the F-02 file and 4/4 of the full 468-test API suite, against 1-in-5 failing before.
-  `mark_correction_stale` remains asserted by no test; see the open item in §13.
+  asserting which of two valid mechanisms won a race.
+  > **SUPERSEDED by §13.1.** The interim fix here accepted the set
+  > `{mark_conflict, mark_correction_stale}`. The final fix instead **normalized the
+  > public contract**: the guard is now mapped to `mark_conflict` and
+  > `mark_correction_stale` no longer exists. The set-based assertion was narrowed back
+  > to the single code, because a second accepted code would reintroduce the
+  > nondeterminism. Both guards remain; the test still has teeth.
 - **The Turbo build cache was silently broken for the whole repo.** `turbo.json`
   declared `"outputs": ["dist/**"]` for the `build` task, but `tsconfig.base.json` sets
   `"noEmit": true` and neither `apps/api` nor `apps/worker` overrode it, so their
@@ -499,6 +498,10 @@ Run in this order on the recovered tree, against real PostgreSQL and a live Redi
 | 9 | `apps/worker` suites (7 files) | 98/98 |
 | | **runtime security total** | **46 files / 894 tests** |
 
+> This was the state at `f9a87c2`. The closure work in §13 raised the API suite to
+> **23 files / 476 tests** (one new F-02 guard test, one new 7-case documentation
+> guard), for a final total of **902 runtime tests** — see §14.
+
 Steps 6–9 ran sequentially with `RUN_RUNTIME_SECURITY_TESTS=1` set on each command only.
 `pnpm test` was run without it, confirming the default `pnpm test` path does not
 accidentally execute the destructive suite.
@@ -526,39 +529,179 @@ green test that cannot fail is worth nothing:
 
 ---
 
-## 13. Verdict: NO-GO
+## 13. Final closure changes
 
-The recovery itself is complete and every gate that can be run locally is green. It is
-still **NO-GO**, for a reason that is not about code quality:
+Three items were open at the previous verdict. All three are now closed in code; the
+CI item is closed as *documented-unverified*, which is not the same as verified.
 
-1. **The CI gate is unverified.** `.github/workflows/phase6-security.yml` has never
-   executed on a real runner because this repository has no git remote. All 7 gated
-   steps' exact commands were executed locally with the same environment and all pass,
-   so the steps are known to be *correct*; but "correct commands" and "an enforced gate"
-   are different claims, and only the first is proven. Until a runner executes the
-   workflow, the gate is an assertion, not a control. The operator reviewed this and
-   chose to accept the local evidence with the claim marked unverified rather than
-   create a remote.
+### 13.1 Concurrency contract normalized (commit `d334591`)
 
-2. **P3 remains open.** `APP_ENCRYPTION_KEY` is declared and validated in
-   `packages/config/src/index.ts` and read by nothing; `auth_identities.secret_enc` is
-   likewise never written or read (its only other appearance is the audit redaction
-   list in `packages/audit/src/index.ts`). So no third-party secret is encrypted at
-   rest. This is pre-existing and was deliberately not changed — inventing a consumer
-   for the key would have been scope creep — but it is a real open finding, not a
-   documentation note.
+The two legitimate serialization points for one logical conflict now expose one public
+code. The `mark_corrections` old-value guard (which runs on the INSERT, therefore
+*before* the route's UPDATE) is mapped to `mark_conflict` at
+`apps/api/src/routes/school/util.ts:116`, and the redundant `mark_correction_stale`
+alias is gone. **Neither guard was removed** — the DB trigger and the route CAS both
+remain, because they defend against different interleavings.
 
-3. **One logical conflict returns two client-facing error codes.** A concurrent mark
-   correction is reported as `mark_conflict` or `mark_correction_stale` depending on the
-   interleaving (see §11). Both are 409 with equivalent messages, and the test now
-   accepts either, so nothing is failing. But a client that switches on `code` will
-   behave differently across runs for the same condition, and `mark_correction_stale` is
-   asserted by no test. Unifying the two onto one code is a public-contract decision, so
-   it was reported rather than changed unilaterally. Recommended: map the guard to
-   `mark_conflict` (it is the same condition) and delete the redundant alias.
+Contract is now: `concurrent logical correction conflict → mark_conflict`, always.
+The accepted error-code set was narrowed back to the single code, not widened.
 
-To reach GO: run `.github/workflows/phase6-security.yml` on a real runner and attach the
-result, either implement `APP_ENCRYPTION_KEY` consumption or record an explicit,
-reviewed risk acceptance for unencrypted third-party secrets at rest, and decide whether
-to unify the two concurrent-correction error codes.
+New focused coverage in the gated Phase 6 suite (39 tests, was 38):
 
+- *exposes mark_conflict for the INSERT old-value guard, and keeps both guards* —
+  asserts `mark_corrections_validate_trg` still exists, provokes the **real** trigger
+  with a stale `old_marks_obtained`, confirms PG raises `55000` with the guard text,
+  and confirms the public code and message. It also pins that the *status* guard still
+  reports `mark_correction_required`, so normalization did not erase a real distinction.
+  This test is deterministic: it does not rely on winning a race.
+
+Negative controls re-verified after the change:
+
+| Injected fault | Expected | Observed |
+| --- | --- | --- |
+| Remove the score predicate from the CAS | F-02 test must fail | **1 failed / 38 passed** |
+| Remove the status predicate from the CAS | F-02 test must fail | **1 failed / 38 passed** |
+| Revert SECURITY.md + .env.example to false claims | doc test must fail | **3 failed / 4 passed** |
+| Add a real `secretEnc` writer to `auth.service` | doc test must fail | **1 failed / 6 passed** |
+
+Stability: 8/8 consecutive Phase 6 acceptance runs in the main tree and 8/8 from a
+clean worktree, 0 failures. Before the fix the same suite failed ~1 run in 5.
+
+### 13.2 `APP_ENCRYPTION_KEY` adjudicated: case B (commit `8b5dd79`)
+
+The full lifecycle was traced rather than assumed:
+
+| Stage | Finding |
+| --- | --- |
+| Config validation | `packages/config/src/index.ts:58`, optional, no consumer |
+| Encryption implementation | **none exists** — only argon2id (hashing) and sha256 (hashing); no AES, no `createCipheriv` anywhere |
+| `auth_identities.secret_enc` | declared `text` column, nullable, never written |
+| Write paths | none (`packages/auth/src/service.ts:97` and the bootstrap CLI both omit it) |
+| Read/decrypt paths | none |
+| Tests | none; only an audit redaction entry |
+| `SECURITY.md` claim | "Encryption at rest for MFA secrets & PAT hashes: AES-256-GCM … key id stored for rotation" |
+| Supporting schema | **no `key_id` column exists**; `totp_secret_enc` named in `DATABASE_DESIGN.md` **never existed**; MFA/TOTP and PAT/machine-token are **not implemented**; `password` is the only provider |
+
+The claim was false in four independent ways, and the "MFA secrets & PAT hashes" it
+claimed to protect do not exist. Adding AES-256-GCM would have been inventing a
+consumer for a key with no feature behind it, so per the B branch: **no encryption was
+implemented.** Instead the false claims were corrected and pinned.
+
+- `docs/SECURITY.md` §13 now states passwords and tokens are *hashed, not encrypted*,
+  and marks secret encryption `NOT YET IMPLEMENTED` with what an implementation would
+  have to add.
+- `.env.example` marks the key `RESERVED / UNUSED` and notes tokens are hashed.
+- `docs/DATABASE_DESIGN.md` drops the phantom `totp_secret_enc` column and marks
+  `secret_enc` reserved/unused.
+- `apps/api/src/security/security-doc-claims.test.ts` (7 tests) runs **ungated**, so
+  the false claim cannot return even in the default `pnpm test` path.
+
+### 13.3 Fresh-clone reproducibility (commit `93ed2a4`)
+
+Found by actually cloning: `pnpm test` failed on a clean checkout with
+`DATABASE_URL_TEST is required`, because `global-setup.ts` and `setup-env.ts` resolved
+the disposable database **unconditionally** — even though the default suite touches no
+database and `.env` is gitignored. Both now no-op unless
+`RUN_RUNTIME_SECURITY_TESTS=1`.
+
+This is not a bypass: with the opt-in set and no `.env`, the suite still fails loudly
+with the original error. Verified both ways.
+
+---
+
+## 14. Clean-checkout verification
+
+Reproduced in a detached worktree at `93ed2a4` containing the intended commits only —
+no scratch files, no untracked source, no `.env`.
+
+| Check | Result |
+| --- | --- |
+| `pnpm install --frozen-lockfile` | pass |
+| `pnpm typecheck` | 17/17 |
+| `pnpm build` | 3/3, **0 Turbo warnings** |
+| `pnpm test` (no opt-in) | 8/8 |
+| `pnpm test` with no `.env` at all | 8/8 (the fresh-clone case) |
+| `pnpm db:migrate` ×3 | up to date every time |
+| Turbo web cache | 1m25s forced → 62ms cached |
+| test files tracked | **67/67** (api 23, worker 7, web 14, db 20, core 1, permissions 1, storage 1) |
+| untracked source in checkout | none |
+| secrets committed | none (`.env`, `*.pem`, `*.key` all absent) |
+| scratch files committed | none |
+
+Runtime suites from the clean checkout: db destructive 5, db aggregate 323, api 476,
+worker 98 — **902 tests**. Named groups individually: Phase 2 = 14, Phase 3 = 47,
+Phase 4 = 56, Phase 6 = 39, platform bootstrap = 16, worker outbox = 23,
+schema_migrations = 8, tenant/RLS = 12. Phase 6 ×8 consecutive: 0 failures.
+
+One known ergonomic limit, not a defect: running the report-card F2 tests via
+`vitest -t F2` fails, because they consume suite-scope fixtures built by earlier
+`it` blocks in the same file. The supported invocation (whole file) passes. This
+predates the closure work and does not affect CI, which runs whole files.
+
+---
+
+## 15. Final independent audit
+
+Answering the mandated questions as an outside reviewer.
+
+1. **Is the public concurrency error contract deterministic?** Yes. One condition, one
+   code. `mark_correction_stale` no longer exists anywhere in the tree.
+2. **Are both serialization guards still present?** Yes — the route CAS score predicate
+   and the `mark_corrections_validate_trg` DB trigger, each asserted by a test.
+3. **Does the negative control still detect a broken CAS predicate?** Yes, verified live
+   for both the score predicate and the status predicate.
+4. **Is `APP_ENCRYPTION_KEY` actually used?** **No**, and that is now documented rather
+   than implied. It is `RESERVED / UNUSED`; setting it enables nothing.
+5. **Is `auth_identities.secret_enc` populated/read?** **No.** No writer, no reader.
+6. **Does SECURITY.md describe reality?** Yes, and a test enforces it.
+7. **Are Phase 2–6 tests registered?** Yes — all 7 packages with test files are in the
+   Turbo graph and run by the default `pnpm test`.
+8. **Does the worker handle all implemented events?** Yes — 93 unique types, 9 HANDLED
+   across 8 handler instances, 84 INTENTIONALLY_NOOP, 0 unknown, pinned by test.
+9. **Is `schema_migrations` protected from the runtime role?** Yes, confirmed live on
+   the development database: SELECT/INSERT/UPDATE/DELETE all false for
+   `school_app_rw`, false for `PUBLIC`, 20 migrations recorded.
+10. **Is platform-admin bootstrap secure and idempotent?** Yes — 16 tests; migrator-only,
+    audited, no credential rotation, not reachable from `db:migrate` or `db:seed`.
+11. **Does report-card preview work?** Yes — 3 F2 tests pass, client targets the
+    existing route and the stored artifact.
+12. **Is the repository reproducible from a clean checkout?** Yes — §14.
+13. **Are all validation suites green?** Yes — 902 runtime tests plus 8/8 repeated
+    Phase 6 runs, from a clean checkout.
+14. **What remains unverified?** See below.
+
+### What is UNVERIFIED, and why
+
+**UNVERIFIED IN REAL CI.** `.github/workflows/phase6-security.yml` has never executed on
+a CI runner: this repository has **no git remote** (`git remote -v` is empty). Every
+step's commands were executed locally and in a clean worktree, and the YAML parses, but
+that proves the commands are *correct*, not that the gate is *enforced*. Specifically
+unproven: runner-side PostgreSQL and Redis service provisioning, the role/database
+bootstrap step, secret handling on the runner, and the generated-`.env` materialisation
+step.
+
+Local evidence is not converted into a CI claim anywhere in this document.
+
+---
+
+## 16. Verdict: NO-GO — CI UNVERIFIED
+
+All technical recovery issues found during this engagement are closed:
+
+- P0 migration-ledger privilege escalation — closed and confirmed on the live dev DB
+- P1 report-card preview 404 — closed
+- P1 platform-admin bootstrap absent — closed
+- P2 navigation dead links — closed
+- 16 unreachable test files — closed
+- 38 unrunnable gated suites — closed in config
+- flaky F-02 concurrency gate — closed
+- Turbo build cache broken for web — closed
+- `APP_ENCRYPTION_KEY` false encryption claim — closed (documented as unimplemented)
+- fresh-clone `pnpm test` failure — closed
+
+The verdict remains **NO-GO** solely because no CI runner has ever executed the
+workflow. This is not a code defect and cannot be fixed from inside the repository.
+
+To reach GO: establish a legitimate remote, push, and let
+`.github/workflows/phase6-security.yml` execute on a real runner, then perform the final
+independent release audit against that run.
