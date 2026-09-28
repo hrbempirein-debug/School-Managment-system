@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import type { ReportCardDetail, ResultsPortalView } from '@sms/contracts';
+import type { ReportCardDetail, ReportCardPreviewResponse, ResultsPortalView } from '@sms/contracts';
 import { Card } from '@sms/ui';
 import { clientFetch } from '@/lib/http';
 import { formatGpa, formatPercent, formatTotal, reportCardStatusLabel } from '@/lib/exams';
@@ -29,8 +29,8 @@ export function ResultsPortalView({ views }: ResultsPortalViewProps) {
     setBusy(true);
     setError(null);
     try {
-      const res = await clientFetch<{ fileUrl: string | null }>(
-        `/api/v1/report-cards/${card.id}/preview`,
+      const res = await clientFetch<ReportCardPreviewResponse>(
+        `/api/v1/report-cards/${card.id}`,
       );
       if (!res.fileUrl) {
         setError('The PDF is still being generated. Try again in a moment.');

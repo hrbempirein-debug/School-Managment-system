@@ -4,6 +4,7 @@ import { sql } from 'drizzle-orm';
 import type { Redis } from 'ioredis';
 import { getEnv } from '@sms/config';
 import { createDb, withTenant, type Db } from '@sms/db';
+import { reportCardPreviewResponseSchema } from '@sms/contracts';
 import {
   publishReportCardWithSnapshot,
   type ReportCardClient,
@@ -923,37 +924,39 @@ describeDb('API Phase 6 exams & results acceptance (real app + DB + Redis)', () 
   });
 
   // ------------------------------------------------------- F. family scoping
-  describe('F. parent result scope', () => {
-    // The portal and the transcript read REPORT CARDS, so the fixture publishes
-    // one per child. The worker is out of scope here: its own convergence is
-    // covered by apps/worker/src/exams.test.ts.
-    //
-    // The card is minted by the SHARED fixture helper, not INSERTed here. It used
-    // to be inserted as a `published` row carrying hand-written aggregates and NO
-    // subject lines at all - a state the Phase 6 schema deliberately makes
-    // impossible, because the deferred coherence trigger refuses to let a card
-    // reach `published` while its aggregate disagrees with its own snapshot. The
-    // trigger was right and the fixture was wrong, so the fixture now writes the
-    // card the way the worker writes one: draft, then lines scoped to the card's
-    // own exam, then the aggregate read back from `fn_report_card_totals()`, and
-    // only then `published`. The same helper serves the DB suite, so the two
-    // cannot drift into disagreeing about what a coherent card is.
-    const publishCard = async (studentId: string, version: number, status: string): Promise<void> => {
-      const enrollment = await one(
-        migratorDb,
-        sql`select id, class_id, section_id, academic_year_id from enrollments
-              where tenant_id = ${tenantAId} and student_id = ${studentId} and deleted_at is null`,
-      );
-      await publishReportCardWithSnapshot(migratorClient, {
-        tenantId: tenantAId,
-        examId,
-        studentId,
-        enrollmentId: enrollment.id as string,
-        version,
-        status: status === 'published' ? 'published' : 'draft',
-      });
-    };
+  // The portal and the transcript read REPORT CARDS, so the fixture publishes one per
+  // child. The worker is out of scope here: its own convergence is covered by
+  // apps/worker/src/exams.test.ts.
+  //
+  // The card is minted by the SHARED fixture helper, not INSERTed here. It used to be
+  // inserted as a `published` row carrying hand-written aggregates and NO subject
+  // lines at all - a state the Phase 6 schema deliberately makes impossible, because
+  // the deferred coherence trigger refuses to let a card reach `published` while its
+  // aggregate disagrees with its own snapshot. The trigger was right and the fixture
+  // was wrong, so the fixture now writes the card the way the worker writes one:
+  // draft, then lines scoped to the card's own exam, then the aggregate read back
+  // from `fn_report_card_totals()`, and only then `published`. The same helper serves
+  // the DB suite, so the two cannot drift into disagreeing about what a coherent card
+  // is.
+  //
+  // Declared at suite scope, not inside describe F, because F2 also needs it.
+  const publishCard = async (studentId: string, version: number, status: string): Promise<void> => {
+    const enrollment = await one(
+      migratorDb,
+      sql`select id, class_id, section_id, academic_year_id from enrollments
+            where tenant_id = ${tenantAId} and student_id = ${studentId} and deleted_at is null`,
+    );
+    await publishReportCardWithSnapshot(migratorClient, {
+      tenantId: tenantAId,
+      examId,
+      studentId,
+      enrollmentId: enrollment.id as string,
+      version,
+      status: status === 'published' ? 'published' : 'draft',
+    });
+  };
 
+  describe('F. parent result scope', () => {
     it('serves a parent their own child transcript', async () => {
       await publishCard(child, 1, 'published');
 
@@ -1002,6 +1005,131 @@ describeDb('API Phase 6 exams & results acceptance (real app + DB + Redis)', () 
       expect(list.statusCode).toBe(200);
       for (const card of list.json().items) expect(card.status).toBe('published');
       expect(list.json().items.map((c: { version: number }) => c.version)).not.toContain(2);
+    });
+  });
+
+  // ------------------------------------------------ report-card preview contract
+  //
+  // WHY THIS SUITE EXISTS. The parent portal needs a PDF URL for a published card,
+  // and the contracts package already declares exactly one shape for that response:
+  // `reportCardPreviewResponseSchema` = { reportCard, fileUrl }. The API returns that
+  // shape from `GET /api/v1/report-cards/:id`. But nothing referenced the contract
+  // anywhere, and the web client asked a THIRD path for it
+  // (`GET /api/v1/report-cards/:id/preview`) that no route ever registered - so the
+  // "Open PDF" button in the family portal was a guaranteed runtime 404, and the
+  // declared contract was free to drift from the real response.
+  //
+  // This suite closes both halves: the client is pointed at the route that exists,
+  // and the route's real body is asserted against the contract that describes it.
+  describe('F2. report-card preview response contract', () => {
+    // F2 works through `otherChild`/`otherParent`, not `child`/`parent`, and the
+    // reason is a real constraint rather than a preference for tidy ordering.
+    //
+    // `report_cards_live_draft_uq` allows at most ONE live draft per
+    // (tenant, exam, student), and `publishReportCardWithSnapshot` always starts by
+    // INSERTing the card as a draft before it publishes it. Describe F deliberately
+    // leaves `child` v2 as a draft (that is how it proves a family never sees one),
+    // so that slot is occupied for the rest of the run and any further card for
+    // `child` - published or not - is a constraint violation. `otherChild` has only a
+    // published v1, so it has a free draft slot and is the correct subject here.
+    //
+    // F2 also owns version numbers 10-12. `report_cards_student_exam_version_uq` is a
+    // real unique index, so re-using a version another describe minted is a hard
+    // failure.
+    const publishFreshCard = async (
+      studentId: string,
+      version: number,
+      status: 'published' | 'draft',
+    ): Promise<string> => {
+      await publishCard(studentId, version, status);
+      const [row] = await rows(
+        migratorDb,
+        sql`select id from report_cards
+              where tenant_id = ${tenantAId} and exam_id = ${examId}
+                and student_id = ${studentId} and version = ${version}`,
+      );
+      expect(row, `fixture did not mint a v${version} card for ${studentId}`).toBeDefined();
+      return row!.id as string;
+    };
+
+    /**
+     * Stamp a card the way the reports worker does: a `files` row, then the one-time
+     * pointer a published card is allowed to receive (0015 allows `file_id` to go from
+     * NULL once, and never to be replaced). Done as the migrator because the runtime
+     * role may not mint a `files` row for a generated artifact.
+     */
+    const stampArtifact = async (cardId: string): Promise<string> => {
+      const [file] = await rows(
+        migratorDb,
+        sql`insert into files (tenant_id, storage_key, original_name, mime, size_bytes,
+                                content_hash, visibility, owner_type, owner_id, scan_status)
+            values (${tenantAId}, ${`report-cards/${cardId}.pdf`}, ${'report-card-preview.pdf'},
+                    ${'application/pdf'}, ${4}, ${'a'.repeat(64)}, ${'tenant_portal'},
+                    ${'report_card'}, ${cardId}, ${'clean'})
+            on conflict (storage_key) do update set storage_key = excluded.storage_key
+            returning id`,
+      );
+      await rows(
+        migratorDb,
+        sql`update report_cards set file_id = ${file!.id}
+              where tenant_id = ${tenantAId} and id = ${cardId}`,
+      );
+      return file!.id as string;
+    };
+
+    it('serves a family the contract-shaped body with a null URL while pending', async () => {
+      const cardId = await publishFreshCard(otherChild, 10, 'published');
+
+      const res = await injectAs(sessions.otherParent, 'GET', `/api/v1/report-cards/${cardId}`);
+      expect(res.statusCode, JSON.stringify(res.json())).toBe(200);
+
+      // The contract is load-bearing here, not decorative: if the route's shape ever
+      // drifts, this parse fails instead of the family portal silently breaking.
+      const parsed = reportCardPreviewResponseSchema.safeParse(res.json());
+      expect(
+        parsed.success,
+        `the report-card preview response does not match reportCardPreviewResponseSchema: ${
+          parsed.success ? '' : parsed.error.message
+        }`,
+      ).toBe(true);
+      expect(parsed.data!.reportCard.id).toBe(cardId);
+
+      // A published card has no file_id until the reports worker runs. The portal
+      // renders that as "still being generated, try again", so `null` is the
+      // load-bearing value - it must not become a 404 or a fabricated URL.
+      expect(res.json().reportCard.fileId).toBeNull();
+      expect(res.json().fileUrl).toBeNull();
+    });
+
+    it('returns the stored artifact URL once the worker has stamped the card', async () => {
+      const cardId = await publishFreshCard(otherChild, 11, 'published');
+      const fileId = await stampArtifact(cardId);
+
+      const res = await injectAs(sessions.otherParent, 'GET', `/api/v1/report-cards/${cardId}`);
+      expect(res.statusCode, JSON.stringify(res.json())).toBe(200);
+      expect(res.json().reportCard.fileId).toBe(fileId);
+      expect(res.json().fileUrl).toBe('https://example.invalid/report-card.pdf');
+      expect(reportCardPreviewResponseSchema.safeParse(res.json()).success).toBe(true);
+    });
+
+    it('refuses another family and hides a draft, so the preview adds no new surface', async () => {
+      const otherCardId = await publishFreshCard(otherChild, 12, 'published');
+
+      // 403, not 404: a parent probing another family's child is a scope denial, the
+      // same way the transcript route answers.
+      const cross = await injectAs(sessions.parent, 'GET', `/api/v1/report-cards/${otherCardId}`);
+      expect(cross.statusCode).toBe(403);
+      expect(envelope(cross)?.code).toBe('results_scope_denied');
+
+      // A draft is invisible to a family through the preview path too: the owning
+      // parent gets 404, exactly as the list route omits it.
+      const draftId = await publishFreshCard(otherChild, 13, 'draft');
+      const hidden = await injectAs(
+        sessions.otherParent,
+        'GET',
+        `/api/v1/report-cards/${draftId}`,
+      );
+      expect(hidden.statusCode).toBe(404);
     });
   });
 
