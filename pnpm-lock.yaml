@@ -223,6 +223,9 @@ importers:
       '@sms/events':
         specifier: workspace:*
         version: link:../../packages/events
+      '@sms/idempotency':
+        specifier: workspace:*
+        version: link:../../packages/idempotency
       '@sms/permissions':
         specifier: workspace:*
         version: link:../../packages/permissions
@@ -291,6 +294,9 @@ importers:
 
   apps/worker:
     dependencies:
+      '@sms/audit':
+        specifier: workspace:*
+        version: link:../../packages/audit
       '@sms/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -312,6 +318,9 @@ importers:
       '@sms/redis':
         specifier: workspace:*
         version: link:../../packages/redis
+      '@sms/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
       '@sms/tenancy':
         specifier: workspace:*
         version: link:../../packages/tenancy
@@ -324,6 +333,16 @@ importers:
       ioredis:
         specifier: ^5.4.2
         version: 5.11.1
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.11.10
+        version: 8.23.1
+      pg:
+        specifier: ^8.13.1
+        version: 8.23.0
+      vitest:
+        specifier: ^3.0.5
+        version: 3.2.7(@types/node@22.20.4)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.23.15)
 
   packages/audit:
     dependencies:
@@ -442,6 +461,15 @@ importers:
       ioredis:
         specifier: ^5.4.2
         version: 5.11.1
+
+  packages/idempotency:
+    dependencies:
+      '@sms/db':
+        specifier: workspace:*
+        version: link:../db
+      drizzle-orm:
+        specifier: ^0.38.0
+        version: 0.38.4(@types/pg@8.23.1)(@types/react@19.3.0)(pg@8.23.0)(react@19.3.0)
 
   packages/jobs:
     dependencies:

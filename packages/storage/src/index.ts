@@ -83,16 +83,16 @@ export class S3StorageProvider implements StorageProvider {
   putObject(_input: { tenantId: string; key: string; data: Buffer; contentType: string }): Promise<{ key: string; size: number }> {
     return Promise.reject(new Error('S3 storage driver not implemented in Phase 1'));
   }
-  readObject(): Promise<Buffer> {
+  readObject(_tenantId: string, _key: string): Promise<Buffer> {
     return Promise.reject(new Error('S3 storage driver not implemented in Phase 1'));
   }
-  getDownloadUrl(): Promise<string> {
+  getDownloadUrl(_tenantId: string, _key: string): Promise<string> {
     return Promise.reject(new Error('S3 storage driver not implemented in Phase 1'));
   }
-  headObject(): Promise<StorageObject> {
+  headObject(_tenantId: string, _key: string): Promise<StorageObject> {
     return Promise.reject(new Error('S3 storage driver not implemented in Phase 1'));
   }
-  deleteObject(): Promise<void> {
+  deleteObject(_tenantId: string, _key: string): Promise<void> {
     return Promise.reject(new Error('S3 storage driver not implemented in Phase 1'));
   }
 }

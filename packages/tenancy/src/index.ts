@@ -150,7 +150,7 @@ export async function loadPlatformContext(
 
 /** List the user's own memberships (used by /me/memberships and tenant switching). */
 export async function listMemberships(db: Db, userId: string): Promise<MembershipSummary[]> {
-  return withGuc(db, { userId }, async (t) => {
+  const base = await withGuc(db, { userId }, async (t) => {
     const rows = await t
       .select({
         membership: memberships,
@@ -160,15 +160,56 @@ export async function listMemberships(db: Db, userId: string): Promise<Membershi
       .innerJoin(tenants, eq(memberships.tenantId, tenants.id))
       .where(eq(memberships.userId, userId))
       .execute();
+    return rows;
+  });
 
-    const summaries: MembershipSummary[] = [];
-    for (const row of rows) {
+  const summaries = new Map<
+    string,
+    {
+      id: string;
+      tenantId: string;
+      tenantName: string;
+      tenantSlug: string;
+      tenantStatus: string;
+      status: string;
+      campusId: string | null;
+      roles: { id: string; code: string; name: string; scope: string }[];
+      permissions: Set<string>;
+    }
+  >();
+  for (const row of base) {
+    summaries.set(row.membership.id, {
+      id: row.membership.id,
+      tenantId: row.tenant.id,
+      tenantName: row.tenant.name,
+      tenantSlug: row.tenant.slug,
+      tenantStatus: row.tenant.status,
+      status: row.membership.status,
+      campusId: row.membership.campusId,
+      roles: [],
+      permissions: new Set(),
+    });
+  }
+
+  // Roles and role-derived permissions are resolved per tenant: role_permissions
+  // RLS is gated on an ACTIVE tenant context (roles/membership_roles are readable
+  // through the membership link), so each tenant mints its own context ticket.
+  // app_ctx_mint() returns NULL (never throws) for a non-active membership, which
+  // fails closed and simply yields no permissions for that membership.
+  const idsByTenant = new Map<string, string[]>();
+  for (const row of base) {
+    const list = idsByTenant.get(row.membership.tenantId) ?? [];
+    list.push(row.membership.id);
+    idsByTenant.set(row.membership.tenantId, list);
+  }
+  for (const [tenantId, membershipIds] of idsByTenant) {
+    await withGuc(db, { userId, tenantId }, async (t) => {
       const links = await t
         .select()
         .from(membershipRoles)
-        .where(eq(membershipRoles.membershipId, row.membership.id))
+        .where(inArray(membershipRoles.membershipId, membershipIds))
         .execute();
-      const roleIds = links.map((l) => l.roleId);
+      const roleIds = [...new Set(links.map((l) => l.roleId))];
       const roleRows =
         roleIds.length > 0
           ? await t
@@ -177,28 +218,33 @@ export async function listMemberships(db: Db, userId: string): Promise<Membershi
               .where(inArray(roles.id, roleIds))
               .execute()
           : [];
-      const permRows =
-        roleIds.length > 0
-          ? await t
-              .select({ permission: rolePermissions.permission })
-              .from(rolePermissions)
-              .where(inArray(rolePermissions.roleId, roleIds))
-              .execute()
-          : [];
-      summaries.push({
-        id: row.membership.id,
-        tenantId: row.tenant.id,
-        tenantName: row.tenant.name,
-        tenantSlug: row.tenant.slug,
-        tenantStatus: row.tenant.status,
-        status: row.membership.status,
-        campusId: row.membership.campusId,
-        roles: roleRows,
-        permissions: permRows.map((p) => p.permission),
-      });
-    }
-    return summaries;
-  });
+      const roleBy = new Map(roleRows.map((r) => [r.id, r]));
+      const permsByRole = new Map<string, string[]>();
+      if (roleIds.length > 0) {
+        const permRows = await t
+          .select({ roleId: rolePermissions.roleId, permission: rolePermissions.permission })
+          .from(rolePermissions)
+          .where(inArray(rolePermissions.roleId, roleIds))
+          .execute();
+        for (const p of permRows) {
+          const list = permsByRole.get(p.roleId) ?? [];
+          list.push(p.permission);
+          permsByRole.set(p.roleId, list);
+        }
+      }
+      for (const link of links) {
+        const summary = summaries.get(link.membershipId);
+        if (!summary) continue;
+        const role = roleBy.get(link.roleId);
+        if (role) summary.roles.push(role);
+        for (const permission of permsByRole.get(link.roleId) ?? []) {
+          summary.permissions.add(permission);
+        }
+      }
+    });
+  }
+
+  return [...summaries.values()].map((s) => ({ ...s, permissions: [...s.permissions] }));
 }
 
 /** Verify an active membership for a specific tenant (used by tenant switching). */

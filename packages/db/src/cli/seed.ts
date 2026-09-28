@@ -56,7 +56,7 @@ export function buildSeedReport(state: SeedState): string {
   return lines.join('\n');
 }
 
-if (isMainModule()) {
+if (isMainModule(import.meta.url)) {
   const env = loadEnv();
   const state = await inspectSeedState(env.DATABASE_URL_MIGRATOR);
   console.log(buildSeedReport(state));

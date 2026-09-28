@@ -1,0 +1,344 @@
+# Phase 6 security gate.
+#
+# WHY THIS FILE EXISTS
+# The independent final re-audit of Phase 6 recorded that "nothing enforces any of
+# this": there was no CI configuration in the repository, and `pnpm test` skipped
+# every DB-backed security suite unless RUN_RUNTIME_SECURITY_TESTS=1 was set. A
+# gate that only runs when a developer remembers to ask for it is not a gate, and
+# the seven failing tests in the required suites stayed red for exactly that long.
+#
+# So this workflow does not rely on `pnpm test` to enforce any of it. It runs the
+# security suites EXPLICITLY, each in a step of its own with
+# RUN_RUNTIME_SECURITY_TESTS=1 on that step, so that:
+#   * a regression in tenant isolation fails here rather than in someone's terminal;
+#   * the migration CLI's real behaviour (the silent no-op defect) is asserted on
+#     every push, against a disposable database;
+#   * the 0018/0019 historical backfill is re-proved from a real pre-0018 database
+#     on every push, including its negative control;
+#   * the one suite that REBUILDS the database (`drop schema public cascade`) owns
+#     the database for the duration of its own step, with nothing else in flight.
+#
+# `pnpm test` is still run, last, as the default suite. It runs WITHOUT
+# RUN_RUNTIME_SECURITY_TESTS, which is what keeps the destructive suite out of a
+# parallel fan-out over a database the other packages are using.
+#
+# The Phase 6 data-integrity design is NOT exercised or asserted here. These steps
+# verify the integrity properties hold; they never modify them.
+#
+# The runtime role is deliberately provisioned WITHOUT bypassrls and WITHOUT
+# superuser, exactly as scripts/bootstrap.sql does locally, because a security
+# suite run against a role that can bypass RLS proves nothing - and that is
+# asserted below rather than assumed, failing closed.
+
+name: phase6-security
+
+on:
+  push:
+  pull_request:
+
+# A stale push tells you nothing about the commit you are looking at.
+concurrency:
+  group: phase6-security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      NODE_ENV: test
+      # The two least-privilege roles, matching scripts/bootstrap.sql. These are
+      # throwaway CI credentials for an ephemeral database.
+      MIGRATOR_PASSWORD: ci_migrator_pw
+      APP_RW_PASSWORD: ci_app_rw_pw
+      DATABASE_URL_MIGRATOR: postgresql://school_migrator:ci_migrator_pw@127.0.0.1:5432/school_saas_test
+      DATABASE_URL_APP: postgresql://school_app_rw:ci_app_rw_pw@127.0.0.1:5432/school_saas_test
+      DATABASE_URL_TEST: postgresql://school_app_rw:ci_app_rw_pw@127.0.0.1:5432/school_saas_test
+      REDIS_URL: redis://127.0.0.1:6379
+      APP_ENCRYPTION_KEY: ci_only_not_a_secret_0000000000000000
+      SESSION_PEPPER: ci_only_not_a_secret_pepper
+      PLATFORM_ADMIN_EMAIL: admin@school.local
+      PLATFORM_ADMIN_PASSWORD: ci_only_not_a_secret_pw
+      STORAGE_DRIVER: fs
+      # NOTE: RUN_RUNTIME_SECURITY_TESTS is deliberately NOT set at job level.
+      #
+      # It used to be, and that made the final `pnpm test` step deterministically
+      # red: `pnpm test` is `pnpm turbo run test`, which fans the package test tasks
+      # out in PARALLEL, and with the variable inherited it also executed
+      # `src/security/phase6-migration-regression.test.ts`, whose beforeAll runs
+      # `drop schema public cascade`. Every package points at the ONE disposable
+      # database, so that drop tore down the API and worker suites' fixtures while
+      # they were running (observed failures: 1 test on one cold run, 10 on the next).
+      #
+      # The variable is now set on the four gate steps below and nowhere else, so the
+      # destructive suite can only ever run as a step of its own, against the whole
+      # database, with nothing else in flight. The gate itself is unchanged: every
+      # security suite is still mandatory and still runs.
+      #
+      # RULE, and the reason it is a rule rather than a preference:
+      # RUN_RUNTIME_SECURITY_TESTS=1 MUST NOT be applied globally, at job scope or
+      # to a parallel Turbo test task, because the migration regression harness
+      # REBUILDS the shared disposable schema.
+      #
+      # All three packages point DATABASE_URL_TEST at the SAME database, and
+      # `pnpm test` is `pnpm turbo run test`, which fans the package test tasks out
+      # in PARALLEL. With the variable inherited, `src/security/phase6-migration-
+      # regression.test.ts` runs `drop schema public cascade` while the API and
+      # worker suites are asserting against fixtures inside that schema. The
+      # measured failure is not subtle: the full suite fails nondeterministically
+      # with 5 of 8 turbo tasks succeeding - a migrator/writer deadlock in
+      # @sms/db, 27 of 35 API acceptance failures reading `Invalid uuid` for
+      # examId/examTypeId/gradingScaleId (a tenant's fixture rows destroyed
+      # mid-assertion), and 5 worker failures.
+      #
+      # Do not "fix" that by relaxing the regression suite, by giving it a
+      # narrower scope, or by skipping it. The correct shape is what is here: each
+      # DB-backed security suite runs as its own SEQUENTIAL step, with the variable
+      # set on that step alone.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Matches packageManager in the root package.json.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.4.1
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches engines.node (>=22) in the root package.json.
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Roles and both databases, created by the SAME script an operator runs
+      # locally, so CI cannot drift from the documented bootstrap.
+      - name: Bootstrap database roles and databases
+        run: |
+          psql "postgresql://postgres:postgres@127.0.0.1:5432/postgres" \
+            -v ON_ERROR_STOP=1 \
+            -v MIGRATOR_PASSWORD="$MIGRATOR_PASSWORD" \
+            -v APP_RW_PASSWORD="$APP_RW_PASSWORD" \
+            -f scripts/bootstrap.sql
+
+      # The runtime role must not be able to bypass RLS, or every isolation
+      # assertion below would be vacuous. Asserted, not assumed - and FAILING CLOSED.
+      #
+      # It used to be `select case when rolsuper or rolbypassrls then 'FAIL: …' … end`
+      # run through `psql -tAc`. psql exits 0 for a query that executes, so that
+      # version PRINTED "FAIL: runtime role can bypass RLS" and the step still passed:
+      # a runtime role provisioned with BYPASSRLS or SUPERUSER would have been
+      # announced and ignored, which is the exact vacuity this file exists to prevent.
+      #
+      # This is a DO block that RAISEs. `ON_ERROR_STOP=1` turns the error into a
+      # non-zero psql exit, `set -euo pipefail` turns a non-zero psql exit into a
+      # non-zero step, so an unsafe role fails the job instead of annotating it.
+      # The three states that must not survive are: no such role, SUPERUSER, BYPASSRLS.
+      #
+      # Fed by heredoc rather than `-c`, because `$$` inside a double-quoted shell
+      # string is the shell's own PID; `$assert$` is an explicit dollar-quote tag and
+      # the quoted delimiter means the shell does not touch the body at all.
+      - name: Assert the runtime role cannot bypass RLS
+        run: |
+          set -euo pipefail
+          psql "postgresql://postgres:postgres@127.0.0.1:5432/school_saas_test" \
+            -v ON_ERROR_STOP=1 \
+            -f - <<'SQL'
+          DO $assert$
+          DECLARE
+              v_super  boolean;
+              v_bypass boolean;
+          BEGIN
+              SELECT rolsuper, rolbypassrls
+                INTO v_super, v_bypass
+                FROM pg_roles
+               WHERE rolname = 'school_app_rw';
+
+              IF NOT FOUND THEN
+                  RAISE EXCEPTION 'fail-closed: role school_app_rw does not exist, so every RLS assertion in this workflow would be vacuous';
+              END IF;
+
+              IF v_super THEN
+                  RAISE EXCEPTION 'fail-closed: role school_app_rw is SUPERUSER, so it bypasses RLS and the isolation suites prove nothing';
+              END IF;
+
+              IF v_bypass THEN
+                  RAISE EXCEPTION 'fail-closed: role school_app_rw has BYPASSRLS, so it bypasses RLS and the isolation suites prove nothing';
+              END IF;
+
+              RAISE NOTICE 'ok: school_app_rw is neither SUPERUSER nor BYPASSRLS';
+          END
+          $assert$;
+          SQL
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      # The defect this step exists for: `pnpm db:migrate` used to exit 0 in silence
+      # and apply nothing, because isMainModule() compared argv[1] against
+      # paths.ts's own import.meta.url. Asserted against a DISPOSABLE database, so
+      # this step can never mutate a developer's database.
+      - name: Migration CLI applies every migration, then reports up to date
+        run: |
+          set -euo pipefail
+          out="$(pnpm db:migrate)"
+          echo "$out"
+          # A silent no-op must be impossible: the applied count has to be reported.
+          echo "$out" | grep -q "migrations applied:"
+          applied="$(echo "$out" | sed -n 's/.*migrations applied: \([^|]*\)|.*/\1/p' | xargs)"
+          if [ "$applied" = "(none)" ]; then
+            echo "first run applied nothing - the CLI is still a silent no-op" >&2
+            exit 1
+          fi
+          # Second run must be an explicit no-op, not silence.
+          out2="$(pnpm db:migrate)"
+          echo "$out2"
+          echo "$out2" | grep -q "already applied:"
+          echo "$out2" | grep -qi "up to date"
+
+      # MANDATORY. Rebuilds the disposable database from nothing and re-proves the
+      # 0018/0019 backfill against a real pre-0018 world, negative control included.
+      # This is the only step that may drop the schema, which is exactly why it is a
+      # step of its own rather than part of a parallel suite.
+      - name: Migration regression (0018/0019 backfill, with negative control)
+        run: pnpm --filter @sms/db exec vitest run src/security/phase6-migration-regression.test.ts
+        env:
+          RUN_RUNTIME_SECURITY_TESTS: '1'
+
+      # MANDATORY. The rest of the gate, one suite per step so a failure names itself.
+      - name: DB security suite (RLS isolation, publication, snapshot integrity)
+        run: pnpm --filter @sms/db exec vitest run src/security/phase6-exams.test.ts
+        env:
+          RUN_RUNTIME_SECURITY_TESTS: '1'
+
+      - name: API security acceptance suite
+        run: pnpm --filter @sms/api exec vitest run src/security/phase6-exams-acceptance.acceptance.test.ts
+        env:
+          RUN_RUNTIME_SECURITY_TESTS: '1'
+
+      - name: Worker result-pipeline suite
+        run: pnpm --filter @sms/worker exec vitest run src/exams-result-pipeline.test.ts
+        env:
+          RUN_RUNTIME_SECURITY_TESTS: '1'
+
+      # B-1: WHY THE DEFAULT SUITE NEEDS A ROOT .env AT ALL.
+      #
+      # `pnpm test` is `pnpm turbo run test`, and Turbo 2 filters the environment it
+      # hands to a task down to `globalEnv` plus that task's own `env` list.
+      # turbo.json declares only NODE_ENV (globalEnv) and RUN_RUNTIME_SECURITY_TESTS,
+      # so the DATABASE_URL_* variables this job exports at job scope are NOT visible
+      # inside vitest. Two suites then fail before a single assertion runs:
+      #
+      #   * packages/config/src/load-env.test.ts calls loadEnv() with no injected
+      #     values, and the schema requires DATABASE_URL_MIGRATOR and DATABASE_URL_APP
+      #     -> "Invalid environment configuration - DATABASE_URL_MIGRATOR: Required;
+      #        DATABASE_URL_APP: Required";
+      #   * packages/db/src/testing/global-setup.ts calls resolveRuntimeDatabaseUrls(),
+      #     which requires DATABASE_URL_TEST and deliberately refuses to fall back
+      #     -> "DATABASE_URL_TEST is required to run the DB-backed runtime-security
+      #        suites." (in @sms/db, @sms/api and @sms/worker, all three of which wire
+      #        that globalSetup in).
+      #
+      # That is a genuine reproducibility blocker: the gate is red in a clean checkout
+      # and green only on a machine that happens to have a developer .env lying around.
+      # It is NOT fixed by adding the variables to turbo.json, because that would widen
+      # the task hash to every database URL and change Turbo's environment isolation.
+      #
+      # The project's existing convention is that these values reach the process
+      # through the git-ignored root .env: .env.example lists exactly these names, the
+      # header of scripts/bootstrap.sql tells an operator to put them there after
+      # bootstrapping, and @sms/config loads precisely that file (dotenv, at the
+      # workspace root, regardless of the package CWD pnpm uses). So this step
+      # materialises the same file in CI, from the variables the job already has.
+      # No test, no application code, no turbo.json and no schema is touched, so the
+      # failure mode being fixed is a missing FILE, not a missing or weakened check.
+      #
+      # Deliberately narrow: it writes the three variables the config/test system
+      # actually requires and nothing else. Every other value in the schema has a
+      # default, and adding more would only widen the blast radius of this step.
+      #
+      # It does NOT write RUN_RUNTIME_SECURITY_TESTS. That variable still has to be
+      # set per-step (see the four gate steps above), because the migration regression
+      # suite runs `drop schema public cascade` against the ONE shared disposable
+      # database and must never be picked up by a parallel `pnpm turbo run test`
+      # fan-out. Writing it here would reintroduce exactly the failure the long
+      # comment in the job env describes.
+      - name: Materialise the git-ignored root .env required by the default suite
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # `set -x` is deliberately NOT enabled, and nothing below echoes a value:
+          # the step must not put a credential in the log. Fail closed instead of
+          # writing a partial file that would fail later with a misleading error.
+          for name in DATABASE_URL_MIGRATOR DATABASE_URL_APP DATABASE_URL_TEST; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::${name} is not set in the job environment; refusing to write a partial .env" >&2
+              exit 1
+            fi
+          done
+
+          # The generated file must stay out of git for the whole run, not just
+          # because of the current .gitignore. Asserted, failing closed.
+          if ! git check-ignore -q .env; then
+            echo "::error::.env is not git-ignored; refusing to write credentials into the worktree" >&2
+            exit 1
+          fi
+
+          # Owner-only: this file holds CI credentials for an ephemeral database.
+          umask 077
+          {
+            printf 'DATABASE_URL_MIGRATOR=%s\n' "$DATABASE_URL_MIGRATOR"
+            printf 'DATABASE_URL_APP=%s\n' "$DATABASE_URL_APP"
+            printf 'DATABASE_URL_TEST=%s\n' "$DATABASE_URL_TEST"
+          } > .env
+
+          # Announce the KEYS only, never the values.
+          echo "wrote .env with keys: $(cut -d= -f1 .env | tr '\n' ' ')"
+
+      # The default suite still has to stay green, but it is NOT what enforces this
+      # gate - the explicit steps above are.
+      #
+      # It deliberately runs WITHOUT RUN_RUNTIME_SECURITY_TESTS, so the DB-backed
+      # suites self-skip and the destructive migration regression cannot be picked up
+      # as an ordinary parallel test against the shared database. Every suite it would
+      # have run has already run, serially, in the four steps above.
+      - name: Default test suite
+        run: pnpm test
+
+      # The .env above is generated, disposable and credential-bearing. The runner is
+      # thrown away anyway, but removing it proves the file was never part of the
+      # checkout and cannot be inherited by a later step or a cached workspace.
+      - name: Remove the generated .env
+        if: always()
+        run: rm -f .env

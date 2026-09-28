@@ -5,7 +5,10 @@ import { requireSession } from '../plugins/auth.js';
 export default async function permissionsRoutes(app: FastifyInstance) {
   app.get(
     '/api/v1/permissions',
-    { preHandler: requireSession() },
+    {
+      config: { authorization: { kind: 'authenticated' } },
+      preHandler: requireSession(),
+    },
     async () => ({
       permissions: [...PERMISSION_CATALOG],
     }),

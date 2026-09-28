@@ -16,7 +16,12 @@ export default async function authRoutes(app: FastifyInstance) {
 
   app.post(
     '/api/v1/auth/register',
-    { config: { rateLimit: { max: getEnv().RATE_REGISTER_POINTS, timeWindow: getEnv().RATE_REGISTER_DURATION_SECONDS * 1000 } } },
+    {
+      config: {
+        authorization: { kind: 'public' },
+        rateLimit: { max: getEnv().RATE_REGISTER_POINTS, timeWindow: getEnv().RATE_REGISTER_DURATION_SECONDS * 1000 },
+      },
+    },
     async (request) => {
     const body = registerRequestSchema.parse(request.body);
     const { userId } = await registerUser(app.db, {
@@ -32,7 +37,12 @@ export default async function authRoutes(app: FastifyInstance) {
 
   app.post(
     '/api/v1/auth/login',
-    { config: { rateLimit: { max: getEnv().RATE_LOGIN_POINTS, timeWindow: getEnv().RATE_LOGIN_DURATION_SECONDS * 1000 } } },
+    {
+      config: {
+        authorization: { kind: 'public' },
+        rateLimit: { max: getEnv().RATE_LOGIN_POINTS, timeWindow: getEnv().RATE_LOGIN_DURATION_SECONDS * 1000 },
+      },
+    },
     async (request, reply) => {
       const body = loginRequestSchema.parse(request.body);
       const result = await loginUser({
@@ -60,7 +70,10 @@ export default async function authRoutes(app: FastifyInstance) {
 
   app.post(
     '/api/v1/auth/logout',
-    { preHandler: [requireSession(), requireCsrf()] },
+    {
+      config: { authorization: { kind: 'authenticated' } },
+      preHandler: [requireSession(), requireCsrf()],
+    },
     async (request, reply) => {
       await logoutUser({
         db: app.db,

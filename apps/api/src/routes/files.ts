@@ -11,7 +11,10 @@ import { requireSession, requireTenantContext, requirePermission } from '../plug
 export default async function filesRoutes(app: FastifyInstance) {
   app.get(
     '/api/v1/files/:tenantId/*',
-    { preHandler: [requireSession(), requireTenantContext(), requirePermission('tenant.read')] },
+    {
+      config: { authorization: { kind: 'tenant', permission: 'tenant.read', devOnly: true } },
+      preHandler: [requireSession(), requireTenantContext(), requirePermission('tenant.read')],
+    },
     async (request, reply) => {
       const ctx = request.ctx!;
       const { tenantId } = request.params as { tenantId: string };

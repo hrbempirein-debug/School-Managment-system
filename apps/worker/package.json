@@ -7,9 +7,11 @@
     "dev": "tsx watch src/worker.ts",
     "start": "tsx src/worker.ts",
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
+    "@sms/audit": "workspace:*",
     "@sms/config": "workspace:*",
     "@sms/contracts": "workspace:*",
     "@sms/core": "workspace:*",
@@ -17,9 +19,15 @@
     "@sms/events": "workspace:*",
     "@sms/jobs": "workspace:*",
     "@sms/redis": "workspace:*",
+    "@sms/storage": "workspace:*",
     "@sms/tenancy": "workspace:*",
     "bullmq": "^5.20.0",
     "ioredis": "^5.4.2",
     "drizzle-orm": "^0.38.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.10",
+    "pg": "^8.13.1",
+    "vitest": "^3.0.5"
   }
 }

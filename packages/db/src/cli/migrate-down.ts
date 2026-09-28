@@ -89,7 +89,7 @@ export async function rollbackMigration(
   }
 }
 
-if (isMainModule()) {
+if (isMainModule(import.meta.url)) {
   const env = loadEnv();
   const args = parseArgs(process.argv.slice(2));
 

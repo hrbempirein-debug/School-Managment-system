@@ -4,11 +4,18 @@ import { JOB_NAME_TO_QUEUE } from '@sms/contracts';
 
 export { JOB_NAME_TO_QUEUE };
 
-export type JobQueueName = 'events' | 'mail';
+/**
+ * `reports` is Phase 6's artifact queue (JOB_ARCHITECTURE §2). It is separate
+ * from `events` because a report card is a heavy, idempotent artifact job, not a
+ * request/response event: it must not be blocked behind event handling and must
+ * not compete with the outbox for concurrency.
+ */
+export type JobQueueName = 'events' | 'mail' | 'reports';
 
 export interface QueueDelegates {
   events: Queue;
   mail: Queue;
+  reports: Queue;
 }
 
 function buildQueue(name: JobQueueName, redis: Redis): Queue {
@@ -27,14 +34,17 @@ export function createQueues(redis: Redis): QueueDelegates {
   return {
     events: buildQueue('events', redis),
     mail: buildQueue('mail', redis),
+    reports: buildQueue('reports', redis),
   };
 }
 
 export async function closeQueues(queues: QueueDelegates): Promise<void> {
-  await Promise.all([queues.events.close(), queues.mail.close()]);
+  await Promise.all([queues.events.close(), queues.mail.close(), queues.reports.close()]);
 }
 
 export function queueForJob(jobName: string): JobQueueName {
   const mapped = JOB_NAME_TO_QUEUE[jobName];
-  return mapped === 'mail' ? 'mail' : 'events';
+  if (mapped === 'mail') return 'mail';
+  if (mapped === 'reports') return 'reports';
+  return 'events';
 }

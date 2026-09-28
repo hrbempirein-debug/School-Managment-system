@@ -3,15 +3,22 @@ import type { FastifyInstance } from 'fastify';
 import { HttpError } from '@sms/core';
 import { currentUser, updateSessionActiveTenant } from '@sms/auth';
 import { listMemberships, findActiveMembership } from '@sms/tenancy';
-import { requireSession, requireCsrf } from '../plugins/auth.js';
+import { withTenant } from '@sms/db';
+import { attendanceRangeQuerySchema } from '@sms/contracts';
+import { requireSession, requireTenantContext, requirePermission, requireCsrf } from '../plugins/auth.js';
 import { buildMeResponse } from './shared.js';
+import { resolveHomeworkContext } from './school/homework.js';
+import { resolveAttendanceContext, resolveAttendancePortal } from './school/attendance.js';
 
 const switchSchema = z.object({ tenantId: z.string().uuid() });
 
 export default async function meRoutes(app: FastifyInstance) {
   app.get(
     '/api/v1/me',
-    { preHandler: requireSession() },
+    {
+      config: { authorization: { kind: 'authenticated' } },
+      preHandler: requireSession(),
+    },
     async (request) => {
       const auth = request.auth!;
       const [user, memberships] = await Promise.all([
@@ -23,8 +30,50 @@ export default async function meRoutes(app: FastifyInstance) {
   );
 
   app.get(
+    '/api/v1/me/homework-context',
+    {
+      config: { authorization: { kind: 'tenant', permission: 'homework.read' } },
+      preHandler: [requireSession(), requireTenantContext(), requirePermission('homework.read')],
+    },
+    async (request) => {
+      const ctx = request.ctx!;
+      const context = await withTenant(app.db, ctx, (tx) => resolveHomeworkContext(tx, ctx));
+      return { context };
+    },
+  );
+
+  app.get(
+    '/api/v1/me/attendance-context',
+    {
+      config: { authorization: { kind: 'tenant', permission: 'attendance.read' } },
+      preHandler: [requireSession(), requireTenantContext(), requirePermission('attendance.read')],
+    },
+    async (request) => {
+      const ctx = request.ctx!;
+      const context = await withTenant(app.db, ctx, (tx) => resolveAttendanceContext(tx, ctx));
+      return { context };
+    },
+  );
+
+  app.get(
+    '/api/v1/me/attendance',
+    {
+      config: { authorization: { kind: 'tenant', permission: 'attendance.read' } },
+      preHandler: [requireSession(), requireTenantContext(), requirePermission('attendance.read')],
+    },
+    async (request) => {
+      const ctx = request.ctx!;
+      const query = attendanceRangeQuerySchema.parse(request.query);
+      return withTenant(app.db, ctx, (tx) => resolveAttendancePortal(tx, ctx, query));
+    },
+  );
+
+  app.get(
     '/api/v1/me/memberships',
-    { preHandler: requireSession() },
+    {
+      config: { authorization: { kind: 'authenticated' } },
+      preHandler: requireSession(),
+    },
     async (request) => {
       const auth = request.auth!;
       const memberships = await listMemberships(app.db, auth.session.userId);
@@ -46,7 +95,10 @@ export default async function meRoutes(app: FastifyInstance) {
 
   app.post(
     '/api/v1/tenants/switch',
-    { preHandler: [requireSession(), requireCsrf()] },
+    {
+      config: { authorization: { kind: 'authenticated' } },
+      preHandler: [requireSession(), requireCsrf()],
+    },
     async (request) => {
       const auth = request.auth!;
       const body = switchSchema.parse(request.body);

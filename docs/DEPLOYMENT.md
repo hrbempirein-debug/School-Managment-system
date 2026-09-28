@@ -76,7 +76,13 @@ stdout JSON logs → collector; `/metrics` scraped; alerts on readiness fail, er
 
 ## 9. Local dev commands (Phase 1 defines exact scripts)
 
-Target scripts (repo root): `pnpm dev` (api+web+worker watch), `pnpm db:migrate`, `pnpm db:seed`, `pnpm test`, `pnpm typecheck`, `pnpm lint`. Windows compatibility mandatory (developer machine is win32) — avoid bash-only scripts; use `tsx`/`node` runners.
+Target scripts (repo root): `pnpm dev` (api+web+worker watch), `pnpm db:migrate`, `pnpm db:seed`, `pnpm test`, `pnpm typecheck`, `pnpm build`. Windows compatibility mandatory (developer machine is win32) — avoid bash-only scripts; use `tsx`/`node` runners.
+
+There is deliberately **no `pnpm lint` script**. One existed and invoked `turbo run lint` while no package
+defined a `lint` task, so it reported success having checked nothing — a false-success gate. It was removed
+rather than replaced, because no linter is installed here and adopting one (ESLint, or a repo-wide Prettier
+policy covering ~141 files that do not currently match Prettier's output) is a separate engineering change.
+Until that lands, correctness is enforced by `pnpm typecheck`, `pnpm build` and `pnpm test`.
 
 ## 10. Production hardening backlog (Phase 13)
 

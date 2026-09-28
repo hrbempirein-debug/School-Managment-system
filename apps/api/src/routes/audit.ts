@@ -6,7 +6,10 @@ import { requireSession, requireTenantContext, requirePermission } from '../plug
 export default async function auditRoutes(app: FastifyInstance) {
   app.get(
     '/api/v1/audit',
-    { preHandler: [requireSession(), requireTenantContext(), requirePermission('audit.read')] },
+    {
+      config: { authorization: { kind: 'tenant', permission: 'audit.read' } },
+      preHandler: [requireSession(), requireTenantContext(), requirePermission('audit.read')],
+    },
     async (request) => {
       const ctx = request.ctx!;
       const rows = await withTenant(app.db, ctx, (tx) =>

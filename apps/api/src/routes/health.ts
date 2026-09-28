@@ -2,13 +2,20 @@ import type { FastifyInstance } from 'fastify';
 import { pingRedis } from '@sms/redis';
 
 export default async function healthRoutes(app: FastifyInstance) {
-  app.get('/health', async () => ({
-    status: 'ok',
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-  }));
+  app.get(
+    '/health',
+    { config: { authorization: { kind: 'public' } } },
+    async () => ({
+      status: 'ok',
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString(),
+    }),
+  );
 
-  app.get('/ready', async (request, reply) => {
+  app.get(
+    '/ready',
+    { config: { authorization: { kind: 'public' } } },
+    async (request, reply) => {
     let dbOk = true;
     let redisOk = true;
     try {

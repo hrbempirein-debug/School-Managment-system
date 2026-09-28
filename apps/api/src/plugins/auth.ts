@@ -11,12 +11,37 @@ import type { RedisSession } from '@sms/auth';
 
 export type PreHandler = (request: FastifyRequest, reply: FastifyReply) => void | Promise<void>;
 
+/**
+ * Metadata attached to authorization gate handlers so the startup validator can
+ * confirm every protected route is enforced by the exact gates its contract
+ * requires. This is non-enumerable and does not alter gate behavior.
+ */
+export const AUTHZ_GATE_META: unique symbol = Symbol('authz.gate');
+
+export type AuthzGateMeta =
+  | { kind: 'session' }
+  | { kind: 'tenantContext' }
+  | { kind: 'platformContext' }
+  | { kind: 'csrf' }
+  | { kind: 'permission'; permission: string };
+
+function tagged(handler: PreHandler, meta: AuthzGateMeta): PreHandler {
+  Object.defineProperty(handler, AUTHZ_GATE_META, { value: meta, enumerable: false });
+  return handler;
+}
+
+export function gateMetaOf(handler: unknown): AuthzGateMeta | null {
+  if (typeof handler !== 'function') return null;
+  const meta = (handler as unknown as Record<PropertyKey, unknown>)[AUTHZ_GATE_META];
+  return meta && typeof meta === 'object' ? (meta as AuthzGateMeta) : null;
+}
+
 export function requireSession(): PreHandler {
-  return async (request) => {
+  return tagged(async (request) => {
     if (!request.auth) {
       throw new HttpError('Authentication required', { status: 401, code: 'unauthenticated' });
     }
-  };
+  }, { kind: 'session' });
 }
 
 /**
@@ -25,7 +50,7 @@ export function requireSession(): PreHandler {
  * has no active membership for the requested tenant.
  */
 export function requireTenantContext(): PreHandler {
-  return async (request) => {
+  return tagged(async (request) => {
     const auth = request.auth;
     if (!auth) {
       throw new HttpError('Authentication required', { status: 401, code: 'unauthenticated' });
@@ -56,11 +81,11 @@ export function requireTenantContext(): PreHandler {
     if (headerTenant && headerTenant !== auth.session.activeTenantId) {
       updateSessionActiveTenant(request.server.redis, auth.token, headerTenant).catch(() => {});
     }
-  };
+  }, { kind: 'tenantContext' });
 }
 
 export function requirePlatformContext(): PreHandler {
-  return async (request) => {
+  return tagged(async (request) => {
     const auth = request.auth;
     if (!auth) {
       throw new HttpError('Authentication required', { status: 401, code: 'unauthenticated' });
@@ -69,11 +94,11 @@ export function requirePlatformContext(): PreHandler {
       userId: auth.session.userId,
       requestId: request.requestId,
     });
-  };
+  }, { kind: 'platformContext' });
 }
 
 export function requirePermission(permission: string): PreHandler {
-  return async (request) => {
+  return tagged(async (request) => {
     const ctx = request.ctx;
     if (!ctx || !ctx.permissions.has(permission)) {
       throw new HttpError('Insufficient permissions', {
@@ -82,7 +107,7 @@ export function requirePermission(permission: string): PreHandler {
         meta: { requiredPermission: permission },
       });
     }
-  };
+  }, { kind: 'permission', permission });
 }
 
 /** Validate an existing (still active) membership so tenant switching is cheap. */
@@ -97,7 +122,7 @@ export async function assertActiveMembership(request: FastifyRequest, tenantId: 
 
 /** CSRF double-submit guard for state-changing endpoints. */
 export function requireCsrf(): PreHandler {
-  return async (request) => {
+  return tagged(async (request) => {
     const session = request.auth?.session as RedisSession | undefined;
     const header = headerString(request.headers['x-csrf-token']);
     if (!request.auth) {
@@ -106,7 +131,7 @@ export function requireCsrf(): PreHandler {
     if (!session || !header || header !== session.csrfToken) {
       throw new HttpError('CSRF token mismatch', { status: 403, code: 'csrf_invalid' });
     }
-  };
+  }, { kind: 'csrf' });
 }
 
 function headerString(value: string | string[] | undefined): string | undefined {

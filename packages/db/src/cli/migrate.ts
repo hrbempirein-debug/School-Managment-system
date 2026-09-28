@@ -56,12 +56,22 @@ export async function applyMigrations(
   }
 }
 
-if (isMainModule()) {
-  const env = loadEnv();
-  const result = await applyMigrations(env.DATABASE_URL_MIGRATOR);
-  // eslint-disable-next-line no-console
-  console.log(
-    `migrations applied: ${result.applied.length ? result.applied.join(', ') : '(none)'}`,
-    `| already applied: ${result.skipped.length}`,
-  );
+if (isMainModule(import.meta.url)) {
+  try {
+    const env = loadEnv();
+    const result = await applyMigrations(env.DATABASE_URL_MIGRATOR);
+    // eslint-disable-next-line no-console
+    console.log(
+      `migrations applied: ${result.applied.length ? result.applied.join(', ') : '(none)'}`,
+      `| already applied: ${result.skipped.length}`,
+    );
+    if (result.applied.length === 0) {
+      // eslint-disable-next-line no-console
+      console.log('database is already up to date; nothing to migrate');
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(`migration failed: ${(err as Error).message}`);
+    process.exitCode = 1;
+  }
 }

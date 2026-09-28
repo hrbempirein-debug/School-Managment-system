@@ -9,9 +9,21 @@
     "typecheck": {
       "dependsOn": ["^build"]
     },
-    "lint": {},
     "test": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["^build"],
+      "env": ["RUN_RUNTIME_SECURITY_TESTS"]
+    },
+    "@sms/db#test": {
+      "dependsOn": ["^build"],
+      "env": ["RUN_RUNTIME_SECURITY_TESTS"]
+    },
+    "@sms/api#test": {
+      "dependsOn": ["^build"],
+      "env": ["RUN_RUNTIME_SECURITY_TESTS"]
+    },
+    "@sms/worker#test": {
+      "dependsOn": ["^build"],
+      "env": ["RUN_RUNTIME_SECURITY_TESTS"]
     }
   }
 }

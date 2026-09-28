@@ -63,8 +63,20 @@ export const envSchema = z.object({
   RATE_REGISTER_POINTS: z.coerce.number().positive().default(5),
   RATE_REGISTER_DURATION_SECONDS: z.coerce.number().positive().default(900),
 
+  /** Global per-IP ceiling for the API gateway rate limiter (1-minute window). */
+  RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
+
   STORAGE_DRIVER: z.enum(['fs', 's3']).default('fs'),
   STORAGE_FS_ROOT: z.string().default('.data/storage'),
+
+  /** Upload ceiling for student documents (FILE_STORAGE.md §6: documents 10 MB). */
+  MAX_DOCUMENT_UPLOAD_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
+
+  /** Upload ceiling for student CSV imports (bytes). Safe-server default 5 MiB. */
+  MAX_IMPORT_UPLOAD_BYTES: z.coerce.number().int().positive().default(5 * 1024 * 1024),
+
+  /** Hard ceiling on CSV data rows accepted by a single student import. */
+  MAX_IMPORT_ROWS: z.coerce.number().int().positive().default(10_000),
 
   PLATFORM_ADMIN_EMAIL: z.string().email().optional(),
   PLATFORM_ADMIN_PASSWORD: z.string().min(12).optional(),

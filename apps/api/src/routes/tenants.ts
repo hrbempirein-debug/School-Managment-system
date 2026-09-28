@@ -145,7 +145,10 @@ export async function createTenantTransaction(
 export default async function tenantsRoutes(app: FastifyInstance) {
   app.post(
     '/api/v1/platform/tenants',
-    { preHandler: [requireSession(), requirePlatformContext(), requirePermission('platform.tenants.create')] },
+    {
+      config: { authorization: { kind: 'platform', permission: 'platform.tenants.create' } },
+      preHandler: [requireSession(), requirePlatformContext(), requirePermission('platform.tenants.create')],
+    },
     async (request, reply) => {
       const body = createTenantSchema.parse(request.body);
       const ctx = request.ctx!;
@@ -171,7 +174,10 @@ export default async function tenantsRoutes(app: FastifyInstance) {
 
   app.get(
     '/api/v1/platform/tenants',
-    { preHandler: [requireSession(), requirePlatformContext(), requirePermission('platform.tenants.read')] },
+    {
+      config: { authorization: { kind: 'platform', permission: 'platform.tenants.read' } },
+      preHandler: [requireSession(), requirePlatformContext(), requirePermission('platform.tenants.read')],
+    },
     async (request) => {
       const ctx = request.ctx!;
       const rows = await withTenant(app.db, ctx, (tx) =>

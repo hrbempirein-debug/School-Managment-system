@@ -22,6 +22,7 @@
     "@sms/core": "workspace:*",
     "@sms/db": "workspace:*",
     "@sms/events": "workspace:*",
+    "@sms/idempotency": "workspace:*",
     "@sms/permissions": "workspace:*",
     "@sms/redis": "workspace:*",
     "@sms/storage": "workspace:*",

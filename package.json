@@ -14,7 +14,6 @@
     "dev:worker": "pnpm --filter @sms/worker run dev",
     "build": "pnpm turbo run build",
     "typecheck": "pnpm turbo run typecheck",
-    "lint": "pnpm turbo run lint",
     "test": "pnpm turbo run test",
     "db:migrate": "pnpm --filter @sms/db run migrate",
     "db:migrate:down": "pnpm --filter @sms/db run migrate:down",
