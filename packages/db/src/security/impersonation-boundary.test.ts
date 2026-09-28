@@ -12,7 +12,7 @@ import { getEnv } from '@sms/config';
  * app_ctx_mint() has any trustworthy caller identity to distinguish "X is a real member"
  * from "the caller is authenticated as X".
  *
- * Opt-in: RUN_RUNTIME_SECURITY_TESTS=1 (real PG 18 + migrations 0001+0002 on school_saas_dev).
+ * Opt-in: RUN_RUNTIME_SECURITY_TESTS=1 (real PG 18 + migrations 0001+0002 on school_saas_test).
  * No production code is modified; nothing is committed.
  */
 const enabled = process.env.RUN_RUNTIME_SECURITY_TESTS === '1';
@@ -172,8 +172,10 @@ describeDb('Phase 2A residual: impersonation via shared runtime credential', () 
       `select app_ctx_mint('platform', '${id.userB}', null) t`,
     ))[0]!.t as string;
     expect(tkt).toBeTruthy();
+    // Scoped to this suite's own users: the table is GLOBAL, so an unscoped count
+    // also counts other suites' rows and asserts nothing about B's claim.
     const assigns = (await appQ(
-      `select count(*)::int n from platform_role_assignments`,
+      `select count(*)::int n from platform_role_assignments where user_id in ('${id.userA}','${id.userB}','${id.userC}')`,
     ))[0]!.n;
     expect(Number(assigns)).toBe(1); // platform claim is honored for B
     await app.query('rollback');
@@ -201,7 +203,9 @@ describeDb('Phase 2A residual: impersonation via shared runtime credential', () 
     await app.query(`select set_config('app.platform_access', 'on', true)`);
     await app.query(`select set_config('app.system_access', 'on', true)`);
     const users = (await appQ(`select count(*)::int n from users`))[0]!.n;
-    const assigns = (await appQ(`select count(*)::int n from platform_role_assignments`))[0]!.n;
+    const assigns = (await appQ(
+      `select count(*)::int n from platform_role_assignments where user_id in ('${id.userA}','${id.userB}','${id.userC}')`,
+    ))[0]!.n;
     const proflies = (await appQ(`select count(*)::int n from user_profiles`))[0]!.n;
     await app.query('rollback');
     expect(Number(users)).toBe(0);

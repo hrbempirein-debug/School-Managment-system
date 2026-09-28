@@ -4,8 +4,8 @@ import pg from 'pg';
 import { getEnv } from '@sms/config';
 
 /**
- * RLS trust-boundary regression tests, run against the REAL roles and REAL dev database
- * (school_app_rw -> school_saas_dev). These verify the Phase-2A fix: RLS may no longer be
+ * RLS trust-boundary regression tests, run against the REAL roles and REAL disposable test database
+ * (school_app_rw -> school_saas_test). These verify the Phase-2A fix: RLS may no longer be
  * forged through transaction-local GUCs; only signed context tickets minted by
  * app_ctx_mint() (validation-gated) and the privileged executor role can establish context.
  *
@@ -21,6 +21,7 @@ const SCOPED_TABLES = [
   'auth_identities',
   'auth_sessions',
   'memberships',
+  'auth_tokens',
   'roles',
   'role_permissions',
   'membership_roles',
@@ -30,7 +31,7 @@ const SCOPED_TABLES = [
   'idempotency_keys',
 ];
 
-describeDb('RLS trust boundary (school_app_rw vs school_saas_dev)', () => {
+describeDb('RLS trust boundary (school_app_rw vs school_saas_test)', () => {
   let migrator: pg.Client;
   let app: pg.Client;
   const uid: Record<string, string> = {};
@@ -191,13 +192,17 @@ describeDb('RLS trust boundary (school_app_rw vs school_saas_dev)', () => {
   });
 
   it('8. platform data is invisible to non-platform users, visible with a platform ticket', async () => {
-    const platNo = await appQ(`select count(*)::int n from platform_role_assignments`);
+    // Scoped to this suite's own users: platform_role_assignments is a GLOBAL
+    // table, so an unscoped count also counts every other suite's leftovers and
+    // asserts nothing about the boundary.
+    const own = `user_id in ('${uid.userA}','${uid.userB}')`;
+    const platNo = await appQ(`select count(*)::int n from platform_role_assignments where ${own}`);
     expect(Number(platNo[0]!.n)).toBe(0);
 
     const tkt = (await appQ(`select app_ctx_mint('platform', '${uid.userA}', null) t`))[0]!.t as string;
     await app.query('begin');
     await app.query(`set local app.rls = '${tkt}'`);
-    const visible = (await appQ(`select count(*)::int n from platform_role_assignments`))[0]!.n;
+    const visible = (await appQ(`select count(*)::int n from platform_role_assignments where ${own}`))[0]!.n;
     await app.query('rollback');
     expect(Number(visible)).toBe(1);
   });
