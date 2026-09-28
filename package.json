@@ -18,7 +18,8 @@
     "db:migrate": "pnpm --filter @sms/db run migrate",
     "db:migrate:down": "pnpm --filter @sms/db run migrate:down",
     "db:seed": "pnpm --filter @sms/db run seed",
-    "db:bootstrap": "node scripts/bootstrap-check.js"
+    "db:bootstrap": "node scripts/bootstrap-check.js",
+    "platform:bootstrap-admin": "pnpm --filter @sms/api run platform:bootstrap-admin"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
