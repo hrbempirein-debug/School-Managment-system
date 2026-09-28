@@ -59,6 +59,26 @@ Conventions applied to **every** table unless noted:
 | `school_settings` | Config JSONB + typed columns | 1:1 tenant, `locale`, `timezone`, `grading_config jsonb`, `branding jsonb` |
 | `calendars` / `events` | School events | FK term nullable |
 
+**Phase 2B.3 foundation (migration `0004_school_domain_foundation.sql`, applied live):** the first
+eight implemented tenant tables — `campuses`, `academic_years`, `academic_terms`, `calendars`,
+`calendar_events`, `holidays`, `departments`, `school_settings`. All follow the § conventions:
+RLS `ENABLE` + `FORCE` with the shared value-based policy shape `(tenant_id = app_current_tenant_id()
+AND app_current_tenant_id() IS NOT NULL) OR app_privileged()` for SELECT/INSERT/UPDATE and
+`app_privileged()` ONLY for DELETE (even the privileged executor may not delete through RLS; physical
+deletion is a `school_migrator` admin operation only):
+
+- Composite tenant-aware FKs via `UNIQUE (tenant_id, id)` on the parent (`academic_terms.academic_year_id`,
+  `calendar_events.calendar_id`, DDL only — no runtime user)
+- Partial unique `(tenant_id, code) WHERE deleted_at IS NULL`; `academic_terms` unique
+  `(academic_year_id, sequence)`; `school_settings` singleton `UNIQUE (tenant_id)`
+- Triggers (`SECURITY INVOKER`, raise with `ERRCODE 55000`, message = domain error code), e.g.
+  `trg_academic_years_state` (closed can only open; active can only close), `trg_academic_terms_validate`
+  (term dates inside parent year, no overlap among open terms, no open terms inside a closed year,
+  parent-year visibility)
+- Business semantics surfaced through the Drizzle schema + contracts (`packages/contracts/src/school.ts`);
+  ORM timestamp `updated_at` uses `$onUpdate(() => new Date())` (drizzle wraps `$onUpdate` results in a
+  typed param; returning an SQL fragment crashes `PgTimestamp.mapToDriverValue`, so a JS Date is required).
+
 ## 4. Students (`stu_*`)
 
 | Table | Purpose | Notes |
@@ -87,6 +107,34 @@ Conventions applied to **every** table unless noted:
 | `periods` | Period definitions | tenant: `period_no`, time range, CHECK no overlap via exclusion constraint on tstzrange where same tenant+campus |
 | `homework` / `assignments` | Tasks | FK class/subject/teacher, due date, `file attachments` via junction |
 
+### Phase 4.2 — grade levels, subjects, class-subject links & teacher assignment (migration 0009)
+
+Implemented (RLS FORCE on all four; tenant-scoped SELECT/INSERT/UPDATE; privileged-only hard DELETE; runtime grants `school_app_rw`; SECURITY INVOKER triggers; composite tenant-aware FKs):
+
+- **`grade_levels` / `subjects`** — tenant-scoped catalog, `code` live-unique per tenant (partial unique index on `(tenant_id, code) WHERE deleted_at IS NULL`, so a soft-deleted row may reuse its code), `status` CHECK `(active|inactive)`. Delete guards (55000) refuse dropping a grade level referenced by live classes (`grade_level_has_classes`) or a subject with live class links / live teacher assignments.
+- **`acd_classes.grade_level_id`** — nullable FK to `grade_levels`; classes pin (tenant, campus, academic_year); the soft-delete guard also refuses deletion while live class_subjects or live teacher_assignments reference the class.
+- **`class_subjects`** (link) — (class, subject) live-unique per tenant; copy of campus + academic_year from the parent class **pinned by composite FKs** to the class row (class must be live; the subject must be live — this is the FK-pin mechanism). A live unique index on `(tenant_id, class_id, subject_id)` masks FK-pin errors (both constraint classes surface before the FK check on an already-live pair → consumers get `class_subject_already_linked`).
+- **`teacher_assignments`** — the assignment row copies campus/year from the parent class (same composite-FK pin); `memberships_tenant_user_uq` (unique `(tenant_id, user_id)` on `memberships`) anchors `(tenant_id, teacher_user_id) → memberships`. No `teachers` table: `trg_teacher_assignments_validate` (SECURITY INVOKER) re-verifies on INSERT/live-UPDATE that the class-subject link is live and that the teacher is an ACTIVE membership holding the tenant-scoped `teacher` role (55000 → `teacher_not_active`); it **skips** eligibility on soft-delete so unassignment always works even after the teacher was suspended. One live assignment per (class, subject).
+
+Cross-cutting (documented for trigger authors): BEFORE triggers run **before** RLS `WITH CHECK`, so a cross-tenant INSERT on `class_subjects`/`teacher_assignments` surfaces as FK 23503 (parent "not found"), not 42501 — routes map that text to a 404. The subject delete guard checks live links before live assignments; a live assignment always implies a live link, so its `subject has live teacher assignments` branch is defense-in-depth (unreachable via honest writes).
+
+### Phase 4.2 — controlled display-name helper (migration 0010)
+
+`user_profiles` is self-visible only (select policy requires `app_current_user_id() = user_id` | platform | privileged), so member-facing name lookups can't join it. `app_safe_user_display(user_id, tenant_id)` is a SECURITY DEFINER (owner `school_migrator`, `SET search_path`) helper that returns the target member's `full_name` only when BOTH caller and target hold ACTIVE memberships in the given tenant — closing cross-tenant exfiltration while letting tenant staff name their own teachers. The eligible-teacher directory uses it after filtering memberships to the `teacher` role.
+
+### Phase 4.3 — bell periods, the weekly timetable grid & homework (migration 0011; trigger refinement 0012)
+
+Implemented with the same § conventions as Phase 4.2: RLS `ENABLE` + `FORCE`, tenant-scoped SELECT/INSERT/UPDATE, privileged-only hard DELETE, `school_app_rw` grants, SECURITY INVOKER triggers, composite tenant-aware FKs:
+
+- **`periods`** — the bell set. `campus_id NULL` = the tenant-wide set (a single conflict domain via `COALESCE(campus_id, zero-uuid)`). `period_no` live-unique per (tenant, campus); **no overlapping time ranges** via a GiST `EXCLUDE USING gist` over `tstzrange([start_time, end_time))` on the fixed epoch date (23P01 → `period_time_overlap`); CHECK `start_time < end_time`. Status CHECK `(active|inactive)` — inactivating a period does NOT drop lessons (the grids keep their snapshot), but a period may not be soft-deleted while LIVE entries reference it (`period_has_entries`).
+- **`timetable_entries`** — one weekly grid cell per (section) × (weekday 1..7) × (period). The `timetable_entries_section_slot_live_uq` partial unique index makes the slot itself a conflict domain (23505 → `timetable_slot_conflict`). The row carries a copy of `campus_id` + `academic_year_id` **pinned** by composite FKs to the live `sections` parent (pinned again to the class); `teacher_user_id` is pinned to the live `teacher_assignment` of (class, subject) — a lesson always runs under the assigned lead teacher and the column is never client-writable. `trg_timetable_entries_validate` re-verifies on INSERT **and** live UPDATE that the section, class-subject link (55000 `homework_subject_not_in_class`/`…` territory) and assignment are live, and enforces the teacher spread: no two LIVE entries may give the same teacher the same weekday in OVERLAPPING periods (55000 `teacher_double_booked`). **Migration 0012** refines the spread check to exclude the exact same `(section, weekday, period)` pair, so a genuine in-section duplicate surfaces as the partial unique index's 23505 (`timetable_slot_conflict`) instead of being masked by the 55000 branch.
+- **`homework` / `homework_attachments`** — assignments per (class, subject) with `title`, `body`, `due_at`; authorship is *anchored to the assignment*, not the session: `trg_homework_validate` pins `teacher_user_id` to the live `teacher_assignment` of (class, subject) and requires the class-subject link (55000 `homework_subject_not_in_class` / `homework_teacher_not_assigned`). Attachments are create-only, a junction to `files` pinned by the composite FK (a file must exist and belong to the tenant), unique per (homework, file).
+- **Cross-table delete guards (55000)** — extend the existing families with the timetable payload: a section with live lessons refuses soft-delete (`section_has_timetable`), a subject with live schedule refuses delete or live-status flip (`subject_has_schedule`, `subject_has_homework`), a class with live homework refuses delete (`class_has_homework`), an assignment with live lessons refuses unassignment (`assignment_has_schedule`). Bounding note: `class_has_timetable` is **unreachable as a first-line guard** — every lesson's composite FK pins a live section, and the section's own guard already refuses deletion while live lessons exist, so `class_has_sections` always fires first (test 17 of the DB suite proves the dominance property directly).
+
+- **`students.user_id` (migration 0013, Phase 4 finalization)** — the student-portal identity that closes the Phase 4.3 gap. Nullable by default; the composite tenant-aware FK `students(tenant_id, user_id) → memberships(tenant_id, user_id)` anchors on the 0009 `memberships_tenant_user_uq` index so a link can only ever point at a member of the SAME tenant. `trg_students_user_link_validate_biu` (SECURITY INVOKER, fires on INSERT and `UPDATE OF user_id`) demands an ACTIVE membership → otherwise `55000` → `student_link_requires_membership`; because the lookup runs under the invoking role's RLS it is automatically tenant-local (a foreign membership is invisible, never probeable). One LIVE student per (tenant, user) is pinned by the partial unique `students_tenant_user_uq` (`23505` → `student_user_already_linked`); soft-deleted history keeps its link. Suspending a membership after linking deactivates the portal (all role-code lookups are active-only).
+
+Event vocabulary (10 new): `period.created|updated|deleted`, `timetable.entry.created|updated|deleted`, `timetable.published`, `homework.created|updated|deleted` — ids-only payloads; the worker has auto log-only handlers (events 74 → 84, keep `EVENT_ARCHITECTURE.md` green).
+
 ## 6. Attendance (`att_*`)
 
 | Table | Purpose | Notes |
@@ -110,20 +158,49 @@ Conventions applied to **every** table unless noted:
 | `request_id`, `trace_id`, `ip inet`, `user_agent text` | |
 | `occurred_at` | indexed with tenant |
 
-Append-only: no UPDATE/DELETE grants for `app_rw`. Retention: per DATA_RETENTION.md (default 1 year hot, archive after). Written **in the same transaction** as the change.
+Append-only: enforced **at the RLS policy level** — `audit_logs` carries only an INSERT and a SELECT
+policy (`0001`), i.e. no UPDATE/DELETE policy exists, so **no role** (not even the privileged
+`school_migrator`) can mutate or delete rows; this is verified live (`delete from audit_logs` matches
+zero rows under `school_migrator`). Retention: per DATA_RETENTION.md (default 1 year hot, archive
+after — archiving reads + purges via a privileged maintenance path). Written **in the same
+transaction** as the change. `outbox_events` has explicit INSERT/READ/UPDATE and privileghed-only
+DELETE policies (workers dispatch, maintenance purges); `idempotency_keys` uses a single
+`FOR ALL` tenant/platform/privileged policy (TTL cleanup via DELETE).
 
-## 8. Exams (`exm_*`)
+## 8. Exams and results
 
 | Table | Purpose | Notes |
 |---|---|---|
-| `exam_types` | e.g. Unit test, Midterm | tenant catalog |
-| `exams` | Exam instance per term | FK term, `status (draft|scheduled|grading|published|cancelled)` |
-| `exam_subjects` | Subject session of exam | unique(exam, class_subject); `max_marks numeric`, `weight numeric` |
+| `exam_types` | e.g. Unit test, Midterm | tenant catalog; `code` immutable, cannot be deactivated while a live exam references it |
+| `grading_scales` | Grade bands as ordered `bands` jsonb | versioned (`code` + `version`, `version` server-owned), at most one active version per code; bands must TILE 0..100 — checked by trigger, in any input order; band labels unique per scale; once a scale has produced a result its bands are frozen — create a new version |
+| `exams` | Exam instance per term | `status (draft\|scheduled\|grading\|published\|cancelled)`, one-way lifecycle, `grading_scale_id` optional (NULL = the tenant's newest ACTIVE scale, PINNED at `grading`; a NAMED scale must be active) |
+| `exam_subjects` | Subject session of an exam | unique(exam, class_subject); `max_marks`, `weight` (> 0) — frozen once the exam reaches `grading` |
 | `exam_schedules` | Date/time/room | FK exam_subject |
-| `marks` | Grade entry | unique(exam_subject, enrollment_id); `marks_obtained numeric CHECK (>=0 <= max)`, `status (provisional|locked|rechecked)`, entered_by, locked_at |
-| `grading_scales` | Grade bands | tenant (+ optional global template), versioned `version int`, CHECK bands non-overlapping (app validation + trigger) |
-| `report_cards` | Generated artifact | unique(student, exam), `file_id`, `status (draft|published)` — published snapshot immutable; corrections → new version row (`version int`, partial unique on active) |
-| Published marks: UPDATE allowed only via **correction workflow** (permission `exams.correct`) which writes `mark_corrections` audit table (old,new,reason) + audit log. |
+| `marks` | Grade entry | unique(exam_subject, enrollment_id); `marks_obtained <= max_marks`; `status (provisional\|locked\|rechecked)`; `percentage`, `grade_label`, `grade_point` are DERIVED by trigger and can never be posted; `published_exam_id` + `frozen_at` are the server-owned PUBLICATION MARKER (both set or both NULL, migration 0017); `updated_at` is maintained by trigger |
+| `mark_corrections` | Append-only ledger | (old, new, reason, actor); INSERT + SELECT only for the runtime role, and a trigger refuses UPDATE/DELETE even for a privileged session |
+| `report_cards` | Generated artifact | versioned per (student, exam): one active version; `status (draft\|published)`, published rows immutable AND hard-DELETE guarded; a changed recomputation mints `version + 1` |
+
+Invariants enforced in the DATABASE, not in application code (each has a test in
+`packages/db/src/security/phase6-exams.test.ts`):
+
+- The exam lifecycle is one-way and terminal: `published` and `cancelled` never move, and
+  publication is not reachable through a plain status UPDATE.
+- Publication requires a real result set (at least one subject session and one mark) and
+  locks every provisional mark of the exam in the same transaction. Each locked mark is
+  STAMPED (`published_exam_id` + `frozen_at`) in that same transaction, so "this result is
+  published" is a fact on the row rather than an inference from the exam.
+- The marker is immutable and server-owned. It is deliberately independent of the mutable
+  `exam_subject_id`: a published mark cannot be re-homed to another subject session, nor
+  soft-deleted, nor moved into a different published exam. Its presence is what publication
+  keys on to re-derive, so the frozen `percentage`/`grade_label`/`grade_point` cannot be
+  changed retroactively by a later scale change.
+- Only the correction workflow may change a published mark's value, and only
+  `marks_obtained`; anything else about a frozen mark is refused.
+- The grading scale of an exam is PINNED the moment the exam can hold marks (`grading`),
+  and the pin is what resolution reads — so retiring a scale later cannot silently change
+  what a published result means.
+- Grading bands must tile 0..100 without gaps or overlap, and an exam may not name a
+  dormant or deleted scale (otherwise every mark of that exam would silently grade NULL).
 
 ## 9. Finance (`fin_*`) — see FINANCE_DESIGN.md for rules
 

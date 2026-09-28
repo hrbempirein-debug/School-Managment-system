@@ -14,7 +14,7 @@ Redis + **BullMQ** in `apps/worker`; jobs enqueued from the transactional outbox
 | `mail` | transactional email | 10 | normal |
 | `sms` | SMS/WhatsApp abstraction | 10 | normal |
 | `push` | mobile push | 10 | low |
-| `reports` | report cards, PDFs, exports | 3 | low |
+| `reports` | report cards, PDFs, exports (Phase 6 ships `report.studentReportCard`) | 3 | low |
 | `billing` | invoice generation, dunning, usage rollup | 2 | high |
 | `payroll` | payroll runs | 1 | high |
 | `ai` | LLM calls, embeddings, analysis | 5 | low |

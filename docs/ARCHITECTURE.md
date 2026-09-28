@@ -1,6 +1,6 @@
 # Architecture — School Management SaaS
 
-Status: Phase 0 | Last updated: 2026-09-22
+Status: Phase 2B.3 (school-domain foundation) | Last updated: 2026-09-23
 
 ## 1. Style
 
@@ -79,7 +79,7 @@ Evaluation of the proposed layout (spec §23): kept, with modifications —
 
 1. Reverse proxy assigns/propagates `X-Request-Id` (generate if absent).
 2. Fastify hooks: parse env config → rate limit → authenticate (session cookie or PAT) → resolve tenant context → authorize (RBAC check for route permission) → validate body/params/query with Zod → idempotency lookup (mutations) → handler.
-3. Handler opens transaction, sets RLS session variables (`app.tenant_id`, `app.user_id`, `app.role_ids`) via `SET LOCAL`, executes Drizzle queries, writes audit + outbox rows **in the same transaction**, commits.
+3. Handler opens a transaction, mints a **signed, expiring context ticket** (`app_ctx_mint(scope, user, tenant)`, validated against real membership/platform assignment) and sets transaction-local `app.rls` via `set_config(..., true)`; Drizzle runs with RLS resolving the ticket; the handler writes audit (append-only, no DELETE policy) + outbox rows **in the same transaction**, commits.
 4. Response serialized via contract schema; errors via unified error format (`ERROR_HANDLING.md`).
 5. Structured log emitted with request id, trace id, tenant id, user id, route, latency, status.
 
@@ -95,8 +95,8 @@ Evaluation of the proposed layout (spec §23): kept, with modifications —
 | Layer | Mechanism |
 |---|---|
 | HTTP | `X-Tenant-Id` header **or** subdomain → resolved to tenant id → verified against session memberships |
-| DB | `SET LOCAL app.tenant_id = '<uuid>'` per transaction; RLS policies compare `tenant_id` |
-| Jobs | BullMQ job data carries `tenantId` + `actorUserId`; worker re-establishes RLS vars before DB access |
+| DB | Per transaction: `select app_ctx_mint(scope,user,tenant)` (signed ticket) → `set_config('app.rls', ticket, true)` (transaction-local); RLS policies trust only the ticket — legacy `app.*` GUCs were forgeable (Phase 2A fix) and are ignored. A `school_migrator` executor bypasses via `app_privileged()` |
+| Jobs | BullMQ job data carries `tenantId` + `actorUserId`; the outbox worker runs as the trusted `school_migrator` executor (`app_privileged()`), clears `app.rls`, never uses SET ROLE, and handlers scope strictly by `event.tenant_id` data — no per-tenant GUC is set server-side |
 | Cache | All Redis keys prefixed `t:{tenantId}:` (platform keys use `t:platform:`) |
 | Files | Object keys `tenants/{tenantId}/...`; bucket private; presigned URLs only |
 | Logs | Every log line includes `tenantId` when in tenant scope |
