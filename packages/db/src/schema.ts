@@ -383,6 +383,11 @@ export const academicTerms = pgTable(
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
   },
   (t) => [
+    // §6.3 R1: the (tenant_id, id) anchor, added by migration 0021 purely so every
+    // composite FK into this table is legal BY DECLARATION rather than by accident of
+    // `id` already being a primary key. It is an index only: no data migration, no
+    // behavioural effect. finance-composite-fk.test.ts asserts its presence.
+    uniqueIndex('academic_terms_tenant_id_uq').on(t.tenantId, t.id),
     uniqueIndex('academic_terms_tenant_code_uq')
       .on(t.tenantId, t.code)
       .where(sql`${t.deletedAt} IS NULL`),
@@ -420,6 +425,11 @@ export const holidays = pgTable(
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
   },
   (t) => [
+    // §6.3 R1: the (tenant_id, id) anchor, added by migration 0021 purely so every
+    // composite FK into this table is legal BY DECLARATION rather than by accident of
+    // `id` already being a primary key. It is an index only: no data migration, no
+    // behavioural effect. finance-composite-fk.test.ts asserts its presence.
+    uniqueIndex('holidays_tenant_id_uq').on(t.tenantId, t.id),
     index('holidays_tenant_range_idx').on(t.tenantId, t.startsOn, t.endsOn).where(sql`${t.deletedAt} IS NULL`),
     foreignKey({
       name: 'holidays_campus_fk',
@@ -479,6 +489,11 @@ export const calendarEvents = pgTable(
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
   },
   (t) => [
+    // §6.3 R1: the (tenant_id, id) anchor, added by migration 0021 purely so every
+    // composite FK into this table is legal BY DECLARATION rather than by accident of
+    // `id` already being a primary key. It is an index only: no data migration, no
+    // behavioural effect. finance-composite-fk.test.ts asserts its presence.
+    uniqueIndex('calendar_events_tenant_id_uq').on(t.tenantId, t.id),
     index('calendar_events_calendar_range_idx').on(t.calendarId, t.startsAt, t.endsAt).where(sql`${t.deletedAt} IS NULL`),
     foreignKey({
       name: 'calendar_events_calendar_fk',
@@ -507,6 +522,11 @@ export const departments = pgTable(
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
   },
   (t) => [
+    // §6.3 R1: the (tenant_id, id) anchor, added by migration 0021 purely so every
+    // composite FK into this table is legal BY DECLARATION rather than by accident of
+    // `id` already being a primary key. It is an index only: no data migration, no
+    // behavioural effect. finance-composite-fk.test.ts asserts its presence.
+    uniqueIndex('departments_tenant_id_uq').on(t.tenantId, t.id),
     uniqueIndex('departments_tenant_code_uq')
       .on(t.tenantId, t.code)
       .where(sql`${t.deletedAt} IS NULL`),
@@ -537,7 +557,14 @@ export const schoolSettings = pgTable(
       .defaultNow()
       .$onUpdate(() => new Date()),
   },
-  (t) => [uniqueIndex('school_settings_tenant_uq').on(t.tenantId)],
+  (t) => [
+    uniqueIndex('school_settings_tenant_uq').on(t.tenantId),
+    // §6.3 R1: the (tenant_id, id) anchor, added by migration 0021 purely so every
+    // composite FK into this table is legal BY DECLARATION rather than by accident of
+    // `id` already being a primary key. It is an index only: no data migration, no
+    // behavioural effect. finance-composite-fk.test.ts asserts its presence.
+    uniqueIndex('school_settings_tenant_id_uq').on(t.tenantId, t.id),
+  ],
 );
 
 export const files = pgTable(
@@ -956,6 +983,11 @@ export const studentGuardians = pgTable(
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
   },
   (t) => [
+    // §6.3 R1: the (tenant_id, id) anchor, added by migration 0021 purely so every
+    // composite FK into this table is legal BY DECLARATION rather than by accident of
+    // `id` already being a primary key. It is an index only: no data migration, no
+    // behavioural effect. finance-composite-fk.test.ts asserts its presence.
+    uniqueIndex('student_guardians_tenant_id_uq').on(t.tenantId, t.id),
     uniqueIndex('student_guardians_relation_uq')
       .on(t.tenantId, t.studentId, t.guardianId, t.relation)
       .where(sql`${t.deletedAt} IS NULL`),
@@ -997,6 +1029,11 @@ export const enrollments = pgTable(
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
   },
   (t) => [
+    // §6.3 R1: the (tenant_id, id) anchor, added by migration 0021 purely so every
+    // composite FK into this table is legal BY DECLARATION rather than by accident of
+    // `id` already being a primary key. It is an index only: no data migration, no
+    // behavioural effect. finance-composite-fk.test.ts asserts its presence.
+    uniqueIndex('enrollments_tenant_id_uq').on(t.tenantId, t.id),
     uniqueIndex('enrollments_student_year_uq')
       .on(t.tenantId, t.studentId, t.academicYearId)
       .where(sql`${t.deletedAt} IS NULL`),
@@ -1046,6 +1083,11 @@ export const studentDocuments = pgTable(
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
   },
   (t) => [
+    // §6.3 R1: the (tenant_id, id) anchor, added by migration 0021 purely so every
+    // composite FK into this table is legal BY DECLARATION rather than by accident of
+    // `id` already being a primary key. It is an index only: no data migration, no
+    // behavioural effect. finance-composite-fk.test.ts asserts its presence.
+    uniqueIndex('student_documents_tenant_id_uq').on(t.tenantId, t.id),
     index('student_documents_student_idx').on(t.tenantId, t.studentId).where(sql`${t.deletedAt} IS NULL`),
     foreignKey({
       name: 'student_documents_student_fk',
@@ -1079,6 +1121,11 @@ export const admissionApplications = pgTable(
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
   },
   (t) => [
+    // §6.3 R1: the (tenant_id, id) anchor, added by migration 0021 purely so every
+    // composite FK into this table is legal BY DECLARATION rather than by accident of
+    // `id` already being a primary key. It is an index only: no data migration, no
+    // behavioural effect. finance-composite-fk.test.ts asserts its presence.
+    uniqueIndex('admission_applications_tenant_id_uq').on(t.tenantId, t.id),
     index('admission_applications_tenant_status_idx').on(t.tenantId, t.status).where(sql`${t.deletedAt} IS NULL`),
     uniqueIndex('admission_applications_student_uq')
       .on(t.tenantId, t.studentId)
@@ -1112,6 +1159,11 @@ export const transfers = pgTable(
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
   },
   (t) => [
+    // §6.3 R1: the (tenant_id, id) anchor, added by migration 0021 purely so every
+    // composite FK into this table is legal BY DECLARATION rather than by accident of
+    // `id` already being a primary key. It is an index only: no data migration, no
+    // behavioural effect. finance-composite-fk.test.ts asserts its presence.
+    uniqueIndex('transfers_tenant_id_uq').on(t.tenantId, t.id),
     index('transfers_tenant_student_idx').on(t.tenantId, t.studentId).where(sql`${t.deletedAt} IS NULL`),
     foreignKey({
       name: 'transfers_student_fk',
@@ -1178,6 +1230,11 @@ export const promotionItems = pgTable(
       .$onUpdate(() => new Date()),
   },
   (t) => [
+    // §6.3 R1: the (tenant_id, id) anchor, added by migration 0021 purely so every
+    // composite FK into this table is legal BY DECLARATION rather than by accident of
+    // `id` already being a primary key. It is an index only: no data migration, no
+    // behavioural effect. finance-composite-fk.test.ts asserts its presence.
+    uniqueIndex('promotion_items_tenant_id_uq').on(t.tenantId, t.id),
     uniqueIndex('promotion_items_batch_student_uq').on(t.tenantId, t.batchId, t.studentId),
     index('promotion_items_batch_idx').on(t.tenantId, t.batchId),
     foreignKey({
@@ -2361,5 +2418,698 @@ export const markCorrections = pgTable(
       'mark_corrections_changed_ck',
       sql`${t.oldMarksObtained} IS DISTINCT FROM ${t.newMarksObtained}`,
     ),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Phase 7 — finance foundation (0021) and fee structures (0022).
+//
+// Source of truth is the migration text, not this file. This module is the
+// typed mirror; where the two could disagree, the migration wins and
+// packages/db/src/security/finance-composite-fk.test.ts catches it.
+//
+// WHAT IS REPRESENTED EXACTLY
+//   Columns (name, type, precision/scale, nullability, default), primary keys,
+//   unique CONSTRAINTS, unique INDEXES (including the partial expression index
+//   and NULLS NOT DISTINCT), check constraints, and foreign keys with their
+//   ON DELETE action. Constraint names are the live catalog's, not invented:
+//   where 0021/0022 declared `CONSTRAINT x UNIQUE (...)` this uses `unique()`
+//   (a pg_constraint row, as in the database); where the DDL used
+//   `CREATE UNIQUE INDEX` this uses `uniqueIndex()` (a pg_index row). The
+//   distinction is not cosmetic — the composite-FK suite reads pg_constraint,
+//   so declaring an index where the database has a constraint would be a lie.
+//
+// WHAT DRIZZLE ORM 0.38 CANNOT REPRESENT, AND IS THEREFORE NOT STATED HERE
+// These are real parts of 0021/0022. They are absent because the abstraction has
+// no construct for them, NOT because they are unimportant, and none is
+// approximated by a look-alike that a reader would mistake for the real thing.
+// Each is asserted against the live catalog by
+// packages/db/src/security/finance-trigger-inventory.test.ts and
+// packages/db/src/security/finance-composite-fk.test.ts, so the gap is a
+// documented omission rather than a silent one.
+//
+//   1. TRIGGERS. All 6 functions and all 8 bindings of 0022. `pgTable` has no
+//      trigger primitive, so the §18 status graph, the §8.7.1 committed-run
+//      freeze, the §6.4 assignment pin and the target validator are invisible
+//      here. Reading this file tells you nothing about 0022's BEHAVIOUR. That is
+//      why the behavioural suite exists, and why `status` below is a plain text
+//      column with nothing stopping a caller writing 'published' on a draft.
+//   2. FUNCTION DEFINITIONS — the trg_fin_* bodies. Not relations, so not part
+//      of a schema module at all.
+//   3. GRANTS AND REVOKES. 0021/0022 create every table and then immediately
+//      `REVOKE ALL ON <t> FROM school_app_rw`. Drizzle models no ACL, so the
+//      fact that the runtime role cannot reach these tables does not appear
+//      below. Verified by the two suites above.
+//   4. ROW LEVEL SECURITY. 0021/0022 deliberately enable none and create no
+//      policy; §30.3 defers the whole RLS block to 0028. A schema module that
+//      could express RLS would still be correct to say nothing here.
+//   5. `ON DELETE SET NULL (column)`. 0021's
+//      fin_tenant_settings_tax_profile_fk uses the PostgreSQL 15+ column-list
+//      form, so deleting a tax profile nulls `tax_profile_id` and NOT
+//      `tenant_id`. Drizzle's UpdateDeleteAction is the five-value union
+//      'cascade' | 'restrict' | 'no action' | 'set null' | 'set default' and
+//      cannot say WHICH column is nulled. It is written as `set null` below,
+//      which is the nearest action but NOT the same statement, and the
+//      difference is precisely whether tenant_id survives. The migration's
+//      version is the correct one. Recorded as a deliberate approximation, and
+//      the only such case in these 12 tables.
+//
+// TWO THINGS THAT LOOK LIKE OVERSIGHTS AND ARE NOT
+//   * `structure_ids` is a real `uuid[]`, typed as an array rather than
+//     flattened into a join table.
+//   * `fin_billing_run_items` has NO `id` column. Its primary key is the triple
+//     (tenant_id, run_id, enrollment_id), so one enrollment is billed at most
+//     once per run — a correctness property enforced by the PK itself, and the
+//     reason it is the only table below declared with `primaryKey({ columns })`.
+//
+// DECLARATION ORDER IS NOT MIGRATION ORDER
+// 0021 creates fin_tenant_settings BEFORE fin_tax_profiles and adds
+// fin_tenant_settings_tax_profile_fk afterwards with ALTER TABLE, because a
+// forward reference would fail. Drizzle evaluates a foreignKey({...}) reference
+// array eagerly, so finTaxProfiles is declared first here and the FK is simply
+// stated in place. That is a property of this module's evaluation, not a change
+// to the migration, which is untouched.
+// ---------------------------------------------------------------------------
+
+/** 0021. Per-tenant money configuration, exactly one row per tenant. */
+export const finTaxProfiles = pgTable(
+  'fin_tax_profiles',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    name: text('name').notNull(),
+    taxNumber: text('tax_number'),
+    rate: numeric('rate', { precision: 7, scale: 4 }).notNull().default('0'),
+    isDefault: boolean('is_default').notNull().default(false),
+    isActive: boolean('is_active').notNull().default(true),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    // Deliberately NO updated_at. Every other finance table has one, and it is
+    // tempting to add it here for symmetry; 0021 does not declare it, and a
+    // column the database does not have is worse than an asymmetric table.
+  },
+  (t) => [
+    // The FK target for fin_tenant_settings.tax_profile_id. Required, not
+    // incidental: the column-list SET NULL is in limitation 5 above.
+    unique('fin_tax_profiles_ten_id_uq').on(t.tenantId, t.id),
+    unique('fin_tax_profiles_name_uq').on(t.tenantId, t.name),
+    foreignKey({
+      name: 'fin_tax_profiles_tenant_fk',
+      columns: [t.tenantId],
+      foreignColumns: [tenants.id],
+    }).onDelete('cascade'),
+    check('fin_tax_profiles_rate_check', sql`${t.rate} >= 0 AND ${t.rate} <= 100`),
+  ],
+);
+
+/** 0021. Per-tenant money configuration, exactly one row per tenant. */
+export const finTenantSettings = pgTable(
+  'fin_tenant_settings',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    currency: text('currency').notNull().default('PKR'),
+    // Nullable on purpose: a school with no tax registration has no profile, so
+    // a NOT NULL FK here would force every tenant to invent one. Invoice issue
+    // reads NULL as "untaxed", not as an error.
+    taxProfileId: uuid('tax_profile_id'),
+    // 0 means "never store a raw body". The encryption that would make a
+    // non-zero value safe is NOT implemented in Phase 7, so 0 is the only
+    // legitimate value today — but the declared CHECK is `>= 0`, not `= 0`, and
+    // raising it to 0 is an owner decision this migration does not make.
+    webhookRawRetentionDays: integer('webhook_raw_retention_days').notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // Also what makes the 0028 backfill idempotent via ON CONFLICT (tenant_id).
+    unique('fin_tenant_settings_tenant_uq').on(t.tenantId),
+    unique('fin_tenant_settings_ten_id_uq').on(t.tenantId, t.id),
+    // tenants IS the tenant, so the composite anchor would be (id, id). A
+    // single-column reference is correct here, not merely permitted, and
+    // fin_tenant_settings is on the §6.3 R4 allowlist for that reason.
+    foreignKey({
+      name: 'fin_tenant_settings_tenant_fk',
+      columns: [t.tenantId],
+      foreignColumns: [tenants.id],
+    }).onDelete('cascade'),
+    // In 0021 this arrives by ALTER TABLE after fin_tax_profiles exists.
+    // `set null` is the closest action Drizzle can express and matches the
+    // catalog's confdeltype, but the migration uses the PostgreSQL 15+ form
+    // `ON DELETE SET NULL (tax_profile_id)`, which additionally says WHICH
+    // column is nulled. Drizzle cannot express that, so this declaration
+    // cannot distinguish "null tax_profile_id" from "null every referencing
+    // column" — and the second reading is the wrong one, because nulling
+    // tenant_id would violate NOT NULL. See limitation 5 in the header.
+    foreignKey({
+      name: 'fin_tenant_settings_tax_profile_fk',
+      columns: [t.tenantId, t.taxProfileId],
+      foreignColumns: [finTaxProfiles.tenantId, finTaxProfiles.id],
+    }).onDelete('set null'),
+    check('fin_tenant_settings_currency_check', sql`${t.currency} IN ('PKR')`),
+    check(
+      'fin_tenant_settings_webhook_raw_retention_days_check',
+      sql`${t.webhookRawRetentionDays} >= 0`,
+    ),
+  ],
+);
+
+/**
+ * 0021. The fixed nine-account chart of accounts.
+ *
+ * Seeded rows are system-owned and may not be renamed or recoded. A tenant may
+ * NOT add accounts: the chart is fixed, and an extension point is an owner
+ * decision, not a per-tenant one.
+ */
+export const finLedgerAccounts = pgTable(
+  'fin_ledger_accounts',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    code: text('code').notNull(),
+    name: text('name').notNull(),
+    accountClass: text('account_class').notNull(),
+    isContra: boolean('is_contra').notNull().default(false),
+    normalSide: text('normal_side').notNull(),
+    isSystem: boolean('is_system').notNull().default(true),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // The FK target for fin_ledger_entries.account_code. Required, not
+    // incidental: 0023's ledger entries reference (tenant_id, account_code).
+    unique('fin_ledger_accounts_code_uq').on(t.tenantId, t.code),
+    // Anchor uniformity: declared even though nothing FKs on id.
+    unique('fin_ledger_accounts_ten_id_uq').on(t.tenantId, t.id),
+    foreignKey({
+      name: 'fin_ledger_accounts_tenant_fk',
+      columns: [t.tenantId],
+      foreignColumns: [tenants.id],
+    }).onDelete('cascade'),
+    check(
+      'fin_ledger_accounts_code_check',
+      sql`${t.code} IN ('1000','1100','1200','1300','2200','4000','4100','4200','4900')`,
+    ),
+    check('fin_ledger_accounts_account_class_check', sql`${t.accountClass} IN ('asset','liability','revenue')`),
+    check('fin_ledger_accounts_normal_side_check', sql`${t.normalSide} IN ('debit','credit')`),
+    // A class and a normal side that disagree is the defect this column
+    // combination exists to catch. Enforced so F4's jsonb validation and this
+    // constraint cannot disagree about what an account means.
+    check(
+      'fin_ledger_accounts_side_ck',
+      sql`(
+        (${t.accountClass} = 'asset'     AND ${t.normalSide} = 'debit'  AND NOT ${t.isContra})
+     OR (${t.accountClass} = 'liability' AND ${t.normalSide} = 'credit' AND NOT ${t.isContra})
+     OR (${t.accountClass} = 'revenue'   AND ${t.normalSide} = 'credit' AND NOT ${t.isContra})
+     OR (${t.accountClass} = 'revenue'   AND ${t.normalSide} = 'debit'  AND     ${t.isContra})
+      )`,
+    ),
+  ],
+);
+
+/** 0021. Per-tenant, per-year, per-kind document counter. */
+export const finDocumentCounters = pgTable(
+  'fin_document_counters',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    academicYearId: uuid('academic_year_id').notNull(),
+    // Closed, so a new document kind is a reviewable schema change rather than
+    // a value a route can invent.
+    kind: text('kind').notNull(),
+    // `mode: 'bigint'` types the default as bigint | SQL, so the migration's
+    // literal `DEFAULT 0` is expressed as raw SQL rather than a JS number.
+    lastValue: bigint('last_value', { mode: 'bigint' }).notNull().default(sql`0`),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('fin_document_counters_uq').on(t.tenantId, t.academicYearId, t.kind),
+    unique('fin_document_counters_ten_id_uq').on(t.tenantId, t.id),
+    foreignKey({
+      name: 'fin_document_counters_year_fk',
+      columns: [t.tenantId, t.academicYearId],
+      foreignColumns: [academicYears.tenantId, academicYears.id],
+    }).onDelete('restrict'),
+    check('fin_document_counters_kind_check', sql`${t.kind} IN ('invoice','receipt','challan')`),
+    check('fin_document_counters_last_value_check', sql`${t.lastValue} >= 0`),
+  ],
+);
+
+/** 0021. A billable category; a fee structure item points at one. */
+export const finFeeHeads = pgTable(
+  'fin_fee_heads',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    code: text('code').notNull(),
+    name: text('name').notNull(),
+    description: text('description'),
+    // A head-level default a structure item may override, so a mixed invoice
+    // does not need a structure per head.
+    taxTreatment: text('tax_treatment').notNull().default('none'),
+    isWaivable: boolean('is_waivable').notNull().default(true),
+    isActive: boolean('is_active').notNull().default(true),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // Referenced by fin_fee_structure_items via (tenant_id, fee_head_id).
+    unique('fin_fee_heads_ten_id_uq').on(t.tenantId, t.id),
+    unique('fin_fee_heads_code_uq').on(t.tenantId, t.code),
+    foreignKey({
+      name: 'fin_fee_heads_tenant_fk',
+      columns: [t.tenantId],
+      foreignColumns: [tenants.id],
+    }).onDelete('cascade'),
+    check(
+      'fin_fee_heads_tax_treatment_check',
+      sql`${t.taxTreatment} IN ('none','exclusive','inclusive')`,
+    ),
+  ],
+);
+
+/**
+ * 0022. The fee structure document: a versioned, targetable set of fee heads.
+ *
+ * The §18 status graph is enforced by trg_fin_structure_publish_freeze, which
+ * this module cannot express (limitation 1). The two CHECKs that DO appear here
+ * are the ones the database enforces as constraints; the transition order
+ * draft → published → retired|superseded, and the write-once publication stamp,
+ * are not among them.
+ */
+export const finFeeStructures = pgTable(
+  'fin_fee_structures',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    code: text('code').notNull(),
+    name: text('name').notNull(),
+    academicYearId: uuid('academic_year_id').notNull(),
+    version: integer('version').notNull().default(1),
+    status: text('status').notNull().default('draft'),
+    effectiveFrom: date('effective_from').notNull(),
+    effectiveTo: date('effective_to'),
+    supersedesId: uuid('supersedes_id'),
+    publishedAt: timestamp('published_at', { withTimezone: true }),
+    // §6.3 R4 exception, one of two in 0022: `users` has no tenant_id, so a
+    // single-column reference is correct. ON DELETE RESTRICT, not SET NULL:
+    // PostgreSQL implements SET NULL as a referential UPDATE, which the
+    // write-once publication stamp refuses with 55000 — so a SET NULL action
+    // could never fire. RESTRICT makes the consequence explicit (23001) and
+    // deactivation is the supported route.
+    publishedBy: uuid('published_by'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  },
+  (t) => [
+    unique('fin_fee_structures_code_uq').on(t.tenantId, t.code, t.version),
+    unique('fin_fee_structures_ten_id_uq').on(t.tenantId, t.id),
+    foreignKey({
+      name: 'fin_fee_structures_year_fk',
+      columns: [t.tenantId, t.academicYearId],
+      foreignColumns: [academicYears.tenantId, academicYears.id],
+    }).onDelete('restrict'),
+    // Self-reference: a version may supersede an earlier one, and both sides
+    // carry tenant_id so the edge cannot cross tenants.
+    foreignKey({
+      name: 'fin_fee_structures_supersedes_fk',
+      columns: [t.tenantId, t.supersedesId],
+      foreignColumns: [t.tenantId, t.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'fin_fee_structures_publisher_fk',
+      columns: [t.publishedBy],
+      foreignColumns: [users.id],
+    }).onDelete('restrict'),
+    check(
+      'fin_fee_structures_status_ck',
+      sql`${t.status} IN ('draft','published','retired','superseded')`,
+    ),
+    check('fin_fee_structures_version_check', sql`${t.version} >= 1`),
+    check(
+      'fin_fee_structures_dates_ck',
+      sql`${t.effectiveTo} IS NULL OR ${t.effectiveFrom} < ${t.effectiveTo}`,
+    ),
+    // draft ⟺ never published. The reverse half — stamping published_at on the
+    // transition — is the trigger's job and is not a constraint.
+    check(
+      'fin_fee_structures_published_ck',
+      sql`(
+        (${t.status} = 'draft' AND ${t.publishedAt} IS NULL)
+     OR (${t.status} <> 'draft' AND ${t.publishedAt} IS NOT NULL)
+      )`,
+    ),
+  ],
+);
+
+/** 0022. One priced line of a structure. Frozen once the structure is published. */
+export const finFeeStructureItems = pgTable(
+  'fin_fee_structure_items',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    structureId: uuid('structure_id').notNull(),
+    feeHeadId: uuid('fee_head_id').notNull(),
+    installmentNo: integer('installment_no').notNull().default(1),
+    amount: numeric('amount', { precision: 19, scale: 4 }).notNull(),
+    recurrence: text('recurrence').notNull().default('once'),
+  },
+  (t) => [
+    unique('fin_fee_structure_items_uq').on(t.tenantId, t.structureId, t.feeHeadId, t.installmentNo),
+    unique('fin_fee_structure_items_ten_id_uq').on(t.tenantId, t.id),
+    foreignKey({
+      name: 'fin_fee_structure_items_structure_fk',
+      columns: [t.tenantId, t.structureId],
+      foreignColumns: [finFeeStructures.tenantId, finFeeStructures.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'fin_fee_structure_items_fee_head_fk',
+      columns: [t.tenantId, t.feeHeadId],
+      foreignColumns: [finFeeHeads.tenantId, finFeeHeads.id],
+    }).onDelete('restrict'),
+    check('fin_fee_structure_items_installment_no_check', sql`${t.installmentNo} >= 1`),
+    check('fin_fee_structure_items_amount_check', sql`${t.amount} >= 0`),
+    check(
+      'fin_fee_structure_items_recurrence_check',
+      sql`${t.recurrence} IN ('once','monthly','termly','annual')`,
+    ),
+  ],
+);
+
+/** 0022. When each installment of a structure falls due. */
+export const finFeeInstallmentPlans = pgTable(
+  'fin_fee_installment_plans',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    structureId: uuid('structure_id').notNull(),
+    installmentNo: integer('installment_no').notNull(),
+    dueOn: date('due_on').notNull(),
+    label: text('label'),
+  },
+  (t) => [
+    unique('fin_installment_plans_uq').on(t.tenantId, t.structureId, t.installmentNo),
+    unique('fin_installment_plans_ten_id_uq').on(t.tenantId, t.id),
+    foreignKey({
+      name: 'fin_installment_plans_structure_fk',
+      columns: [t.tenantId, t.structureId],
+      foreignColumns: [finFeeStructures.tenantId, finFeeStructures.id],
+    }).onDelete('cascade'),
+    check('fin_fee_installment_plans_installment_no_check', sql`${t.installmentNo} >= 1`),
+  ],
+);
+
+/**
+ * 0022. Who a structure applies to: exactly one of five shapes, one row each.
+ *
+ * fin_targets_shape_ck is the whole point of this table and is reproduced
+ * faithfully, including the deliberate asymmetry that only the 'section' row
+ * constrains its pointer, letting the other three float.
+ */
+export const finFeeStructureTargets = pgTable(
+  'fin_fee_structure_targets',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    structureId: uuid('structure_id').notNull(),
+    targetType: text('target_type').notNull(),
+    campusId: uuid('campus_id'),
+    gradeId: uuid('grade_id'),
+    classId: uuid('class_id'),
+    sectionId: uuid('section_id'),
+    priority: integer('priority').notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // NULLS NOT DISTINCT is load-bearing. Without it the pointer columns a
+    // 'grade' target leaves NULL would let a byte-identical second row through,
+    // and an 'all' target has four NULLs by definition. Representable exactly in
+    // Drizzle 0.38, so it is stated rather than approximated.
+    unique('fin_targets_uq')
+      .on(t.tenantId, t.structureId, t.targetType, t.campusId, t.gradeId, t.classId, t.sectionId)
+      .nullsNotDistinct(),
+    unique('fin_targets_ten_id_uq').on(t.tenantId, t.id),
+    foreignKey({
+      name: 'fin_targets_structure_fk',
+      columns: [t.tenantId, t.structureId],
+      foreignColumns: [finFeeStructures.tenantId, finFeeStructures.id],
+    }).onDelete('cascade'),
+    // These four are declared with NO ON DELETE clause, which PostgreSQL records
+    // as NO ACTION, and that is the migration's declared DDL rather than an
+    // omission here. It is also the one place a 0022 table can outlive its
+    // target: deleting a campus leaves a target row pointing at nothing instead
+    // of refusing the delete. Reproduced as declared, not "fixed".
+    foreignKey({
+      name: 'fin_targets_campus_fk',
+      columns: [t.tenantId, t.campusId],
+      foreignColumns: [campuses.tenantId, campuses.id],
+    }),
+    foreignKey({
+      name: 'fin_targets_grade_fk',
+      columns: [t.tenantId, t.gradeId],
+      foreignColumns: [gradeLevels.tenantId, gradeLevels.id],
+    }),
+    foreignKey({
+      name: 'fin_targets_class_fk',
+      columns: [t.tenantId, t.classId],
+      foreignColumns: [acdClasses.tenantId, acdClasses.id],
+    }),
+    foreignKey({
+      name: 'fin_targets_section_fk',
+      columns: [t.tenantId, t.sectionId],
+      foreignColumns: [sections.tenantId, sections.id],
+    }),
+    check(
+      'fin_fee_structure_targets_target_type_check',
+      sql`${t.targetType} IN ('all','campus','grade','class','section')`,
+    ),
+    check(
+      'fin_targets_shape_ck',
+      sql`(
+        (${t.targetType} = 'all'     AND ${t.campusId} IS NULL     AND ${t.gradeId} IS NULL
+                                    AND ${t.classId} IS NULL     AND ${t.sectionId} IS NULL)
+     OR (${t.targetType} = 'campus'  AND ${t.campusId} IS NOT NULL AND ${t.gradeId} IS NULL
+                                    AND ${t.classId} IS NULL     AND ${t.sectionId} IS NULL)
+     OR (${t.targetType} = 'grade'   AND ${t.gradeId} IS NOT NULL AND ${t.classId} IS NULL
+                                    AND ${t.sectionId} IS NULL
+                                    AND (${t.campusId} IS NOT NULL OR ${t.campusId} IS NULL))
+     OR (${t.targetType} = 'class'   AND ${t.classId} IS NOT NULL AND ${t.sectionId} IS NULL
+                                    AND (${t.campusId} IS NOT NULL OR ${t.campusId} IS NULL)
+                                    AND (${t.gradeId} IS NOT NULL OR ${t.gradeId} IS NULL))
+     OR (${t.targetType} = 'section' AND ${t.sectionId} IS NOT NULL)
+      )`,
+    ),
+  ],
+);
+
+/**
+ * 0022. Which structure an enrollment is charged under, and for which period.
+ *
+ * §6.4 requires `student_id` and `academic_year_id` to equal the enrollment's,
+ * and that is enforced by trg_fin_assignment_validate — which is NOT visible
+ * here (limitation 1). Both columns are NOT NULL and both are declared, so a
+ * reader can see they are denormalised copies without being able to see that
+ * they are pinned. That distinction is the reason the behavioural suite exists.
+ */
+export const finFeeAssignments = pgTable(
+  'fin_fee_assignments',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    // Nullable on purpose: NULL means "charge nothing yet", and that row still
+    // has to be subject to the dedup index below.
+    structureId: uuid('structure_id'),
+    enrollmentId: uuid('enrollment_id').notNull(),
+    studentId: uuid('student_id').notNull(),
+    academicYearId: uuid('academic_year_id').notNull(),
+    effectiveFrom: date('effective_from').notNull(),
+    effectiveTo: date('effective_to'),
+    installmentPlanId: uuid('installment_plan_id'),
+    isActive: boolean('is_active').notNull().default(true),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('fin_fee_assignments_ten_id_uq').on(t.tenantId, t.id),
+    // D4. All THREE nullable key columns are COALESCEd, and the middle one is
+    // the whole defect: as a bare key column a NULL `structure_id` is a NULL to
+    // the index, so two byte-identical "assign nothing" rows both insert. The
+    // nil UUID is never produced by gen_random_uuid() and is not minted as a
+    // surrogate key by any application, so it cannot collide with a real
+    // structure_id. `effective_from` is NOT NULL as a column yet is COALESCEd in
+    // the index anyway — that is what the migration writes, reproduced verbatim
+    // rather than tidied.
+    uniqueIndex('fin_fee_assignments_one_active_uq')
+      .on(
+        t.tenantId,
+        t.enrollmentId,
+        sql`coalesce(${t.structureId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
+        sql`coalesce(${t.effectiveFrom}, date '0001-01-01')`,
+        sql`coalesce(${t.effectiveTo}, date '9999-12-31')`,
+      )
+      .where(sql`${t.isActive}`),
+    foreignKey({
+      name: 'fin_fee_assignments_structure_fk',
+      columns: [t.tenantId, t.structureId],
+      foreignColumns: [finFeeStructures.tenantId, finFeeStructures.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'fin_fee_assignments_enrollment_fk',
+      columns: [t.tenantId, t.enrollmentId],
+      foreignColumns: [enrollments.tenantId, enrollments.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'fin_fee_assignments_student_fk',
+      columns: [t.tenantId, t.studentId],
+      foreignColumns: [students.tenantId, students.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'fin_fee_assignments_year_fk',
+      columns: [t.tenantId, t.academicYearId],
+      foreignColumns: [academicYears.tenantId, academicYears.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'fin_fee_assignments_plan_fk',
+      columns: [t.tenantId, t.installmentPlanId],
+      foreignColumns: [finFeeInstallmentPlans.tenantId, finFeeInstallmentPlans.id],
+    }).onDelete('restrict'),
+    check(
+      'fin_fee_assignments_range_ck',
+      sql`${t.effectiveTo} IS NULL OR ${t.effectiveTo} >= ${t.effectiveFrom}`,
+    ),
+  ],
+);
+
+/**
+ * 0022. A recorded, replayable billing pass over one academic year.
+ *
+ * §8.7.1's freeze — once `status` reaches 'committed' the row is immutable and
+ * undeletable — is enforced by trg_fin_billing_run_freeze and is NOT visible
+ * here. Note also that there is deliberately NO transition graph: the design
+ * constrains the committed_at / cancelled_at pair but never enumerates which of
+ * the four statuses may follow which, so none is invented below.
+ */
+export const finBillingRuns = pgTable(
+  'fin_billing_runs',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    academicYearId: uuid('academic_year_id').notNull(),
+    status: text('status').notNull().default('draft'),
+    // A real uuid[], not a join table: the set of structures a run covered is
+    // frozen along with the run.
+    structureIds: uuid('structure_ids')
+      .array()
+      .notNull()
+      .default(sql`'{}'::uuid[]`),
+    idempotencyKey: text('idempotency_key').notNull(),
+    totalStudents: integer('total_students').notNull().default(0),
+    totalInvoices: integer('total_invoices').notNull().default(0),
+    totalAmount: numeric('total_amount', { precision: 19, scale: 4 }).notNull().default('0'),
+    // §6.3 R4 exception, the other of the two in 0022, and the only SET NULL in
+    // it. started_by is who pressed the button on an uncommitted run; losing
+    // that on account deletion is acceptable, which is exactly why this one is
+    // SET NULL and published_by is RESTRICT.
+    startedBy: uuid('started_by'),
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+    committedAt: timestamp('committed_at', { withTimezone: true }),
+    cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
+    cancelledReason: text('cancelled_reason'),
+  },
+  (t) => [
+    unique('fin_billing_runs_ten_id_uq').on(t.tenantId, t.id),
+    // Tenant-scoped, not global: two tenants may legitimately use the same key.
+    unique('fin_billing_runs_idem_uq').on(t.tenantId, t.idempotencyKey),
+    foreignKey({
+      name: 'fin_billing_runs_year_fk',
+      columns: [t.tenantId, t.academicYearId],
+      foreignColumns: [academicYears.tenantId, academicYears.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'fin_billing_runs_user_fk',
+      columns: [t.startedBy],
+      foreignColumns: [users.id],
+    }).onDelete('set null'),
+    check(
+      'fin_billing_runs_status_check',
+      sql`${t.status} IN ('draft','preview','committed','cancelled')`,
+    ),
+    check('fin_billing_runs_total_students_check', sql`${t.totalStudents} >= 0`),
+    check('fin_billing_runs_total_invoices_check', sql`${t.totalInvoices} >= 0`),
+    // §8.7's state coupling. cancelled requires a reason and forbids a commit;
+    // committed requires committed_at and forbids a cancel; draft and preview
+    // carry neither. Stamping the timestamps is the trigger's job.
+    check(
+      'fin_billing_runs_state_ck',
+      sql`(
+        (${t.status} = 'cancelled' AND ${t.cancelledAt} IS NOT NULL AND ${t.cancelledReason} IS NOT NULL
+                      AND ${t.committedAt} IS NULL)
+     OR (${t.status} = 'committed' AND ${t.committedAt} IS NOT NULL AND ${t.cancelledAt} IS NULL)
+     OR (${t.status} IN ('draft','preview') AND ${t.committedAt} IS NULL AND ${t.cancelledAt} IS NULL)
+      )`,
+    ),
+  ],
+);
+
+/**
+ * 0022. What a billing run actually charged, line by line.
+ *
+ * TWO properties here are not expressible in this module and are part of why the
+ * behavioural suite exists:
+ *   * There is NO `id`. The primary key is the triple
+ *     (tenant_id, run_id, enrollment_id), so one enrollment is billed at most
+ *     once per run. That is a correctness property, not a naming detail: the PK
+ *     refuses a duplicate charge before any trigger gets a chance to.
+ *   * `invoice_id` is nullable and has NO foreign key here. 0023 adds the
+ *     reference to fin_invoices; until it exists this is a free uuid column, and
+ *     §8.7.1's write-once attachment rule is the only thing governing it.
+ *
+ * trg_fin_billing_run_items_freeze freezes these rows once the run is committed,
+ * and on UPDATE it reads BOTH the source and the destination run, so run_id is
+ * not an exit from a committed run. Neither fact appears below.
+ */
+export const finBillingRunItems = pgTable(
+  'fin_billing_run_items',
+  {
+    tenantId: uuid('tenant_id').notNull(),
+    runId: uuid('run_id').notNull(),
+    enrollmentId: uuid('enrollment_id').notNull(),
+    studentId: uuid('student_id').notNull(),
+    structureId: uuid('structure_id').notNull(),
+    assignmentId: uuid('assignment_id'),
+    invoiceId: uuid('invoice_id'),
+    amount: numeric('amount', { precision: 19, scale: 4 }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({
+      columns: [t.tenantId, t.runId, t.enrollmentId],
+      name: 'fin_billing_run_items_pkey',
+    }),
+    foreignKey({
+      name: 'fin_bri_run_fk',
+      columns: [t.tenantId, t.runId],
+      foreignColumns: [finBillingRuns.tenantId, finBillingRuns.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'fin_bri_enrollment_fk',
+      columns: [t.tenantId, t.enrollmentId],
+      foreignColumns: [enrollments.tenantId, enrollments.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'fin_bri_student_fk',
+      columns: [t.tenantId, t.studentId],
+      foreignColumns: [students.tenantId, students.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'fin_bri_structure_fk',
+      columns: [t.tenantId, t.structureId],
+      foreignColumns: [finFeeStructures.tenantId, finFeeStructures.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'fin_bri_assignment_fk',
+      columns: [t.tenantId, t.assignmentId],
+      foreignColumns: [finFeeAssignments.tenantId, finFeeAssignments.id],
+    }).onDelete('restrict'),
+    check('fin_billing_run_items_amount_check', sql`${t.amount} >= 0`),
   ],
 );

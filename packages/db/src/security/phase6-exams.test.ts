@@ -1841,7 +1841,7 @@ describeDb('Phase 6 RLS + exam/result integrity (exams, marks, report cards on s
       ]);
 
     describe('F-06 every Phase 6 trigger/helper function pins its search_path', () => {
-      it('pg_proc.proconfig carries search_path=public for all of them', async () => {
+      it('pg_proc.proconfig pins search_path on every one of them', async () => {
         // Asserted against the CATALOG, so a future migration that adds a function
         // without pinning it shows up here instead of being an exploit at runtime.
         const rows = await migQ<{ proname: string; proconfig: string[] | null }>(
@@ -1856,10 +1856,18 @@ describeDb('Phase 6 RLS + exam/result integrity (exams, marks, report cards on s
         // vacuously green, which is exactly the failure mode F-06 had.
         expect(rows.length).toBeGreaterThanOrEqual(34);
 
-        const unpinned = rows.filter(
-          (r) => !(r.proconfig ?? []).some((c) => /^search_path=public, ?pg_catalog/.test(c)),
-        );
+        // EITHER pinned ordering is accepted. The 41 Phase 6 functions pin
+        // `public, pg_catalog`; 0022's six trg_fin_* guards pin
+        // `pg_catalog, public, pg_temp`. pg_catalog first is the STRONGER form --
+        // it is what stops a user-writable schema shadowing a built-in -- so
+        // accepting it here does not weaken the assertion. What must never
+        // pass is a function with no pin at all, or one that omits pg_catalog.
+        const pinned = (cfg: string[] | null): boolean =>
+          (cfg ?? []).some((c) => /^search_path=(public, ?pg_catalog|pg_catalog, ?public)/.test(c));
+        const unpinned = rows.filter((r) => !pinned(r.proconfig));
         expect(unpinned.map((r) => r.proname)).toEqual([]);
+        // And nothing may drop proconfig entirely and slip past the regex above.
+        expect(rows.filter((r) => (r.proconfig ?? []).length === 0).map((r) => r.proname)).toEqual([]);
       });
 
       it('includes the two Phase 6 functions the remediation added or changed', async () => {
