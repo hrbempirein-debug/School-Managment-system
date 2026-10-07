@@ -621,6 +621,13 @@ describeDb('API authorization contracts (real app + real DB, HTTP-level)', () =>
       'GET /api/v1/report-cards/:id': { kind: 'tenant', permission: 'exams.read', devOnly: false },
       'GET /api/v1/students/:studentId/transcript': { kind: 'tenant', permission: 'exams.read', devOnly: false },
       'GET /api/v1/me/results': { kind: 'tenant', permission: 'exams.read', devOnly: false },
+      // Phase 7 finance refunds. The step-up mint is an authenticated-context
+      // route with no catalog permission: it only mints a challenge bound to the
+      // caller's own session, and the decision routes carry the fee catalog.
+      'POST /api/v1/finance/refunds/:id/step-up': { kind: 'authenticated', permission: null, devOnly: false },
+      'POST /api/v1/finance/refunds/:id/approve': { kind: 'tenant', permission: 'fees.refunds.approve', devOnly: false },
+      'POST /api/v1/finance/refunds/:id/reject': { kind: 'tenant', permission: 'fees.refunds.approve', devOnly: false },
+      'POST /api/v1/finance/refunds/:id/process': { kind: 'tenant', permission: 'fees.refunds.process', devOnly: false },
     };
     // Fastify exposes a HEAD twin for every GET route; the gate captures and
     // validates those under the identical contract.

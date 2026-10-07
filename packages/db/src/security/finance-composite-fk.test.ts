@@ -6,6 +6,7 @@ import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
 import {
   finBillingRunItems,
   finBillingRuns,
+  finChallans,
   finDocumentCounters,
   finFeeAssignments,
   finFeeHeads,
@@ -13,14 +14,27 @@ import {
   finFeeStructureItems,
   finFeeStructureTargets,
   finFeeStructures,
+  finInvoiceAdjustments,
+  finInvoiceItems,
+  finInvoices,
   finLedgerAccounts,
+  finPaymentAllocations,
+  finPayments,
+  finReceipts,
+  finRefunds,
+  finLedgerEntryGroups,
+  finLedgerEntries,
+  finLedgerEventTypes,
+  finReconciliationBatches,
+  finReconciliationMatches,
   finTaxProfiles,
   finTenantSettings,
 } from '../schema.js';
 
 /**
- * 0022 composite-FK + tenant-isolation proofs, run against the REAL roles and
- * the disposable test database. Requires migrations 0001..0022.
+ * 0022 composite-FK + tenant-isolation proofs, plus the 0023–0025 tables that
+ * extend them. Run against the REAL roles and the disposable test database.
+ * Requires migrations 0001..0025.
  *
  * Every assertion is read from the live catalog or provoked against the live
  * database; no migration text is searched. Section E is the one that keeps
@@ -29,11 +43,26 @@ import {
  * database actually contains, so a schema edit that drifts from the applied
  * migration fails here instead of silently lying to the API layer.
  *
- * Section A -- FK shape: the exact 23 constraints, and the rule that matters --
+ * SCOPE AFTER 0023–0025. 0022 was the last migration to add a finance table on
+ * its own, and it is still the phase's reference for the composite-FK RULE. But
+ * two of its counts were deliberately per-migration and are now stale, and this
+ * suite states the later reality rather than pretending 0023–0025 never landed:
+ *   * fin_billing_run_items carries 24 FKs, not the 23 0022 installed — 0023
+ *     added fin_bri_invoice_fk by ALTER once fin_invoices existed (a forward
+ *     reference in 0022 would have failed 42P01). Section A asserts BOTH halves:
+ *     that 0022's 23 are unchanged, and that the one addition is exactly that FK.
+ *   * There are 20 fin_* tables, not 12. Sections D and E widen to all 20 rather
+ *     than staying green by looking at a 0022-only slice.
+ * Nothing else is relaxed: every 0022 proof below still runs against the same
+ * catalog objects it was written for.
+ *
+ * Section A -- FK shape: the 0022 constraint set, and the rule that matters --
  *   every fin_* FK is (tenant_id, <col>) -> (tenant_id, id), so a row can never
  *   be joined to a parent in another tenant. The ONLY exceptions are the two
  *   single-column users(id) references, because users is global and has no
- *   tenant_id to composite on.
+ *   tenant_id to composite on. The 0023–0025 tables add three more single-column
+ *   users(id) references on audit identities (fin_invoices.created_by, and both
+ *   fin_invoice_adjustments identities) and are checked by the same rule.
  * Section B -- anchors: each tenant-scoped parent really does expose a unique
  *   (tenant_id, id) index, which is what makes the composite FKs enforceable at
  *   all; users has none, which is the allowlist's whole justification.
@@ -41,14 +70,16 @@ import {
  *   SET NULL really nulls, and the four fin_targets_* FKs are NO ACTION (a
  *   deliberate choice: cascade would delete a published structure's target
  *   rows, and the freeze trigger is the layer that owns that decision).
- * Section D -- posture: no fin_* privilege for school_app_rw, no RLS, no
- *   policies, no app grant, fin_invoices still absent, and nothing points at
- *   fin_billing_run_items.
+ * Section D -- posture after 0028 (recon §H inversions): school_app_rw holds
+ *   exactly the §D.2 grant shape per fin_* table with DELETE and PUBLIC absent;
+ *   every fin_* table is RLS enabled+forced with the §B.1 command set, DELETE
+ *   omitted exactly where §B.2.10 omits it; and the 0023 invoice attachment
+ *   named exactly.
  * Section E -- schema.ts mirrors the catalog (columns, nullability, FKs, checks,
- *   unique constraints, indexes) for all 12 finance tables.
+ *   unique constraints, indexes) for all 20 finance tables.
  * Section F -- a cross-tenant insert is refused by the composite FK itself.
  *
- * Opt-in: RUN_RUNTIME_SECURITY_TESTS=1 (requires PostgreSQL + migration 0022).
+ * Opt-in: RUN_RUNTIME_SECURITY_TESTS=1 (requires PostgreSQL + migration 0028).
  */
 const enabled = process.env.RUN_RUNTIME_SECURITY_TESTS === '1';
 const describeDb = enabled ? describe : describe.skip;
@@ -69,6 +100,18 @@ const u = (k: string): string => {
   return v;
 };
 const slug = randomUUID().slice(0, 8);
+
+/**
+ * The composite references whose TARGET is a tenant-prefixed natural key rather
+ * than (tenant_id, id). There is exactly one in Phase 7, and it is a stronger
+ * constraint than an id reference rather than a weaker one: the line's
+ * installment must belong to the line's structure's own plan, so no line can name
+ * an installment of some other structure.
+ */
+const NATURAL_KEY_FKS = [
+  { fk: 'fin_invoice_items_plan_fk', tgt: 'fin_fee_installment_plans', cols: 'tenant_id,structure_id,installment_no' },
+  { fk: 'fin_leg_entries_account_fk', tgt: 'fin_ledger_accounts', cols: 'tenant_id,code' },
+] as const;
 
 type Row = Record<string, unknown>;
 
@@ -119,6 +162,18 @@ const T0022 = [
   'fin_billing_run_items',
 ] as const;
 
+/** The 8 tables 0023–0025 add. fin_challans arrives with 0023, not 0024. */
+const T0023_0025 = [
+  'fin_invoices',
+  'fin_invoice_items',
+  'fin_invoice_adjustments',
+  'fin_challans',
+  'fin_payments',
+  'fin_payment_allocations',
+  'fin_receipts',
+  'fin_refunds',
+] as const;
+
 const ALL_FIN = [
   'fin_tax_profiles',
   'fin_tenant_settings',
@@ -126,12 +181,93 @@ const ALL_FIN = [
   'fin_document_counters',
   'fin_fee_heads',
   ...T0022,
+  ...T0023_0025,
+  'fin_ledger_entry_groups',
+  'fin_ledger_entries',
+  'fin_ledger_event_types',
+  'fin_reconciliation_batches',
+  'fin_reconciliation_matches',
 ] as const;
 
-/** The two R4-allowlisted single-column references, and the global `users` parent. */
+/**
+ * The §D.2 grant shape per `fin_*` table as exposed by `aclexplode(relacl)`:
+ * table-level privileges granted to `school_app_rw` after 0028. Shape 2's
+ * INSERT/UPDATE are column-level and therefore live in `attacl`, not `relacl` —
+ * those tables show table-level SELECT only here. `fin_ledger_event_types`
+ * (Shape 5) is asserted, never granted.
+ */
+const SHAPE: Record<string, string[]> = {
+  // §D.2 Shape 1 — table-level SELECT, INSERT, UPDATE; DELETE revoked (10).
+  fin_tenant_settings: ['INSERT', 'SELECT', 'UPDATE'],
+  fin_fee_heads: ['INSERT', 'SELECT', 'UPDATE'],
+  fin_tax_profiles: ['INSERT', 'SELECT', 'UPDATE'],
+  fin_fee_structures: ['INSERT', 'SELECT', 'UPDATE'],
+  fin_fee_structure_items: ['INSERT', 'SELECT', 'UPDATE'],
+  fin_fee_installment_plans: ['INSERT', 'SELECT', 'UPDATE'],
+  fin_fee_structure_targets: ['INSERT', 'SELECT', 'UPDATE'],
+  fin_fee_assignments: ['INSERT', 'SELECT', 'UPDATE'],
+  fin_reconciliation_batches: ['INSERT', 'SELECT', 'UPDATE'],
+  fin_reconciliation_matches: ['INSERT', 'SELECT', 'UPDATE'],
+  // §D.2 Shape 2 — column-level INSERT/UPDATE; table-level grant is SELECT only (3).
+  fin_invoices: ['SELECT'],
+  fin_invoice_items: ['SELECT'],
+  fin_invoice_adjustments: ['SELECT'],
+  // §D.2 Shape 3 — SELECT + INSERT; UPDATE and DELETE revoked (8).
+  fin_challans: ['INSERT', 'SELECT'],
+  fin_document_counters: ['INSERT', 'SELECT'],
+  fin_payments: ['INSERT', 'SELECT'],
+  fin_payment_allocations: ['INSERT', 'SELECT'],
+  fin_receipts: ['INSERT', 'SELECT'],
+  fin_refunds: ['INSERT', 'SELECT'],
+  fin_billing_runs: ['INSERT', 'SELECT'],
+  fin_billing_run_items: ['INSERT', 'SELECT'],
+  // §D.2 Shape 4 — SELECT only (2).
+  fin_ledger_entry_groups: ['SELECT'],
+  fin_ledger_entries: ['SELECT'],
+  // §D.2 Shape 5 — fin_ledger_accounts SELECT only; fin_ledger_event_types zero (2).
+  fin_ledger_accounts: ['SELECT'],
+  fin_ledger_event_types: [],
+};
+
+/**
+ * The single FK that 0023 added to a 0022 table, by ALTER, once fin_invoices
+ * existed. It is the ONLY reason section A cannot count 23 any more, and it is
+ * named here rather than folded into a number so a future fourth addition to a
+ * 0022 table has to be declared in this file to pass.
+ */
+const ADDED_AFTER_0022 = [
+  { fk: 'fin_bri_invoice_fk', src: 'fin_billing_run_items', tgt: 'fin_invoices' },
+] as const;
+
+/** The R4-allowlisted single-column references, and the global `users` parent. */
 const R4_SINGLE_COLUMN = [
   { fk: 'fin_fee_structures_publisher_fk', src: 'fin_fee_structures', col: 'published_by', onDelete: 'r' },
   { fk: 'fin_billing_runs_user_fk', src: 'fin_billing_runs', col: 'started_by', onDelete: 'n' },
+] as const;
+
+/**
+ * EVERY single-column FK on a fin_* table, across all 20 of them. A single-column
+ * reference is the one shape in this suite that is not tenant-scoped, so the
+ * set is closed and named here rather than filtered by prefix at the point of
+ * use. Two kinds only:
+ *   * `users.id` — users is platform-global (P0-06a) and has no tenant_id, so
+ *     there is nothing to composite on. All five are audit identities
+ *     (published_by, started_by, and 0023's created_by / requested_by /
+ *     approved_by), so none is CASCADE.
+ *   * `tenants.id` — tenants IS the tenant, so a composite would be (id, id).
+ *     These four are CASCADE because deleting a tenant must take its money
+ *     configuration with it.
+ */
+const GLOBAL_PARENT_FKS = [
+  { fk: 'fin_fee_structures_publisher_fk', src: 'fin_fee_structures', col: 'published_by', tgt: 'users', onDelete: 'r' },
+  { fk: 'fin_billing_runs_user_fk', src: 'fin_billing_runs', col: 'started_by', tgt: 'users', onDelete: 'n' },
+  { fk: 'fin_invoices_created_by_fk', src: 'fin_invoices', col: 'created_by', tgt: 'users', onDelete: 'r' },
+  { fk: 'fin_invoice_adjustments_requester_fk', src: 'fin_invoice_adjustments', col: 'requested_by', tgt: 'users', onDelete: 'r' },
+  { fk: 'fin_invoice_adjustments_user_fk', src: 'fin_invoice_adjustments', col: 'approved_by', tgt: 'users', onDelete: 'r' },
+  { fk: 'fin_tax_profiles_tenant_fk', src: 'fin_tax_profiles', col: 'tenant_id', tgt: 'tenants', onDelete: 'c' },
+  { fk: 'fin_tenant_settings_tenant_fk', src: 'fin_tenant_settings', col: 'tenant_id', tgt: 'tenants', onDelete: 'c' },
+  { fk: 'fin_ledger_accounts_tenant_fk', src: 'fin_ledger_accounts', col: 'tenant_id', tgt: 'tenants', onDelete: 'c' },
+  { fk: 'fin_fee_heads_tenant_fk', src: 'fin_fee_heads', col: 'tenant_id', tgt: 'tenants', onDelete: 'c' },
 ] as const;
 
 const fkRows = async (tables: readonly string[]): Promise<Row[]> =>
@@ -169,6 +305,10 @@ const TYPE_ALIASES: Record<string, string> = {
   timestamp: 'timestamp without time zone',
   timetz: 'time with time zone',
   time: 'time without time zone',
+  // char(n) is bpchar in the catalog and `char(n)` in SQL; the precision is
+  // stripped below, so only the base word has to be folded. 0024's currency
+  // columns are the reason this alias exists.
+  bpchar: 'char',
 };
 
 const baseType = (raw: string): string => {
@@ -195,6 +335,19 @@ const FIN_TABLES: Record<string, PgTable> = {
   fin_fee_assignments: finFeeAssignments as unknown as PgTable,
   fin_billing_runs: finBillingRuns as unknown as PgTable,
   fin_billing_run_items: finBillingRunItems as unknown as PgTable,
+  fin_invoices: finInvoices as unknown as PgTable,
+  fin_invoice_items: finInvoiceItems as unknown as PgTable,
+  fin_invoice_adjustments: finInvoiceAdjustments as unknown as PgTable,
+  fin_challans: finChallans as unknown as PgTable,
+  fin_payments: finPayments as unknown as PgTable,
+  fin_payment_allocations: finPaymentAllocations as unknown as PgTable,
+  fin_receipts: finReceipts as unknown as PgTable,
+  fin_refunds: finRefunds as unknown as PgTable,
+  fin_reconciliation_batches: finReconciliationBatches as unknown as PgTable,
+  fin_reconciliation_matches: finReconciliationMatches as unknown as PgTable,
+  fin_ledger_entry_groups: finLedgerEntryGroups as unknown as PgTable,
+  fin_ledger_entries: finLedgerEntries as unknown as PgTable,
+  fin_ledger_event_types: finLedgerEventTypes as unknown as PgTable,
 };
 
 describeDb('0022 composite FK, anchors, delete actions, and schema fidelity', () => {
@@ -326,25 +479,68 @@ describeDb('0022 composite FK, anchors, delete actions, and schema fidelity', ()
   });
 
   describe('A. FK shape and the tenant-scoping rule', () => {
-    it('installs exactly 23 FKs across the 7 0022 tables', async () => {
+    it('still installs exactly the 23 FKs of 0022, unchanged', async () => {
       const rows = await fkRows(T0022);
-      expect(rows).toHaveLength(23);
-      expect(rows.every((r) => r.on_update === 'a')).toBe(true);
+      const later = new Set<string>(ADDED_AFTER_0022.map((r) => r.fk));
+      const owned = rows.filter((r) => !later.has(String(r.fk)));
+      expect(owned).toHaveLength(23);
+      expect(owned.every((r) => r.on_update === 'a')).toBe(true);
     });
 
-    it('gives every FK but the two R4 exceptions a composite (tenant_id, col) -> (tenant_id, id) shape', async () => {
+    it('adds exactly the declared 0023–0025 FKs to the 0022 tables, and nothing else', async () => {
+      // The other half of the count above. Stating 23 alone would let a later
+      // migration add a fourth FK to a 0022 table and the suite would call it
+      // drift; stating the additions by name makes that a declared change.
       const rows = await fkRows(T0022);
-      const allow = new Set<string>(R4_SINGLE_COLUMN.map((r) => r.fk));
-      for (const r of rows) {
-        if (allow.has(String(r.fk))) continue;
-        // A single-column FK here would be the whole tenant-isolation bug: it
-        // would let a row name a parent belonging to a different tenant.
+      const later = new Set<string>(ADDED_AFTER_0022.map((r) => r.fk));
+      const added = rows.filter((r) => later.has(String(r.fk)));
+      expect(rows).toHaveLength(23 + ADDED_AFTER_0022.length);
+      expect(
+        added
+          .map((r) => `${String(r.fk)}:${String(r.src_table)}->${String(r.tgt_table)}`)
+          .sort(),
+      ).toEqual(
+        ADDED_AFTER_0022.map((r) => `${r.fk}:${r.src}->${r.tgt}`).sort(),
+      );
+      // And it is a real composite reference, not a bare uuid column: this is
+      // what stops a run item being invoiced into another tenant.
+      for (const r of added) {
         expect(String(r.src_cols), String(r.fk)).toMatch(/^tenant_id,/);
         expect(String(r.tgt_cols), String(r.fk)).toBe('tenant_id,id');
       }
     });
 
-    it('allows exactly the two documented single-column users(id) references', async () => {
+    it('gives every FK but the documented global-parent exceptions a composite (tenant_id, col) -> (tenant_id, id) shape', async () => {
+      // Widened from the 7 0022 tables to all 20: the tenant-scoping rule is a
+      // phase-wide invariant, and 0023–0025 add 8 more tables that could each
+      // have got it wrong.
+      const rows = await fkRows(ALL_FIN);
+      const allow = new Set<string>(GLOBAL_PARENT_FKS.map((r) => r.fk));
+      const natural = new Map<string, string>(
+        NATURAL_KEY_FKS.map((r) => [r.fk, r.cols]),
+      );
+      for (const r of rows) {
+        if (allow.has(String(r.fk))) continue;
+        // A single-column FK here would be the whole tenant-isolation bug: it
+        // would let a row name a parent belonging to a different tenant. BOTH
+        // sides must be tenant-prefixed, and the target side is what stops a
+        // tenant A row from pointing at a tenant B parent.
+        expect(String(r.src_cols), String(r.fk)).toMatch(/^tenant_id,/);
+        expect(String(r.tgt_cols), String(r.fk)).toMatch(/^tenant_id,/);
+        // A composite target is normally (tenant_id, id); the declared exceptions
+        // name a natural key and are compared exactly rather than waved through.
+        const wantTarget = natural.get(String(r.fk)) ?? 'tenant_id,id';
+        expect(String(r.tgt_cols), String(r.fk)).toBe(wantTarget);
+      }
+      // The allowlist must not have quietly become a blanket, and the natural-key
+      // list must not have become a dumping ground: only these two exemptions
+      // exist across all 20 tables.
+      expect(allow.size).toBeGreaterThanOrEqual(9);
+      expect([...natural.keys()].filter((k) => allow.has(k))).toEqual([]);
+      expect(natural.size).toBeGreaterThanOrEqual(1);
+    });
+
+    it('allows exactly the two documented single-column users(id) references on 0022', async () => {
       const rows = await fkRows(T0022);
       const single = rows
         .filter((r) => !String(r.src_cols).includes(','))
@@ -363,6 +559,43 @@ describeDb('0022 composite FK, anchors, delete actions, and schema fidelity', ()
       expect(usersCols.map((c) => c.attname)).not.toContain('tenant_id');
     });
 
+    it('names all 9 single-column references across the 20 tables, and no others', async () => {
+      // A single-column reference is the one shape in this file that is NOT
+      // tenant-scoped, so every one of them across all 20 tables is named and
+      // counted rather than allow-listed by prefix. There are exactly two kinds:
+      // a global `users` audit identity, and `tenants.id` — where the parent IS
+      // the tenant, so (id, id) would be the composite and the single column is
+      // correct rather than merely permitted.
+      const rows = await fkRows(ALL_FIN);
+      const single = rows
+        .filter((r) => !String(r.src_cols).includes(','))
+        .map(
+          (r) =>
+            `${String(r.fk)}:${String(r.src_table)}.${String(r.src_cols)}->${String(r.tgt_table)}.${String(r.tgt_cols)}`,
+        )
+        .sort();
+      expect(single).toEqual(
+        GLOBAL_PARENT_FKS.map((r) => `${r.fk}:${r.src}.${r.col}->${r.tgt}.id`).sort(),
+      );
+      for (const r of rows) {
+        if (String(r.src_cols).includes(',')) continue;
+        const declared = GLOBAL_PARENT_FKS.find((g) => g.fk === r.fk);
+        expect(declared, `undeclared single-column FK ${String(r.fk)}`).toBeDefined();
+        expect(String(r.on_delete), String(r.fk)).toBe(declared!.onDelete);
+      }
+      // The five users(id) references are audit identities, and neither CASCADE
+      // nor an unqualified action may rewrite or erase one. The four tenants(id)
+      // references are the opposite case and CASCADE is required there: deleting
+      // a tenant must take its money configuration with it.
+      for (const g of GLOBAL_PARENT_FKS) {
+        if (g.tgt !== 'users') continue;
+        expect(['r', 'n'], `${g.fk} may not cascade or be a bare action`).toContain(g.onDelete);
+      }
+      expect(GLOBAL_PARENT_FKS.filter((g) => g.tgt === 'tenants').map((g) => g.onDelete)).toEqual([
+        'c', 'c', 'c', 'c',
+      ]);
+    });
+
     it('names both R4 exceptions exactly, with their distinct delete actions', async () => {
       const rows = await fkRows(T0022);
       for (const want of R4_SINGLE_COLUMN) {
@@ -374,9 +607,10 @@ describeDb('0022 composite FK, anchors, delete actions, and schema fidelity', ()
       }
     });
 
-    it('leaves no FK pointing FROM a 0021 foundation table INTO a 0022 table', async () => {
+    it('leaves no FK pointing FROM a 0021 foundation table INTO a 0022 or later table', async () => {
       // 0022 must not reach back and constrain the 0021 foundation: the
-      // dependency is one-way, so 0021 stays valid on its own.
+      // dependency is one-way, so 0021 stays valid on its own. 0023–0025 hold
+      // to the same direction — nothing older gained a forward reference.
       const rows = await mig(
         `select src.relname as src_table, con.conname as fk, tgt.relname as tgt_table
            from pg_constraint con
@@ -386,7 +620,7 @@ describeDb('0022 composite FK, anchors, delete actions, and schema fidelity', ()
           where con.contype='f' and n.nspname='public'
             and src.relname in ('fin_tax_profiles','fin_tenant_settings','fin_ledger_accounts',
                                 'fin_document_counters','fin_fee_heads')
-            and tgt.relname in (${T0022.map(q).join(',')})`,
+            and tgt.relname in (${[...T0022, ...T0023_0025].map(q).join(',')})`,
       );
       expect(rows).toEqual([]);
     });
@@ -394,6 +628,10 @@ describeDb('0022 composite FK, anchors, delete actions, and schema fidelity', ()
 
   describe('B. anchor coverage on every tenant-scoped parent', () => {
     it('exposes a unique (tenant_id, id) index on each referenced tenant-scoped parent', async () => {
+      // Widened to FKs from all 20 finance tables: 0023–0025 reference four more
+      // tenant-scoped parents (fin_invoices, fin_payments, fin_refunds and
+      // guardians among them), and an unanchored parent would make their
+      // composite FKs unenforceable in the same silent way it would for 0022.
       const rows = await mig(
         `with parents as (
             select distinct c.oid, c.relname
@@ -402,7 +640,7 @@ describeDb('0022 composite FK, anchors, delete actions, and schema fidelity', ()
               join pg_class src on src.oid = con.conrelid
               join pg_namespace n on n.oid = c.relnamespace
              where con.contype='f' and n.nspname='public'
-               and src.relname in (${T0022.map(q).join(',')})
+               and src.relname in (${ALL_FIN.map(q).join(',')})
         )
         select p.relname as parent,
                (select string_agg(i.relname, ', ' order by i.relname)
@@ -414,15 +652,36 @@ describeDb('0022 composite FK, anchors, delete actions, and schema fidelity', ()
                          where k.ord <= 2) = array['tenant_id','id']) as anchor
           from parents p order by p.relname`,
       );
-      // The 7 pre-existing parents 0021 anchored, plus the 6 0022 tables that
-      // can be referenced; users is the one global parent with no tenant_id.
-      const tenantScoped = rows.filter((r) => r.parent !== 'users');
-      expect(tenantScoped.length).toBeGreaterThanOrEqual(12);
+      // users is platform-global and tenants IS the tenant, so those two are the
+      // only referenced parents with no (tenant_id, id) to anchor on. Naming
+      // both is what makes the exemption deliberate: a THIRD global parent would
+      // fail here rather than quietly exempt itself.
+      const globals = rows.filter((r) => r.parent === 'users' || r.parent === 'tenants');
+      expect(globals.map((r) => r.parent).sort()).toEqual(['tenants', 'users']);
+      const tenantScoped = rows.filter(
+        (r) => r.parent !== 'users' && r.parent !== 'tenants',
+      );
+      expect(tenantScoped.length).toBeGreaterThanOrEqual(20);
       for (const r of tenantScoped) {
         // Without this index the composite FKs have nothing to enforce against.
         expect(String(r.anchor ?? ''), `${String(r.parent)} has no (tenant_id, id) anchor`).not.toBe('');
       }
-      expect(rows.find((r) => r.parent === 'users')?.anchor ?? null).toBeNull();
+      for (const r of globals) {
+        expect(r.anchor, `${String(r.parent)} unexpectedly has a tenant_id anchor`).toBeNull();
+      }
+      const usersCols = await mig(
+        `select attname from pg_attribute
+          where attrelid = 'users'::regclass and attnum > 0 and not attisdropped
+          order by attnum`,
+      );
+      expect(usersCols.map((c) => c.attname)).not.toContain('tenant_id');
+      const tenantCols = await mig(
+        `select attname from pg_attribute
+          where attrelid = 'tenants'::regclass and attnum > 0 and not attisdropped
+          order by attnum`,
+      );
+      expect(tenantCols.map((c) => c.attname)).toContain('id');
+      expect(tenantCols.map((c) => c.attname)).not.toContain('tenant_id');
     });
   });
 
@@ -533,57 +792,115 @@ describeDb('0022 composite FK, anchors, delete actions, and schema fidelity', ()
     });
   });
 
-  describe('D. security posture', () => {
-    it('grants school_app_rw nothing at all on any of the 12 fin_* tables', async () => {
+  describe('D. security posture after 0028', () => {
+    it('grants school_app_rw exactly the §D.2 shape per fin_* table, with DELETE and PUBLIC absent', async () => {
       const rows = await mig(
         `select c.relname as tbl, r.rolname as grantee, a.privilege_type
            from pg_class c
            join pg_namespace n on n.oid = c.relnamespace
            cross join lateral aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
            left join pg_roles r on r.oid = a.grantee
-          where n.nspname='public' and c.relname like 'fin\\_%' and c.relkind='r'
-            and (r.rolname is not null or a.grantee = 0)`,
+          where n.nspname='public' and c.relname in (${ALL_FIN.map(q).join(',')}) and c.relkind='r'`,
       );
-      const appRows = rows.filter((r) => r.grantee === 'school_app_rw' || r.grantee === null);
-      // The finance tables are not app-reachable in 0022: the API must go
-      // through reviewed service code with the migrator's tenant context, so
-      // granting the app role anything here would bypass that entirely.
-      expect(appRows).toEqual([]);
+      const byTbl = new Map<string, Row[]>();
       for (const r of rows) {
-        expect(String(r.grantee), `${String(r.tbl)} grants ${String(r.privilege_type)}`).toBe('school_migrator');
+        const k = String(r.tbl);
+        byTbl.set(k, [...(byTbl.get(k) ?? []), r]);
+      }
+      for (const tbl of ALL_FIN) {
+        const t = byTbl.get(tbl) ?? [];
+        const appPriv = t
+          .filter((r) => r.grantee === 'school_app_rw')
+          .map((r) => String(r.privilege_type))
+          .sort();
+        // The relacl of a Shape-2 table carries only its table-level SELECT;
+        // the column-level INSERT/UPDATE live in attacl (§D.2). Tables without
+        // grant history (fin_ledger_event_types, Shape 5) grant nothing.
+        expect(appPriv, `${tbl}: §D.2 table-level shape`).toEqual(SHAPE[tbl]);
+        expect(t.some((r) => r.grantee === null), `${tbl}: PUBLIC grant`).toBe(false);
+        for (const r of t) {
+          const g = r.grantee === null ? 'PUBLIC' : String(r.grantee);
+          if (g === 'school_app_rw') continue;
+          expect(g, `${tbl}: unexpected grantee ${g} (${String(r.privilege_type)})`).toBe(
+            'school_migrator',
+          );
+        }
       }
     });
 
-    it('enables no RLS and defines no policy on any 0022 table', async () => {
+    it('enables + forces RLS on every fin_* table and installs the §B.1 command set, with DELETE omitted exactly per §B.2.10', async () => {
       const rls = await mig(
         `select c.relname as tbl, c.relrowsecurity as rls, c.relforcerowsecurity as force
            from pg_class c join pg_namespace n on n.oid = c.relnamespace
-          where n.nspname='public' and c.relname in (${T0022.map(q).join(',')}) and c.relkind='r'`,
+          where n.nspname='public' and c.relname in (${ALL_FIN.map(q).join(',')}) and c.relkind='r'`,
       );
-      expect(rls).toHaveLength(7);
+      expect(rls.length).toBe(ALL_FIN.length);
       for (const r of rls) {
-        // Tenant isolation here is enforced by the composite FKs, not RLS: a
-        // session context could be forged, so no policy may rely on one.
-        expect(r.rls, String(r.tbl)).toBe(false);
-        expect(r.force, String(r.tbl)).toBe(false);
+        expect(r.rls, `${String(r.tbl)}: RLS enabled`).toBe(true);
+        expect(r.force, `${String(r.tbl)}: RLS FORCEd`).toBe(true);
       }
       const pol = await mig(
-        `select c.relname as tbl, p.polname
+        `select c.relname as tbl, p.polcmd
            from pg_policy p
            join pg_class c on c.oid = p.polrelid
            join pg_namespace n on n.oid = c.relnamespace
-          where n.nspname='public' and c.relname in (${T0022.map(q).join(',')})`,
+          where n.nspname='public' and c.relname in (${ALL_FIN.map(q).join(',')})`,
       );
-      expect(pol).toEqual([]);
+      const CMD: Record<string, string> = { r: 'SELECT', a: 'INSERT', w: 'UPDATE', d: 'DELETE', '*': 'ALL' };
+      const cmds = new Map<string, Set<string>>();
+      for (const r of pol) {
+        const k = String(r.tbl);
+        const cmd = CMD[String(r.polcmd)] ?? String(r.polcmd);
+        if (!cmds.has(k)) cmds.set(k, new Set());
+        cmds.get(k)!.add(cmd);
+      }
+      const DELETE_OMITTED = new Set([
+        'fin_receipts',
+        'fin_ledger_accounts',
+        'fin_ledger_entry_groups',
+        'fin_ledger_entries',
+      ]);
+      for (const tbl of ALL_FIN) {
+        const set = cmds.get(tbl) ?? new Set();
+        expect(
+          set.has('SELECT') && set.has('INSERT') && set.has('UPDATE'),
+          `${tbl}: SELECT/INSERT/UPDATE policies`,
+        ).toBe(true);
+        // 0028 adaptation A13: per-command policies only, never FOR ALL.
+        expect(set.has('ALL'), `${tbl}: no FOR ALL policy`).toBe(false);
+        if (DELETE_OMITTED.has(tbl)) {
+          expect(set.has('DELETE'), `${tbl}: DELETE must be omitted`).toBe(false);
+        } else {
+          expect(set.has('DELETE'), `${tbl}: DELETE policy required`).toBe(true);
+        }
+      }
     });
 
-    it('leaves fin_invoices absent and points no FK at fin_billing_run_items', async () => {
+    it('names the 0023 invoice attachment exactly, and still points no FK at fin_billing_run_items', async () => {
+      // This replaced "fin_invoices is absent and nothing points at
+      // fin_billing_run_items", which was true of 0022 as a standalone migration
+      // and stopped being true when 0023 landed. Both halves that survive are
+      // asserted here, in the directions they actually hold:
+      //   * fin_invoices exists, and the 0022 column it back-fills is now a real
+      //     composite reference rather than a bare uuid;
+      //   * and, still true, nothing in the schema DEPENDS ON a run item as a
+      //     parent, so a run's provenance cannot be rewritten from outside.
       const inv = await mig(
         `select count(*)::int as n from pg_class c join pg_namespace n on n.oid=c.relnamespace
           where n.nspname='public' and c.relname='fin_invoices'`,
       );
-      expect(n1(inv)).toBe(0);
-      const refs = await mig(
+      expect(n1(inv)).toBe(1);
+
+      const rows = await fkRows(ALL_FIN);
+      const attachment = rows.filter(
+        (r) => r.src_table === 'fin_billing_run_items' && r.tgt_table === 'fin_invoices',
+      );
+      expect(attachment.map((r) => String(r.fk))).toEqual(['fin_bri_invoice_fk']);
+      expect(String(attachment[0]!.src_cols)).toBe('tenant_id,invoice_id');
+      expect(String(attachment[0]!.tgt_cols)).toBe('tenant_id,id');
+      expect(String(attachment[0]!.on_delete)).toBe('r');
+
+      const depended = await mig(
         `select src.relname as src_table, con.conname as fk
            from pg_constraint con
            join pg_class src on src.oid = con.conrelid
@@ -591,10 +908,7 @@ describeDb('0022 composite FK, anchors, delete actions, and schema fidelity', ()
            join pg_namespace n on n.oid = src.relnamespace
           where con.contype='f' and n.nspname='public' and tgt.relname='fin_billing_run_items'`,
       );
-      // invoice_id is deliberately FK-less: 0023 owns fin_invoices, and a
-      // dangling uuid is preferred over a 0022 migration depending on a table
-      // that does not exist yet.
-      expect(refs).toEqual([]);
+      expect(depended).toEqual([]);
     });
 
     it('leaves every fin_* table with a primary key and no orphan rows', async () => {
@@ -608,7 +922,7 @@ describeDb('0022 composite FK, anchors, delete actions, and schema fidelity', ()
   });
 
   describe('E. schema.ts mirrors the live catalog', () => {
-    it('declares exactly the 12 finance tables that exist', async () => {
+    it('declares every finance table that exists, and none that does not', async () => {
       const cat = await mig(
         `select c.relname as tbl from pg_class c join pg_namespace n on n.oid=c.relnamespace
           where n.nspname='public' and c.relname like 'fin\\_%' and c.relkind='r' order by 1`,
@@ -646,7 +960,7 @@ describeDb('0022 composite FK, anchors, delete actions, and schema fidelity', ()
       }
     });
 
-    it('matches every FK name on all 12 tables', async () => {
+    it('matches every FK name on all finance tables', async () => {
       const cat = await fkRows(ALL_FIN);
       const byTable = new Map<string, string[]>();
       for (const r of cat) {
@@ -662,7 +976,7 @@ describeDb('0022 composite FK, anchors, delete actions, and schema fidelity', ()
       }
     });
 
-    it('matches every check and unique-constraint name on all 12 tables', async () => {
+    it('matches every check and unique-constraint name on all finance tables', async () => {
       for (const [name, table] of Object.entries(FIN_TABLES)) {
         const cfg = getTableConfig(table);
         const cat = await mig(

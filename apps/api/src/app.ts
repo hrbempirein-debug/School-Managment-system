@@ -49,6 +49,7 @@ import homeworkRoutes from './routes/school/homework.js';
 import attendanceRoutes from './routes/school/attendance.js';
 import leaveRoutes from './routes/school/leave.js';
 import examRoutes from './routes/school/exams.js';
+import financeRefundsRoutes from './routes/finance/refunds.js';
 
 export interface BuildAppOptions {
   deps: ApiDeps;
@@ -160,6 +161,7 @@ export async function buildApp({ deps, logger = true }: BuildAppOptions): Promis
   await app.register(attendanceRoutes);
   await app.register(leaveRoutes);
   await app.register(examRoutes);
+  await app.register(financeRefundsRoutes);
 
   // Fail fast: the app must not boot with a broken authorization model
   // (unannotated route, unknown/out-of-scope permission, or a route whose

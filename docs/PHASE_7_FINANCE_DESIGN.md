@@ -129,7 +129,7 @@ of money. **Phase 7 must introduce the first relationship-aware RLS policies in 
 (§19). This is a new security mechanism and carries its own test obligation.
 
 Two latent defects in the existing app-layer helper that Phase 7 must **not** inherit:
-`attendance.ts:136-158` filters `guardians.deletedAt` and `students.deletedAt` but **never**
+`apps/api/src/routes/school/attendance.ts:136-158` filters `guardians.deletedAt` and `students.deletedAt` but **never**
 `studentGuardians.deletedAt` — a soft-unlinked guardian still resolves to the former child
 (`0006` exists precisely to support that unlink). `homework.ts:145-169` additionally omits
 `students.deletedAt`.
@@ -403,14 +403,17 @@ Every finance table carries `tenant_id NOT NULL` and is reached from other table
 composite FK `(tenant_id, <id>)`, matching the repo's established anchor pattern
 (`students_photo_file_fk`, `acd_classes_campus_fk`, `sections_class_fk`, `report_cards_file_fk`).
 
-**The rule has three mandatory parts, and all three appear in the DDL of this document:**
+**The rule has four mandatory parts (R1–R4) and exactly one further permitted anchor shape (R5). All
+five appear in the DDL of this document, and every occurrence of either shape is enumerated in §35.2
+rather than left to a reader's inference:**
 
 | # | Rule | Why it is mandatory |
 |---|---|---|
 | **R1** | Every table that is the **target** of a composite FK declares `UNIQUE (tenant_id, id)` **explicitly**, written out in its own DDL block. No `...` elision may stand in for it. | A composite FK is only *legal* if the referenced columns are covered by a `UNIQUE`/`PRIMARY KEY` constraint. Without the declaration, the FK either fails to apply or the author silently substitutes a bare `REFERENCES t(id)`. |
-| **R2** | Every tenant-scoped FK is written `FOREIGN KEY (tenant_id, <col>) REFERENCES <t> (tenant_id, id)`. A bare `REFERENCES <t>(id)` is **forbidden** anywhere a tenant relationship exists. | `REFERENCES t(id)` on a globally-unique uuid checks *existence* but not *tenancy*: a valid uuid from another tenant is accepted. This is the exact defect the rule exists to prevent. |
+| **R2** | Every tenant-scoped FK is written `FOREIGN KEY (tenant_id, <col>) REFERENCES <t> (tenant_id, id)` — or, under **R5**'s single enumerated exception, a tenant-prefixed natural key. A bare `REFERENCES <t>(id)` is **forbidden** anywhere a tenant relationship exists. | `REFERENCES t(id)` on a globally-unique uuid checks *existence* but not *tenancy*: a valid uuid from another tenant is accepted. This is the exact defect the rule exists to prevent. |
 | **R3** | **No fenced code block in this document contains the three-character sequence `...` — anywhere, including inside SQL comments.** | An elision is how a rule stated in prose fails to appear in the DDL, and an auditor cannot verify what is not written. The rule is written as a *mechanical* restriction rather than a semantic one on purpose: a test can grep for `...` and cannot tell an elided column from a sentence that happens to use an ellipsis, so the stricter wording is the one that is actually enforceable. During this revision's static pass it caught **8** remaining occurrences, 5 of them in SQL comments, which is exactly the class of thing a "semantic" rule would have waved through. |
 | **R4** | **R1/R2 have exactly one class of exception, and it is enumerated, not implied.** A FK to a **platform-global identity table** — `users`, `auth_sessions`, `tenants` — is written as a single-column `REFERENCES <t>(id)`, because those tables have no `tenant_id` column and are not tenant-owned. Every such FK is listed in §35.2 with the reason, and `finance-composite-fk.test.ts` treats this set as an allowlist rather than failing on it. | Without an explicit exception, R1/R2 are either violated silently or "fixed" by inventing a `tenant_id` column on `users` — which is what the previous revision of §19.8.1 did, producing a migration that fails with `column "tenant_id" does not exist`. A rule with no stated exception gets satisfied by inventing schema. |
+| **R5** | **R2's *anchor* may be a tenant-prefixed natural key instead of `(tenant_id, id)`, and Phase 7 has exactly one such FK.** It is permitted only when all three of the following hold, and each condition is checkable: (a) the target declares the anchor `UNIQUE` explicitly, in its own DDL block, per R1; (b) `tenant_id` is the anchor's **leading** column; (c) the referencing FK's own column list **starts** with `tenant_id`. Phase 7's single instance is `fin_invoice_items (tenant_id, structure_id, installment_no) → fin_fee_installment_plans (tenant_id, structure_id, installment_no)`, anchored on `fin_installment_plans_uq` as `0022` declares it. Every instance is listed in §35.2 with its anchor named. | **Added in this revision, because the DDL already needed it and the rule did not say so.** `0023`'s `fin_invoice_items_plan_fk` targets a three-column natural key, so the previous revision of this section asserted an anchor shape the document's own normative DDL violates — and an implementer resolving that conflict has two honest options, *rewrite the FK* or *widen the rule*, and no way to tell which the design intends. Stating it removes the ambiguity. Condition (b) is what keeps the property R2 exists for: with `tenant_id` leading, a cross-tenant reference stays **unrepresentable**, so R5 is an additional permitted shape and **not** a relaxation of the tenancy guarantee. It is stronger than `(tenant_id, id)` for its purpose — it binds an invoice line to a plan **of that line's own structure** rather than to any plan in the tenant — and weaker on one axis, which is why it is enumerated rather than generalised as a licence: it does not prove the plan's `id`, and the line does not need it to. |
 
 **R4's allowlist is short, and each entry is verified, not assumed.** `users` and `auth_sessions`
 have no `tenant_id`; `tenants` *is* the tenant, so its `id` is the tenant key and referencing it
@@ -447,11 +450,33 @@ point at another tenant's invoice, because the composite FK is checked by Postgr
 application. This is the mechanism that makes FI-014 a *database* guarantee rather than an
 application promise.
 
-**The full inventory of every composite FK in the design is §35.2**, and
-`finance-composite-fk.test.ts` asserts it mechanically: it reads `information_schema` /
-`pg_constraint`, fails if any `fin_*` FK is not a `(tenant_id, …) → (tenant_id, id)` composite, and
-fails if any referenced table lacks the anchor index. A missing anchor is a **build failure**, not a
-review comment.
+**R5's allowlist is one entry long, and it is verified rather than assumed.** `0022` declares
+`fin_fee_installment_plans` with `UNIQUE (tenant_id, structure_id, installment_no)` named
+`fin_installment_plans_uq` alongside its own `fin_installment_plans_ten_id_uq`; `0023` declares
+`fin_invoice_items_plan_fk` against the **first** of those two, not the second. Both anchors exist, so
+the choice is deliberate and not an accident of index naming, and it is the anchor that carries the
+intent of §7.4 — that an installment line names a plan of *its own structure*. `installment_no` is
+nullable, which is why the FK relies on PostgreSQL's default `MATCH SIMPLE`: a non-installment line
+passes with any plan reference rather than being refused. The three anchor classes in the whole phase
+are therefore **(tenant_id, id) × 51**, **(tenant_id, code) × 1** (`fin_ledger_accounts_code_uq`, the
+business-code anchor of §15.2.1) and **R5 × 1**, with **0** composite rows unanchored.
+
+**The full inventory of every FK in the design is §35.2**, and `finance-composite-fk.test.ts` asserts
+it mechanically. Three things are asserted, and the third is the one this revision had to add:
+
+1. It reads `information_schema` / `pg_constraint` and fails if any `fin_*` composite FK is not
+   `(tenant_id, …) → (tenant_id, …)` — accepting exactly three anchor shapes, `(tenant_id, id)`,
+   `(tenant_id, code)` and R5's natural key, and failing on anything else.
+2. It fails if any referenced table lacks the anchor its map row names.
+3. **It compares the catalog against §35.2 filtered to the applied migrations**, not against §35.2 as a
+   whole. A map containing the whole phase cannot be compared to the catalog at `0023` without also
+   demanding 24 constraints that a later migration will add, so the test derives
+   `expected_current_edges` by the rule in **§35.2.1** and then asserts **F1** (no live FK without a
+   row), **F2** (no row without a live FK) and **F3** (no row twice). Before this revision the map was
+   compared as a flat 62-row list, which is why `0023`'s five real constraints passed an audit that had
+   nothing to compare them against.
+
+A missing anchor is a **build failure**, not a review comment.
 
 ### 6.4 Student / enrollment anchor
 
@@ -1578,9 +1603,19 @@ CREATE TABLE fin_billing_run_items (
     --   ALTER TABLE fin_billing_run_items
     --       ADD CONSTRAINT fin_bri_invoice_fk
     --       FOREIGN KEY (tenant_id, invoice_id)
-    --       REFERENCES fin_invoices (tenant_id, id) ON DELETE SET NULL;
+    --       REFERENCES fin_invoices (tenant_id, id) ON DELETE RESTRICT;
     -- A composite FK permits NULL, so every pre-commit item is legal with the
     -- column NULL, which is exactly the state it is in.
+    --
+    -- 0023 OWNS this constraint, and RESTRICT is its delete action. Both were
+    -- adjudicated in this revision: §35.2's map row had said 0024, and §8.7's
+    -- own comment here had said ON DELETE SET NULL. §9.5 carries the full
+    -- reasoning. In short: the earliest legal placement is the end of 0023,
+    -- because fin_invoices does not exist before it, and SET NULL is not merely
+    -- undesirable but IMPOSSIBLE on this column — PostgreSQL implements it as a
+    -- referential UPDATE, the only update §8.7.1's freeze admits runs the
+    -- other way, and a bare SET NULL on a composite FK would additionally try
+    -- to null tenant_id.
     --
     -- §6.3 R1 anchor: NOT declared here, and the omission is deliberate rather than
     -- an oversight. Every other Phase 7 table carries `UNIQUE (tenant_id, id)` so
@@ -1739,30 +1774,58 @@ Resolving `invoice_no NOT NULL` vs "issue assigns `invoice_no`":
 CREATE TABLE fin_invoices (
     id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id        uuid NOT NULL,
-    invoice_no       text,                       -- NULL in draft
+    -- §9.1.1 THE GRAIN. One live invoice per (tenant, academic year, enrollment).
+    -- Not one per billing run and not one per installment; §9.1.1 states why the
+    -- first is forced by applied 0022 and why the second is a LINE property.
+    -- NULL exactly in state 'draft' and permitted-but-unexpected in state 'void'
+    -- (a draft discarded before issue never had a number to keep).
+    invoice_no       text,
     student_id       uuid NOT NULL,
     academic_year_id uuid NOT NULL,
     enrollment_id    uuid NOT NULL,
+    -- The structure that GENERATED this invoice, for provenance (§8.4's
+    -- "explain a disputed bill from the run"). NULL for an invoice a finance
+    -- officer composed by hand, which is why it is nullable; a
+    -- run-generated invoice always has one, because
+    -- fin_billing_run_items.structure_id is NOT NULL in applied 0022.
     structure_id     uuid,
+    -- §18 invoice state machine. 'superseded' is NOT a state; see §9.2.1, which
+    -- explains what replaced it and why the previous revision's diagram was
+    -- wrong.
     status           text NOT NULL DEFAULT 'draft'
                      CHECK (status IN ('draft','issued','partially_paid','paid','void')),
     issued_at        timestamptz,
+    -- §9.6.0 C-8. NOT NULL with no DEFAULT: the value is DERIVED by
+    -- trg_fin_invoice_header_guard from the structure's first installment
+    -- plan, else the structure's effective_from, else supplied by the caller
+    -- when there is no structure. Never left to chance.
     due_date         date NOT NULL,
-    -- The three CACHED money columns. All are trigger-maintained and none is
-    -- writable by the runtime role (§16.5 revokes the columns' UPDATE and the
-    -- recompute triggers are the only writers). They exist because every report
-    -- reads them and recomputing per row is the drift risk in reverse (§16.5).
+    -- The three CACHED money columns. All are trigger-maintained, none is
+    -- writable by the runtime role, and the mechanism that guarantees it is
+    -- §16.5.1: a COLUMN-LEVEL privilege grant, with the recompute functions as
+    -- the only writers via SECURITY DEFINER. The previous revision asserted
+    -- here that "§16.5 revokes the columns' UPDATE" and §16.5 revoked
+    -- nothing, while §35.4 granted table-level UPDATE — so the §9.4 exception
+    -- that keeps the header outside the line freeze was, in the built schema,
+    -- a client-writable hole rather than an exemption. That is §16.5.1.
     --   subtotal = LINES ONLY (Σ fin_invoice_items.amount)
-    --   total    = subtotal + Σ adjustments + Σ tax
+    --   total    = subtotal + Σ APPROVED adjustments + Σ tax
     --   balance  = total − net_applied   (FI-002, cached; the view is authoritative)
-    -- The previous revision's DDL declared NONE of these three, while §9.6's
-    -- trg_fin_invoice_item_total writes subtotal and total and FI-002's cache
-    -- trigger writes balance — the function would have failed at runtime with 42703
-    -- (column does not exist). A CHECK cannot cover them either: all three are
-    -- functions of OTHER tables' rows.
     subtotal         numeric(19,4) NOT NULL DEFAULT 0,
     total            numeric(19,4) NOT NULL DEFAULT 0,
+    -- C-1. NO WRITER IN 0023. trg_fin_invoice_balance_recompute is created and
+    -- bound by 0024, because it reads fin_payment_allocations. So between the
+    -- 0023 landing and the 0024 landing this column is 0 on every row, by
+    -- DEFAULT, and that is stated rather than left to be discovered. It is
+    -- safe for the whole of that window because 0023 is UNREACHABLE: RLS is
+    -- not enabled and school_app_rw holds no privilege on this table until
+    -- 0028, so nothing can be read, written or voided. 0024 opens with a
+    -- backfill of the column for every row that exists by then.
     balance          numeric(19,4) NOT NULL DEFAULT 0,
+    -- C-9.2. Writer: 0024's trg_fin_invoice_balance_recompute, on the transition
+    -- INTO 'paid' and cleared on the transition out of it. Declared here rather
+    -- than left as a §16.5 reference to a column the DDL did not have.
+    paid_at          timestamptz,
     voided_at        timestamptz,
     void_reason      text,
     created_by       uuid NOT NULL,
@@ -1783,23 +1846,53 @@ CREATE TABLE fin_invoices (
     CONSTRAINT fin_invoices_structure_fk
         FOREIGN KEY (tenant_id, structure_id)
         REFERENCES fin_fee_structures (tenant_id, id) ON DELETE RESTRICT,
+    -- C-14. created_by is a write-once audit identity, exactly like
+    -- fin_fee_structures.published_by, so it is RESTRICT and NOT SET NULL.
+    -- §35.2's FK map claimed to be exhaustive and had no row for this column,
+    -- so an unconstrained uuid was accepted as the author of a financial
+    -- document. Single-column, on the §6.3 R4 allowlist: `users` is
+    -- platform-global and has no tenant_id. The account is deactivated, never
+    -- deleted — the same operational answer 0022 shipped for published_by.
+    CONSTRAINT fin_invoices_created_by_fk
+        FOREIGN KEY (created_by) REFERENCES users (id) ON DELETE RESTRICT,
+    -- C-13. The number rule, stated as a CASE so that 'void' is explicitly the
+    -- one state in which a number is OPTIONAL. A draft that is discarded before
+    -- issue must not burn a counter value (§9.6.1), so a voided draft has no
+    -- number; a voided ISSUED invoice keeps the number it was printed with,
+    -- because that number was handed to a parent.
     CONSTRAINT fin_invoices_number_ck CHECK (
-        (status = 'draft' AND invoice_no IS NULL)
-        OR (status <> 'draft' AND invoice_no IS NOT NULL)
+        CASE status
+            WHEN 'draft' THEN invoice_no IS NULL
+            WHEN 'void'  THEN TRUE
+            ELSE              invoice_no IS NOT NULL
+        END
     ),
     CONSTRAINT fin_invoices_void_ck CHECK (
-        (status = 'void' AND voided_at IS NOT NULL AND void_reason IS NOT NULL)
+        (status = 'void' AND voided_at IS NOT NULL AND void_reason IS NOT NULL
+                   AND length(btrim(void_reason)) > 0)
      OR (status <> 'void' AND voided_at IS NULL)
+    ),
+    -- C-9.2. paid_at iff paid, in BOTH directions. This is a CHECK rather
+    -- than prose because it is the only cheap way to catch a status writer
+    -- that forgot the timestamp, or a stale timestamp left behind by a
+    -- payment reversal. The previous revision wrote only
+    --     (status = 'paid' AND paid_at IS NOT NULL) OR (status <> 'paid')
+    -- whose second arm is TRUE for every row, so the constraint permitted
+    -- paid_at to be set on a draft or on a voided invoice -- i.e. it enforced
+    -- the implication in one direction and was silent in the other, which is
+    -- exactly the state trg_fin_invoice_void and the balance recompute have to
+    -- clear it on. Both arms are stated here.
+    CONSTRAINT fin_invoices_paid_at_ck CHECK (
+        (status = 'paid'   AND paid_at IS NOT NULL)
+     OR (status <> 'paid' AND paid_at IS NULL)
     ),
     CONSTRAINT fin_invoices_ten_id_uq UNIQUE (tenant_id, id)
 );
 -- Revoke the 0001 default-privilege grant immediately (§35.4, §30.3).
 REVOKE ALL ON fin_invoices FROM school_app_rw;
-
-
 ```
 
-A **partial unique index** provides the uniqueness without a `COALESCE` sentinel:
+A **partial unique index** provides the document-number uniqueness without a `COALESCE` sentinel:
 
 ```sql
 CREATE UNIQUE INDEX fin_invoices_number_uq
@@ -1812,56 +1905,305 @@ This matches the repo's heavy use of partial unique indexes for "live row" rules
 The CHECK makes the `issued ⟹ numbered` direction a database guarantee; it cannot express the
 reverse direction, which is why the partial index exists alongside it.
 
+**The grain constraint (C-7, Q6).** One live invoice per enrollment per academic year:
+
+```sql
+-- C-7. This is the constraint that makes "billing twice" a unique violation
+-- rather than a rounding difference, which is what §8.1 promised. Partial, so
+-- that a voided invoice FREES its slot: §9.2.1's replacement draft needs it.
+-- Without the WHERE clause a school could never re-invoice a family whose
+-- invoice was voided, which §9.3 says is a real and common case.
+CREATE UNIQUE INDEX fin_invoices_ten_enrollment_year_uq
+    ON fin_invoices (tenant_id, enrollment_id, academic_year_id)
+    WHERE status <> 'void';
+```
+
+The index is on `enrollment_id`, not `student_id`, because §6.4 makes the
+enrollment the billing anchor: a student with two enrollments in one year is two
+billing subjects, and §8.5's effective-enrollment rule is what decides which
+enrollments are live.
+
+**Interaction with billing runs, stated because it is a behaviour change.**
+This index refuses a second live invoice for the same `(enrollment, year)`, so a
+second run over a period already billed cannot commit its items into a second
+invoice. That is the intended reading of §8.1 rule C and of the `structure_ids`
+comment in §8.7 — "mid-year changes are ADJUSTMENTS, not regenerated invoices" —
+and §8.4's reproducibility guarantee is a *verification* claim (re-derive the
+amounts and compare them against the committed run's items), not a licence to
+write a second invoice. A school that genuinely needs to bill again for the same
+year voids the first invoice, which frees the slot. The conflict is surfaced as a
+named error rather than as a bare unique violation: §21.4's
+`fee_invoice_already_billed` does that job, and C-16 requires 0023 to translate
+the partial-index violation into it.
+
+### 9.1.1 The invoice grain, stated as one answer (C-7)
+
+The previous revision of this document never said what the "grain" of an invoice
+is, and four sections each implied a different one. Here is the adjudication — and
+the first half of it is not a design choice at all. It is forced by a table that
+0022 has already applied and that this phase may not alter.
+
+1. **An invoice is one per `(tenant_id, academic_year_id, enrollment_id)`, live.**
+   Not "per billing run", and not "per installment".
+2. **Can one run produce two invoices for one enrollment? No — and it cannot, by
+   construction rather than by policy.** `fin_billing_run_items` is keyed
+   `PRIMARY KEY (tenant_id, run_id, enrollment_id)` and carries exactly one
+   nullable `invoice_id` column. Both are applied in 0022 and immutable. A run
+   therefore has no representational capacity for a second invoice on the same
+   enrollment, and the deferred FK of §9.5 is 1:1 against that key by
+   construction.
+3. **The corollary the previous revision missed entirely: a run also has no
+   capacity for two *structures* on one enrollment.** `fin_billing_run_items.structure_id`
+   is `NOT NULL` and is not part of the PK, so a run that resolves two applicable
+   structures for one enrollment has nowhere to put the second. §8.7's
+   `structure_ids uuid[]` is the run's *input selection*, not a promise that every
+   one of them applies to every one of its enrollments. This is an inherited limit
+   of the applied schema, recorded here rather than papered over; lifting it is a
+   0022 change and therefore out of this phase.
+4. **Can one invoice contain multiple installment charges? Yes.** The installment
+   dimension is a property of the LINE, not of the invoice:
+   `fin_invoice_items.installment_no` (§9.5). A four-installment structure
+   produces four lines, and possibly several lines per installment.
+5. **How is `installment_no` represented?** **Nullable, with no DEFAULT** — and
+   this is the answer the previous revision got wrong, in Q5 it stated as
+   `NOT NULL DEFAULT 1` with the claim that "there is no NULL case to design
+   around" because `fin_fee_structure_items.installment_no` is `NOT NULL` in
+   applied 0022. There *is* a NULL case, and 0022 says so itself: a structure
+   with no plan rows "bills as a single installment on effective_from". A
+   `DEFAULT 1` plus the three-column composite FK to
+   `fin_fee_installment_plans(tenant_id, structure_id, installment_no)` then
+   rejects every line of every plan-less structure, because no row
+   `(structure_id, 1)` exists to match. `NOT NULL DEFAULT 1` was borrowed from
+   the *structure item* grain, where a plan is irrelevant, and forced onto the
+   *invoice line* grain, where it is not. The invoice line's FK is nullable, so
+   `MATCH SIMPLE` skips it for plan-less structures, and
+   `fin_invoice_items_uq` uses `NULLS NOT DISTINCT` so the dedup guarantee
+   survives the NULL (§9.5). Both corrections are in the DDL.
+6. **Uniqueness.** `fin_invoices_ten_enrollment_year_uq` above at the invoice
+   grain; `fin_invoice_items_uq` at the line grain (§9.5).
+7. **Challan due-date resolution** therefore no longer has to identify an
+   installment: a challan resolves against its INVOICE, `due_on =
+   fin_invoices.due_date` (§10.3), and the per-installment dates remain visible on
+   the lines through their plan. The previous revision's `COALESCE(plan.due_on for
+   the matching installment_no, structure.effective_from)` had no installment to
+   match, because the invoice carries no `installment_no`. That expression is
+   corrected in §10.3.
+8. **Multiple structures or fee items on one enrollment** are ordinary, and are
+   exactly what the line grain exists for. Each `fin_fee_structure_items` row
+   becomes one `fin_invoice_items` row carrying its own `structure_id`,
+   `fee_head_id` and `installment_no`. Two structures charging the same fee head
+   on one invoice are two distinct lines, because line uniqueness is
+   `(invoice, structure, head, installment)` and not `(invoice, head)`.
+
+**What this decision cost, stated plainly.** A school that charges tuition in
+three installments now issues ONE invoice whose lines are tagged by installment,
+and whose `due_date` is the FIRST installment's date. It does not receive three
+invoices with three due dates. That is a real product consequence, and it follows
+directly from applied 0022's primary key. It is recorded here as a decision
+because the alternative — one invoice per installment — would require altering a
+table that has already been applied and verified, and the phase rule forbids
+editing 0022.
+
 ### 9.2 State machine
 
 ```text
-                  issue                     payment
+                   issue                     payment
   draft ─────────────────────► issued ───────────────────────► partially_paid
-    │  (delete allowed)          │                               │
+    │                            │                               │
     │                            │◄──────────── refund ──────────┤
     │                            │        (balance reopens)      │
     │                            │                               │
     │                            │                    settlement │
     │                            │◄──────────────────────────────┘
     │                            │                                    paid
+    │                            │◄──── refund reopens (balance > 0)─┘
     │                            │
-    │                            └── void (balance must be 0) ──► void
-    │                                                                       │
-    └────────────────────────── superseded (zero-value draft) ◄────────────┘
+    │                            └── void (balance = 0) ──► void
+    │
+    └── void, before issue (consumes NO number) ────────────► void
 ```
 
-| From | To | Guard |
-|---|---|---|
-| `draft` | `issued` | lines exist; totals recomputed; number allocated; `issued_at` set; ledger group posted |
-| `draft` | *deleted* | hard delete permitted (nothing references it) |
-| `issued` | `partially_paid` | derived from `balance` |
-| `partially_paid` | `paid` | `balance = 0` |
-| `partially_paid` | `partially_paid` | refund lowers applied |
-| `paid` | `partially_paid` | **refund reopens the invoice** (§8 of the brief) |
-| `issued`/`partially_paid` | `void` | **only if `balance = 0`**; full ledger reversal; number permanently consumed |
-| `issued` | `issued` | line/adjustment mutation is **rejected**, not silently allowed |
-| `paid` | `void` | **forbidden** — refund first, then void |
-| any | any other | rejected |
+| From | To | Guard | Enforced by |
+|---|---|---|---|
+| `draft` | `issued` | lines exist; number allocated; `issued_at` set; `total > 0` | `trg_fin_invoice_number` + `trg_fin_invoice_header_guard` + service (§9.6.2) |
+| `draft` | `void` | `void_reason` non-blank; **no number consumed** | `trg_fin_invoice_void` (**0024**), `trg_fin_invoice_number` |
+| `issued` | `partially_paid` | derived from `balance` | **0024** `trg_fin_invoice_balance_recompute` |
+| `partially_paid` | `paid` | `balance = 0` | **0024** `trg_fin_invoice_balance_recompute` |
+| `partially_paid` | `partially_paid` | refund lowers applied | **0024** `trg_fin_invoice_balance_recompute` |
+| `paid` | `partially_paid` | **refund reopens the invoice** (§8 of the brief) | **0024** `trg_fin_invoice_balance_recompute` |
+| `issued`/`partially_paid` | `void` | **only if `balance = 0`**; full ledger reversal; number permanently consumed | `trg_fin_invoice_void` (**0024**) |
+| `issued` | `issued` | line/adjustment mutation is **rejected**, not silently allowed | `trg_fin_invoice_items_freeze` (2 bindings) |
+| `paid` | `void` | **forbidden** — refund first, then void | `trg_fin_invoice_void` (**0024**), C-12 |
+| any | any other | rejected | `trg_fin_invoice_header_guard` |
 
-The `paid → partially_paid` transition is real and is explicitly part of the machine. It is the
-reason the challan/`invoice` state discussion in §10 exists.
+The `paid → partially_paid` transition is real and is explicitly part of the machine. It is
+the reason the challan/`invoice` state discussion in §10 exists.
+
+### 9.2.1 Three rows of the previous table that were wrong (C-12, C-13, and `superseded`)
+
+**`paid → void` is FORBIDDEN (C-12).** The previous revision's §9.2 table said so,
+and §35.6 said the opposite, and the trigger implemented §35.6's balance-zero
+rule — which, on a fully paid invoice, is satisfied, so the shipped behaviour
+permitted a state the table forbade. The rule is now the table's, and the
+**0024** void trigger refuses it explicitly:
+
+```sql
+-- C-12. Refuse BEFORE the balance test, so the message names the policy
+-- rather than reporting a zero balance that reads like success.
+IF OLD.status = 'paid' THEN
+    RAISE EXCEPTION
+        'refund invoice % before voiding it; a paid invoice cannot be voided'
+        , NEW.id USING ERRCODE = '55000';
+END IF;
+```
+
+The path the table describes is real and available: refund the paid invoice,
+which drives `balance > 0` and moves the invoice to `partially_paid` (or to
+`issued` if the refund returns the balance to exactly `total`), and then void
+it under the ordinary `balance = 0` rule. §35.6 is corrected to match.
+
+**Drafts are voided, never hard-deleted (C-13).** The previous revision wrote
+`draft → deleted`, "hard delete permitted (nothing references it)". Three
+separate facts make that row false: `fin_invoice_items_invoice_fk` and
+`fin_invoice_adjustments_invoice_fk` are both `ON DELETE RESTRICT`, so a draft
+that has any line cannot be deleted at all; §35.4 revokes `DELETE` from
+`school_app_rw`; and §35.5 lists no `DELETE` route. The design documented an
+operation that no authorised actor could perform, through three independent
+mechanisms, while §35.6 simultaneously claimed the edge was "Enforced by DELETE
+policy".
+
+The adjudicated behaviour is `draft → void`, with the reason recorded. This is
+strictly better than deletion for an audit trail — a discarded draft stays
+visible as a discarded draft — and it makes the `voided_at`/`void_reason` CHECK
+the single place that records "this was thrown away and why". `fin_invoices_number_ck`
+in §9.1 is a CASE precisely so that this path exists without a number: voiding a
+draft allocates nothing from `fin_document_counters`.
+
+**`superseded` is not a state, and is removed.** The previous revision's diagram
+carried a `superseded (zero-value draft)` node fed by `void`, and its prose
+called it a state. It was in neither the `status` CHECK nor §18's consolidated
+machine, so it was unrepresentable: a row could never hold it. What the diagram
+was reaching for is now expressed by two things that do exist —
+`fin_invoices_ten_enrollment_year_uq` is **partial on `status <> 'void'`**, so a
+voided invoice frees its `(enrollment, year)` slot, and a replacement draft is
+simply a new row. No extra state is needed, and the previous revision's arrow
+into it disappears from the diagram above.
 
 ### 9.3 Void semantics
 
-Void is legal **only when the invoice balance is zero**. This single rule removes the entire class of
-"how do we reverse payments against a voided invoice" problems, and it is enforced by a trigger:
+Void is legal **only when the invoice balance is zero**, and **never from `paid`**
+(C-12). Those two rules together remove the entire class of "how do we reverse
+payments against a voided invoice" problems.
+
+**This trigger belongs to 0024, not 0023 (C-2).** It derives the balance from
+`fin_payment_allocations`, which 0024 creates, so under the §30.3.1 scope rule
+adopted here it cannot be created by 0023. A void issued between the 0023 and
+0024 landings is not merely unguarded — it is impossible, because 0023 is
+UNREACHABLE (§35.1): no policy, no grant, and RLS not enabled, so the runtime
+role holds no privilege on `fin_invoices` and no application code can reach it
+until 0028. The full function is given in §9.6.4.
+
+### 9.3.1 `trg_fin_invoice_void`, in full (0024, C-2, C-12, C-13)
 
 ```sql
-IF NEW.status = 'void' AND OLD.status <> 'void' THEN
-    PERFORM 1 FROM fin_invoice_items WHERE invoice_id = NEW.id;
-    -- balance is a cached, trigger-maintained column (see §16.5), so recompute here
-    -- rather than trusting a caller-supplied value.
-    IF <derived balance> <> 0 THEN
-        RAISE EXCEPTION 'cannot void an invoice with a non-zero balance'
+-- CREATED BY 0024, NOT 0023. It reads fin_payment_allocations (§30.3.1 strict
+-- form), so it cannot exist until that table does. §35.3 and §30.2 are corrected
+-- accordingly; in the previous revision this function sat in §9.6, which is to
+-- say in 0023, and would have failed 42P01 on the first void.
+--
+-- SECURITY INVOKER, deliberately. It writes voided_at, which §16.5.1 does not
+-- grant to school_app_rw — and it does not need to be a definer function, because
+-- a BEFORE trigger may set any column of NEW regardless of the invoking role's
+-- column privileges. See the note below for the full argument.
+CREATE OR REPLACE FUNCTION trg_fin_invoice_void() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE v_paid numeric(19,4);
+BEGIN
+    IF NEW.status <> 'void' OR OLD.status = 'void' THEN
+        RETURN NEW;                                    -- not a void transition
+    END IF;
+
+    -- (1) C-12 FIRST, so the refusal names the policy. A paid invoice has
+    --     balance = 0, so a balance-only test would wave it through.
+    IF OLD.status = 'paid' THEN
+        RAISE EXCEPTION 'refund invoice % before voiding it', NEW.id
             USING ERRCODE = '55000';
     END IF;
-END IF;
+
+    -- (2) 'draft' -> 'void' is a DISCARD and skips the balance test entirely:
+    --     there is nothing allocated against a draft (§12.5.1 refuses an
+    --     allocation naming one), and fin_document_counters is not touched
+    --     (§9.6.1's early return for a void with no number).
+    IF OLD.status <> 'draft' THEN
+        -- (3) balance is DERIVED from allocations, never read from the cached
+        --     column. A stale cache would pass a void that should be refused,
+        --     and a cache this early in the sequence would always be stale.
+        SELECT COALESCE(SUM(a.amount), 0) INTO v_paid
+          FROM fin_payment_allocations a
+         WHERE a.tenant_id = NEW.tenant_id
+           AND a.invoice_id = NEW.id
+           AND a.effect = 'apply';
+        IF v_paid <> 0 THEN
+            RAISE EXCEPTION 'cannot void an invoice with a settled balance of %', v_paid
+                USING ERRCODE = '55000';
+        END IF;
+    END IF;
+
+    -- (4) A void needs a reason, and the reason is not optional prose: an
+    --     unreasoned void is indistinguishable from a deletion in an audit.
+    IF NEW.void_reason IS NULL OR length(btrim(NEW.void_reason)) = 0 THEN
+        RAISE EXCEPTION 'voiding an invoice requires a reason'
+            USING ERRCODE = '55000';
+    END IF;
+
+    NEW.voided_at := now();
+    RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION trg_fin_invoice_void() FROM PUBLIC;
 ```
+
+**Naming note, because the previous revision's comment contradicted itself here.** Its header read
+`-- C-SEC: SECURITY DEFINER, one of exactly three trigger functions…` and its body was
+`SECURITY INVOKER`. It is `INVOKER`, deliberately, for the reason below — and the C-SEC header
+asserting definership was itself part of what had to be corrected.
+
+**Why this is `SECURITY INVOKER`, which is the answer to a question C-SEC raises.** The natural
+reading of §16.5.1 is that any function writing an ungranted column must be `SECURITY DEFINER`, and
+that makes this a fifth one. It does not have to be, and the reason is the rule §16.5.2 states:
+**this function only assigns `NEW`, and `NEW` is authorised by the caller's own statement.** The
+caller performing the void names exactly two columns — `status` and `void_reason` — and holds
+`GRANT UPDATE (status, due_date, void_reason)`, which covers both. It does **not** need `voided_at`,
+because a trigger may set any column of `NEW` regardless of the invoking role's column privileges.
+
+**That is the entire distinction, and it is worth being precise about, because `trg_fin_invoice_void`
+and `trg_fin_invoice_item_total` both write columns the role cannot write and only one of them needs
+definership.** The difference is *whose statement* performs the write:
+
+| | `trg_fin_invoice_void` (BEFORE) | `trg_fin_invoice_item_total` (AFTER) |
+|---|---|---|
+| the write is | `NEW.voided_at := now()` | `UPDATE fin_invoices SET …` |
+| the caller's statement is | the `UPDATE … SET status, void_reason` | the `INSERT`/`UPDATE` on a child row |
+| the write's columns are checked against | **the caller's** column privileges, for the columns the caller named — `voided_at` is not among them | **the function's own** privileges, because the function issued a statement the caller did not |
+| result | `SECURITY INVOKER` is sufficient | `SECURITY DEFINER` is required |
+
+A BEFORE trigger that issued its **own** `UPDATE` would need definership exactly like an AFTER trigger.
+The rule is not "AFTER needs DEFINER, BEFORE does not" — it is **"a function that issues its own
+statement needs DEFINER; a function that only assigns to NEW does not"**, and the two are different
+properties that happen to coincide in the common case.
+
+`trg_fin_invoice_header_guard` is the same shape and is likewise `INVOKER`, even though clause (6) of
+§9.6.0 writes `frozen_at` on child rows — because that is an `UPDATE fin_invoice_items …` statement
+**issued by the function**, which does require definership. §9.6.0 is amended accordingly.
+
+**The four-clause order is normative and each position earns it.** Not-a-void-transition first, so
+the trigger is inert on all the updates it is bound alongside. `paid` second, before the balance
+test, because a paid invoice *satisfies* the balance test. The balance test third, and skipped for
+drafts, where it is vacuous. The reason last, because it applies to both real transitions and to a
+discard, and a caller who supplies neither deserves the most specific message — which is the
+balance one if they were trying to void a paid invoice, and the reason one if the only thing missing
+is the reason.
 
 Rationale: voiding a paid invoice would require reversing settled payments and possibly clawing back
 banked money. That is a *refund* workflow with its own approval, and it already exists (§13). Void is
@@ -1872,9 +2214,31 @@ for "we issued this in error and nobody paid" — a real and common case, and ch
 `fin_invoice_items` carries a freeze trigger modelled on `trg_report_card_subjects_freeze`
 (`0018:560-600`): any `UPDATE`/`DELETE` on a line whose parent invoice `status <> 'draft'` raises
 `ERRCODE = '55000'`. The invoice header's money columns are exempted from the same freeze because
-they are trigger-maintained caches (§16.5) — this is an explicit, documented exception, exactly as
+they are trigger-maintained caches — this is an explicit, documented exception, exactly as
 `FINANCE_DESIGN.md:31` describes, and unlike the rejected GUC bypass in `DATABASE_DESIGN.md:220` it
 is enforced by a trigger that recomputes from authoritative rows rather than trusting a flag.
+
+**The exemption is only sound if the columns are unreachable by a client, and the
+previous revision never made them unreachable.** The sentence above was asserted
+on the strength of "§16.5 revokes the columns' UPDATE"; §16.5 revoked nothing
+and §35.4 granted table-level `UPDATE`, so the header was writable by
+`school_app_rw` and the exemption was a hole. **§16.5.1 is the first fix**: a
+column-level privilege grant that names every writable column. That alone was not
+enough, and the reason is the P0 this revision closes: a column the runtime role
+cannot write is still written by the phase's own cache writers, and the header
+guard that was supposed to protect the column refused *them* too. So there are
+**three** controls now, each holding a different question:
+
+| Control | Question it answers | Where |
+|---|---|---|
+| Column-level ACL | may this role write this column at all? | §16.5.1, §35.4 |
+| The maintenance context | which internal writer may move *which* cached column? | §9.6.0.1, §9.6.0 clause (2) |
+| `pg_trigger_depth() >= 2` | is this write nested inside a trigger, i.e. a maintenance write at all? | §9.6.0 clause (2) |
+
+The freeze model is unchanged and is not weakened anywhere to achieve this — the
+header is still outside the line freeze, and the header's cached columns are still
+outside the runtime role's reach. The line freeze's one new exemption is the
+issue stamp (§9.4.1), and it admits one statement shape produced by one function.
 
 #### 9.4.1 The issued-line freeze, in full (NORMATIVE)
 
@@ -1916,10 +2280,103 @@ BEGIN
         RAISE EXCEPTION 'invoice line references an unknown invoice'
             USING ERRCODE = '55000';
     END IF;
-    IF v_status <> 'draft' THEN
+
+    -- (C-13) A DISCARDED DRAFT IS VOIDED, NOT DELETED — but its lines still have to be
+    -- deletable, or §9.2.1's `draft -> void` path cannot be completed: the header is
+    -- frozen the moment it leaves draft, so a line could never be removed afterwards,
+    -- and a discarded draft would keep billing a family for fees nobody intends to
+    -- charge. The parent is 'void', not 'draft', at this point, so the previous
+    -- revision's `v_status <> 'draft'` refused it — meaning the adjudicated C-13
+    -- behaviour was unreachable for any draft that had lines, which is all of them.
+    --
+    -- So the freeze has exactly three exceptions, all narrow:
+    --   parent 'void'  — only DELETE, and only because a void can never be un-voided
+    --                    (§9.3, void is terminal), so a line cannot be re-added either.
+    --                    INSERT is still refused: the line would land on a document
+    --                    whose header is terminal.
+    --   parent 'draft' — the ordinary case, and everything is allowed.
+    --   the ISSUE STAMP — the one write admitted on a live invoice, below.
+    -- Nothing else moves, and in particular a voided invoice's ADJUSTMENTS are NOT
+    -- deletable: they are the audit record of what was waived and refused, and
+    -- §9.5.1 makes rejection permanent for the same reason.
+    --
+    -- THE ISSUE STAMP, and it exists only because §9.6.0 clause (6) moved.
+    -- trg_fin_invoice_freeze_lines (§9.6.0.1) stamps every line the moment its
+    -- invoice leaves 'draft'. It is an AFTER UPDATE OF status trigger on
+    -- fin_invoices, so by the time it runs the parent row is already stored and
+    -- reads 'issued' — and the check below would refuse the stamp that
+    -- trg_fin_invoice_item_total's re-entrant cache write depends on, making it
+    -- impossible to issue an invoice with lines on it. In the previous revision
+    -- the stamp lived in a BEFORE UPDATE trigger on the parent, where the parent
+    -- still read 'draft' and it passed by ACCIDENT; that accident cost the
+    -- clause-(2) 55000 and a silent-clobber hazard, and moving the stamp is what
+    -- fixed both. The consequence is paid here, explicitly, rather than left to
+    -- whichever trigger happens to run first.
+    --
+    -- Narrow on purpose. `frozen_at` must go NULL -> non-NULL, on an
+    -- `fin_invoice_items` row (not an adjustment), and EVERY OTHER COLUMN MUST BE
+    -- BYTE-IDENTICAL — which is why the whole row is compared rather than a
+    -- negative list. The negative-list form has to be extended every time a column
+    -- is added and a column added without extending it becomes silently mutable
+    -- (§9.6.2's approval trigger states the same preference for the same reason).
+    -- In particular this does NOT reopen the C-9.1 `amount` guard below: amount is
+    -- among the columns that must be identical, so the guard below cannot be
+    -- reached through this path at all.
+    --
+    -- And no client can produce this statement shape: school_app_rw holds no
+    -- UPDATE on `frozen_at` (§16.5.1), so the exemption is reachable only from
+    -- trg_fin_invoice_freeze_lines.
+    -- The comparison goes through to_jsonb(), NOT OLD.frozen_at and siblings.
+    -- `->>` rather than `->` for the frozen_at probes: `->` returns JSON null for
+    -- a SQL NULL and `jsonb IS NULL` is FALSE for JSON null, which would make
+    -- this exemption unreachable.
+    -- This function is bound to BOTH fin_invoice_items and
+    -- fin_invoice_adjustments (§35.3 row 6, two bindings), and the tables do not
+    -- share a column list — only the items table has frozen_at, structure_id,
+    -- installment_no, fee_head_id, description, quantity, unit_amount and
+    -- tax_amount. A direct `OLD.frozen_at` reference raises "record old has no
+    -- field frozen_at" the moment a statement runs against the adjustments table,
+    -- so every adjustment UPDATE on a live invoice failed with 42883 instead of
+    -- the intended 55000 and the approval path this function guards was
+    -- unreachable. to_jsonb(OLD) yields only the columns that table has, which is
+    -- what makes one function correct on both.
+    IF v_status NOT IN ('draft', 'void')
+       AND TG_OP = 'UPDATE'
+       AND TG_TABLE_NAME = 'fin_invoice_items'
+       AND (to_jsonb(OLD) ->> 'frozen_at') IS NULL
+       AND (to_jsonb(NEW) ->> 'frozen_at') IS NOT NULL
+       -- Everything except frozen_at is byte-identical.
+       AND (to_jsonb(NEW) - 'frozen_at')
+         IS NOT DISTINCT FROM
+           (to_jsonb(OLD) - 'frozen_at')
+    THEN
+        RETURN NEW;   -- the issue stamp, and nothing else
+    END IF;
+
+    IF v_status NOT IN ('draft', 'void') THEN
         RAISE EXCEPTION
             'cannot % a line of a % invoice; issue a correction instead',
             LOWER(TG_OP), v_status
+            USING ERRCODE = '55000';
+    END IF;
+    IF v_status = 'void' AND (TG_OP <> 'DELETE' OR TG_TABLE_NAME <> 'fin_invoice_items') THEN
+        RAISE EXCEPTION
+            'cannot % a % of a void invoice; it is terminal', LOWER(TG_OP), TG_TABLE_NAME
+            USING ERRCODE = '55000';
+    END IF;
+
+    -- (C-9.1) The line amount is server-owned, and it is a cache of
+    -- quantity * unit_amount computed by trg_fin_invoice_item_amount. Once the
+    -- invoice is out of draft, a caller changing `amount` directly would write a
+    -- cache that disagrees with its own inputs, and the recompute trigger
+    -- (AFTER, so it cannot undo this) would then cache the caller's number rather
+    -- than the computed one. Refused explicitly rather than left to the column
+    -- grant, so the failure names the rule.
+    IF TG_OP = 'UPDATE'
+       AND NEW.amount IS DISTINCT FROM OLD.amount
+       AND v_status <> 'draft' THEN
+        RAISE EXCEPTION
+            'the line amount of a % invoice is derived, not writable', v_status
             USING ERRCODE = '55000';
     END IF;
 
@@ -1934,13 +2391,37 @@ END $$;
 REVOKE ALL ON FUNCTION trg_fin_invoice_items_freeze() FROM PUBLIC;
 ```
 
+**Why the void exception tests `TG_TABLE_NAME`.** This function is bound to two tables, so an
+unqualified "`void` permits DELETE" would equally permit deleting an **adjustment** from a voided
+invoice — which the rule below forbids, because a rejected or approved adjustment is a permanent
+audit record (§9.5.1) and a voided invoice's adjustments are exactly the rows an auditor most wants
+to see survive. Testing `TG_TABLE_NAME <> 'fin_invoice_items'` admits line deletion on a void and
+refuses everything else, in one clause, in the function §35.3's inventory row points at.
+
+The alternative — a `WHEN` clause on one `CREATE TRIGGER` and not the other — expresses the same
+asymmetry in the schema rather than in the function, which is worse: the function is what the
+inventory row describes, so a reader auditing the function would not see the exception at all.
+
 **The header's money columns are deliberately outside this freeze, and that is not a loophole.**
 `trg_fin_invoice_item_total` recomputes `subtotal`/`total` *after* the lines are frozen, so if the
 freeze covered the header the recompute could never run on an issued invoice and the cache would go
-stale on the first correction. The exemption is safe because the header columns are not
-caller-writable: §16.5 revokes direct `UPDATE` on them and the only writer is the recompute trigger.
-"Exempt from the freeze" and "writable by a client" are different statements, and the previous
-revision's prose blurred them.
+stale on the first correction. The exemption is safe because **all three** controls of §9.4 hold at
+once, and it takes all three:
+
+* **§16.5.1** grants `UPDATE` on named columns only, and names neither `subtotal` nor `total`. So the
+  runtime role cannot write them — `42501`, before any trigger runs.
+* **§9.6.0 clause (2)** refuses a direct `UPDATE` of them for *every* role, including
+  `school_migrator`, because such a statement arrives at `pg_trigger_depth() = 1`. So the table owner
+  cannot write them either.
+* **§9.6.0.1**'s maintenance context admits exactly one writer per column pair, so `subtotal`/`total`
+  are reachable only through `trg_fin_invoice_item_total` under `'invoice_line_totals'`, and
+  `balance`/`paid_at` only through `fin_invoice_reapply_derived_state` under
+  `'invoice_balance_state'`. Neither scope can reach the other's columns.
+
+"Exempt from the freeze" and "writable by a client" are different statements; the previous revision
+asserted the second was false without ever making it so. §16.5.1 and §35.4 make it true for a
+client, and §9.6.0 clause (2) makes it true for *everyone*, which is the stronger claim and the one
+the previous revision never made at all.
 
 ### 9.5 `fin_invoice_items` and `fin_invoice_adjustments` — in full (NORMATIVE)
 
@@ -1955,40 +2436,130 @@ CREATE TABLE fin_invoice_items (
     id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id       uuid NOT NULL,
     invoice_id      uuid NOT NULL,
+    -- C-7. The line carries the structure and the installment, because §9.1.1
+    -- puts the grain on the invoice and the installment dimension on the line.
+    -- structure_id is NOT NULL: a line is a snapshot of exactly one
+    -- fin_fee_structure_items row, and that row's own structure_id is NOT NULL
+    -- in applied 0022. installment_no beside it is NOT, and the comment on that
+    -- column says why -- the two columns came from the same applied grain but
+    -- do not have the same shape.
+    structure_id    uuid NOT NULL,
+    -- C-7 + C-8, and the correction of a contradiction the previous revision
+    -- created. installment_no is NULLABLE and there is no DEFAULT, because the
+    -- two shapes a line can have are not the same shape:
+    --   * a line taken from a structure WITH plan rows carries the real
+    --     installment_no, and fin_invoice_items_plan_fk below proves it.
+    --   * a line from a structure with NO plan rows has no installment to
+    --     point at. Applied 0022 says such a structure "bills as a single
+    --     installment on effective_from" -- a *billing convention*, not a plan
+    --     row. The previous revision resolved this by defaulting the column to
+    --     1 and declaring it NOT NULL, which is incompatible with that
+    --     convention: a structure with no plans has no row
+    --     (structure_id, 1) in fin_fee_installment_plans, so the composite FK
+    --     below REJECTED every line of every plan-less structure. The two
+    --     clauses could not both be satisfied, and the generator had no way to
+    --     know which one it was expected to break.
+    -- NULL is therefore the honest encoding of "this line is not tied to an
+    -- installment", it is what lets the FK skip (MATCH SIMPLE), and the
+    -- generator's two branches -- plan row present, else effective_from --
+    -- map onto NULL and a value respectively. §7.4's "at most one plan" is
+    -- what makes the first branch unambiguous.
+    installment_no  integer CHECK (installment_no >= 1),
     -- The head supplies the tax treatment and the waivability rule; both are
     -- COPIED onto the line at issue time because a published structure is frozen
     -- but a fee HEAD can be re-taxed, and an issued invoice must not change when
     -- the head does. This is snapshotting, not denormalisation for speed.
     fee_head_id     uuid NOT NULL,
     description     text NOT NULL,
-    -- A negative line is a correction entered as a line, NOT a concession. The two
-    -- are different facts: a concession posts Dr 4000 / Cr 4100 (§15.1) and is
-    -- permission-gated, while a negative line is simply a smaller charge and must
-    -- go through fin_invoice_adjustments if it is a waiver. Allowing either sign
-    -- here and enforcing the rule only in the service is how a negative line
-    -- becomes an unapproved concession.
+    -- C-10. A line may NOT be negative. The previous revision's comment here
+    -- argued that a negative line is "a correction entered as a line, NOT a
+    -- concession", and its CHECK was `amount <> 0`, which permits one — while
+    -- §16.6, §16.7 and FI-001 all required `amount >= 0`. The comment was right
+    -- about the CONSEQUENCE and wrong about the mechanism: a negative line IS an
+    -- unapproved concession, and it is exactly the thing the adjustment approval
+    -- gate exists to prevent. Allowing it here is how a waiver bypasses both
+    -- fees.adjustments.approve and the fee head's is_waivable = false rule.
+    -- So the sign is closed at the line, and every reduction is an
+    -- adjustment.
     quantity        numeric(19,4) NOT NULL DEFAULT 1 CHECK (quantity <> 0),
     unit_amount     numeric(19,4) NOT NULL CHECK (unit_amount >= 0),
-    -- Snapshot of unit_amount * quantity, maintained by
-    -- trg_fin_invoice_item_total. Stored because every report reads it and
-    -- recomputing per row is the P0 cache-drift risk in reverse.
+    -- C-9.1. WRITER: trg_fin_invoice_item_amount(), a BEFORE INSERT OR UPDATE
+    -- trigger. The previous revision's comment claimed
+    -- trg_fin_invoice_item_total maintained this column; that function updates
+    -- only fin_invoices.subtotal and .total and never writes this row, so the
+    -- claim was false and the column had no writer at all. The caller supplies
+    -- quantity and unit_amount and this is derived, so no route can send a line
+    -- total that disagrees with its own factors.
     amount          numeric(19,4) NOT NULL,
-    tax_amount      numeric(19,4) NOT NULL DEFAULT 0 CHECK (tax_amount >= 0),
+    tax_amount      numeric(19,4) NOT NULL DEFAULT 0
+                    CHECK (tax_amount >= 0 AND tax_amount = round(tax_amount, 2)),
     -- Frozen at issue (§9.4). NULL while the parent invoice is a draft.
+    -- WRITER: trg_fin_invoice_freeze_lines (§9.6.0.1, inventory row 4d), an
+    -- AFTER UPDATE OF status trigger on fin_invoices that stamps every line on
+    -- the transition out of 'draft'. It is NOT the header guard: that function's
+    -- clause (6) used to do this from inside a BEFORE UPDATE trigger on the
+    -- parent, which meant issuing an invoice raised 55000 from the header guard
+    -- (§9.6.0). One writer, one function, and it is a definer only because
+    -- frozen_at is not granted to school_app_rw (§16.5.1).
     frozen_at       timestamptz,
     created_at      timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT fin_invoice_items_invoice_fk
         FOREIGN KEY (tenant_id, invoice_id)
         REFERENCES fin_invoices (tenant_id, id) ON DELETE RESTRICT,
+    CONSTRAINT fin_invoice_items_structure_fk
+        FOREIGN KEY (tenant_id, structure_id)
+        REFERENCES fin_fee_structures (tenant_id, id) ON DELETE RESTRICT,
+    -- The three-column composite FK that makes "this line belongs to an
+    -- installment of this structure's plan" a database fact rather than an
+    -- application convention. fin_installment_plans_uq
+    -- (tenant_id, structure_id, installment_no) is already applied in 0022, so
+    -- no new anchor is needed and no index is added for it.
+    --
+    -- NULLABLE NOW, AND THAT IS THE POINT: with installment_no NULL (a
+    -- plan-less structure, see the column comment above) MATCH SIMPLE skips
+    -- this FK entirely, which is exactly the intended semantics -- there is no
+    -- plan row to satisfy. The FK therefore enforces the claim only where the
+    -- claim is meaningful, and no special-case trigger is needed to express
+    -- "no plan". Declaring the column NOT NULL as the previous revision did
+    -- turned the skip into an impossibility.
+    CONSTRAINT fin_invoice_items_plan_fk
+        FOREIGN KEY (tenant_id, structure_id, installment_no)
+        REFERENCES fin_fee_installment_plans (tenant_id, structure_id, installment_no)
+        ON DELETE RESTRICT,
     CONSTRAINT fin_invoice_items_head_fk
         FOREIGN KEY (tenant_id, fee_head_id)
         REFERENCES fin_fee_heads (tenant_id, id) ON DELETE RESTRICT,
+    -- C-7 Q8: line uniqueness is (invoice, structure, head, installment), NOT
+    -- (invoice, head). Two structures may legitimately charge the same fee head
+    -- on one invoice; the same structure may not charge the same head for the
+    -- same installment twice. This is the same four-column shape, and the same
+    -- dedup role, as fin_fee_structure_items_uq in applied 0022.
+    --
+    -- NULLS NOT DISTINCT, and this is load-bearing rather than stylistic.
+    -- installment_no is nullable (see the column comment), and under the
+    -- default NULL-distinct semantics a plan-less structure could hold two
+    -- identical lines -- NULL never equals NULL, so the constraint would fire
+    -- on neither and the dedup role would silently evaporate for exactly the
+    -- case the column became nullable to serve. NULLS NOT DISTINCT treats the
+    -- two NULLs as one key and restores the guarantee. PostgreSQL 15+ is
+    -- already a project requirement: §7.5's
+    -- fin_fee_structure_targets_uq uses the same clause in applied 0022.
+    CONSTRAINT fin_invoice_items_uq
+        UNIQUE NULLS NOT DISTINCT
+            (tenant_id, invoice_id, structure_id, fee_head_id, installment_no),
     CONSTRAINT fin_invoice_items_ten_id_uq UNIQUE (tenant_id, id),
-    -- frozen_at iff the invoice is issued. Cross-table, so it is a TRIGGER
-    -- (trg_fin_invoice_item_total / the freeze trigger), not this CHECK: a CHECK
-    -- cannot reference another table's status, and a CHECK that tried would be
-    -- silently satisfied by any expression that returns non-false.
-    CONSTRAINT fin_invoice_items_amount_ck CHECK (amount <> 0)
+    -- C-10 + C-17. `amount > 0` is the sign rule: zero is a mistake or a
+    -- placeholder and both are better expressed by deleting the line, and a
+    -- negative is a concession and belongs in fin_invoice_adjustments. The
+    -- paisa half of §16.3's rule is the second conjunct, and it is stated as
+    -- DDL here rather than left as prose — the previous revision wrote "CHECK
+    -- (amount = round(amount, 2)) on all money columns" in §16.3 and put it in
+    -- no DDL block anywhere in the phase, so a sub-paisa total was
+    -- representable.
+    CONSTRAINT fin_invoice_items_amount_ck
+        CHECK (amount > 0 AND amount = round(amount, 2)),
+    CONSTRAINT fin_invoice_items_unit_amount_ck
+        CHECK (unit_amount = round(unit_amount, 2))
 );
 -- Revoke the 0001 default-privilege grant immediately (§35.4, §30.3).
 REVOKE ALL ON fin_invoice_items FROM school_app_rw;
@@ -1999,40 +2570,155 @@ CREATE TABLE fin_invoice_adjustments (
     id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id       uuid NOT NULL,
     invoice_id      uuid NOT NULL,
-    -- 'discount' | 'waiver' | 'fine' | 'correction'. CLOSED, because the type
-    -- determines the ledger account: a waiver is Dr 4000 / Cr 4100, a fine is
-    -- Dr 1200 / Cr 4200, and a correction is a plain reversal. A free-text type
-    -- with an application-chosen account is how the same fact posts two ways.
+    -- C-5. THE CANONICAL ADJUSTMENT MODEL, in one place, because the previous
+    -- revision specified two incompatible ones and every downstream section
+    -- picked a different one. Three axes, and each is now decided:
+    --
+    --   column name   `adjustment_type`, NOT `type`
+    --   sign          a SIGNED `amount`; there is NO `direction` column
+    --   magnitude      |amount| is the money; the sign is the meaning
+    --
+    -- Why signed and not a `direction` column. §9.6's
+    -- trg_fin_invoice_item_total — which is NORMATIVE, given in full, and
+    -- bound twice — computes `total = v_sub + v_adj + v_tax` with a bare SUM.
+    -- That expression is only correct if the sign is already in the column. A
+    -- `direction` model would require rewriting that function to
+    -- `SUM(CASE direction WHEN 'credit' THEN -amount ELSE amount END)`, and
+    -- would make every one of the report formulas in §12.4 two columns wide
+    -- where this design has always said one. The signed model is also the one
+    -- the previous revision's own DDL and its own §9.5 sign CHECK used. The
+    -- `direction` shape appears only in §16.6, §16.7 and FI-001, in prose, and
+    -- those three are corrected to the signed model rather than the reverse.
+    --
+    -- The closed set is the union the phase actually needs, and it is CLOSED
+    -- because the type determines the ledger account pair (§15.1): a waiver is
+    -- Dr 4000 / Cr 4100, a fine is Dr 1200 / Cr 4200, a correction is a plain
+    -- reversal. A free-text type with an application-chosen account is how the
+    -- same fact posts two ways.
+    --
+    --   discount   reduce   -   no ledger move   (§15.1 contra-revenue)
+    --   concession reduce   -   Dr 4000 / Cr 4100   requires approval
+    --   waiver     reduce   -   Dr 4000 / Cr 4100   requires approval
+    --   fine       raise    +   Dr 1200 / Cr 4200   requires approval
+    --   late_fee   raise    +   Dr 1200 / Cr 4200   requires approval (§26.2 seam)
+    --   correction either  ±   plain reversal        requires approval
+    --
+    -- 'concession' and 'late_fee' were named by §21.3 and §26.2 and were NOT
+    -- legal values under the previous CHECK, so §21.3's approval gate keyed on
+    -- `type IN ('concession','waiver')` could never fire for its first member.
+    -- Both are now legal. 'late_fee' is a fine with a due date on it; it is
+    -- distinct because §26.2 puts automatic assessment out of scope and names
+    -- this column as the Phase 9/11 seam.
     adjustment_type text NOT NULL
-                    CHECK (adjustment_type IN ('discount','waiver','fine','correction')),
-    -- Negative reduces the invoice, positive increases it. A waiver and a fine are
-    -- both signed, and the SIGN is what distinguishes a reduction from a charge.
-    amount          numeric(19,4) NOT NULL CHECK (amount <> 0),
+                    CHECK (adjustment_type IN
+                        ('discount','concession','waiver','fine','late_fee','correction')),
+    -- Negative reduces the invoice, positive increases it. The SIGN is what
+    -- distinguishes a reduction from a charge, which is why there is no
+    -- direction column and why the sign CHECK below can be exhaustive.
+    amount          numeric(19,4) NOT NULL
+                    CHECK (amount <> 0 AND amount = round(amount, 2)),
     -- Mandatory and non-empty for every type. An adjustment with no reason is an
     -- unapproved money movement; the audit requirement is on the row, not on a
     -- separate log that can be pruned.
     reason          text NOT NULL CHECK (length(btrim(reason)) > 0),
+    -- C-5/C-6. THE APPROVAL AXIS (OD-15, resolved before 0023 as OD-15 itself
+    -- required). Four columns and a status, because "the approver is the
+    -- creator" is not separation of duties and the previous revision said so
+    -- while shipping it. See §9.5.1 for the full state machine and for why this
+    -- could not be ALTERed in later.
+    status          text NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending','approved','rejected')),
+    requested_by    uuid NOT NULL,
     approved_by     uuid,
+    approved_at     timestamptz,
+    rejected_reason text,
+    -- C-5. REVERSAL LINKAGE, kept. §16.7 named `reverses_adjustment_id` as the
+    -- reversal mechanism and §21.4 carries `fee_adjustment_reversal_invalid`,
+    -- but the previous revision's DDL had no such column — so the one thing
+    -- that makes a reversal findable (which adjustment is this undoing?) was
+    -- described three times and implemented zero times. A `correction` is the
+    -- reversal type, and this is what links it to its target.
+    reverses_adjustment_id uuid,
     created_at      timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT fin_invoice_adjustments_invoice_fk
         FOREIGN KEY (tenant_id, invoice_id)
         REFERENCES fin_invoices (tenant_id, id) ON DELETE RESTRICT,
-    -- §6.3 R4: `users` is platform-global (P0-06a).
+    -- §6.3 R4: `users` is platform-global (P0-06a). BOTH identities are
+    -- RESTRICT, not SET NULL, and the reason is the same one 0022 shipped for
+    -- fin_fee_structures.published_by: a SET NULL is implemented as a
+    -- referential UPDATE, and the audit identity of who asked for and who
+    -- approved a money movement must not be erasable by deleting a user row.
+    -- Deactivating the account (users.status) is the supported route.
     CONSTRAINT fin_invoice_adjustments_user_fk
-        FOREIGN KEY (approved_by) REFERENCES users (id) ON DELETE SET NULL,
+        FOREIGN KEY (approved_by) REFERENCES users (id) ON DELETE RESTRICT,
+    CONSTRAINT fin_invoice_adjustments_requester_fk
+        FOREIGN KEY (requested_by) REFERENCES users (id) ON DELETE RESTRICT,
+    -- Self-referential, on the same R4-composite shape as every other tenant
+    -- relation. ON DELETE RESTRICT: an adjustment is never deleted at all
+    -- (there is no DELETE privilege and no route), so this is about refusing to
+    -- remove a target that a reversal points at.
+    CONSTRAINT fin_invoice_adjustments_reverses_fk
+        FOREIGN KEY (tenant_id, reverses_adjustment_id)
+        REFERENCES fin_invoice_adjustments (tenant_id, id) ON DELETE RESTRICT,
     CONSTRAINT fin_invoice_adjustments_ten_id_uq UNIQUE (tenant_id, id),
-    -- A waiver and a discount both reduce the fee, so neither may be POSITIVE: a
-    -- positive "waiver" is a fee increase wearing a waiver's permission and its
-    -- exemption from the fee-head waivability rule.
+    -- C-5. THE SIGN RULE, exhaustive over the closed set. The previous revision's
+    -- `sign_ck` covered only waiver and discount, which left `fine` free to be
+    -- negative — a "fine" that reduces a family's bill, wearing a fine's ledger
+    -- treatment. Every type now has exactly the signs it may carry.
     CONSTRAINT fin_invoice_adjustments_sign_ck CHECK (
-        adjustment_type NOT IN ('waiver','discount') OR amount < 0
+        CASE adjustment_type
+            WHEN 'discount'   THEN amount < 0
+            WHEN 'concession' THEN amount < 0
+            WHEN 'waiver'     THEN amount < 0
+            WHEN 'fine'       THEN amount > 0
+            WHEN 'late_fee'   THEN amount > 0
+            WHEN 'correction' THEN TRUE
+            ELSE FALSE
+        END
     ),
-    -- A waiver and a fine are the two that MOVE THE LEDGER to a contra/income
-    -- account, so both need an approver. A discount and a correction are the
-    -- invoice's own arithmetic and do not. Enforced here rather than in a service
-    -- so an unauthenticated insert path cannot bypass it.
+    -- C-5. A correction is only a reversal if it says what it reverses, and it
+    -- may not reverse itself. Two conjuncts, both cheap, both closing a hole the
+    -- previous revision's DDL had by omission.
+    CONSTRAINT fin_invoice_adjustments_reverses_ck CHECK (
+        (adjustment_type = 'correction') = (reverses_adjustment_id IS NOT NULL)
+    ),
+    -- C-6. THE APPROVAL STATE, in the schema rather than in a service. Three
+    -- conjuncts, one per state, so there is no combination of populated and
+    -- unpopulated columns that describes an approval that did not happen.
     CONSTRAINT fin_invoice_adjustments_approval_ck CHECK (
-        adjustment_type NOT IN ('waiver','fine') OR approved_by IS NOT NULL
+        CASE status
+            WHEN 'pending'  THEN approved_by IS NULL
+                              AND approved_at IS NULL
+                              AND rejected_reason IS NULL
+            WHEN 'approved' THEN approved_by IS NOT NULL
+                              AND approved_at IS NOT NULL
+                              AND rejected_reason IS NULL
+            WHEN 'rejected' THEN approved_by IS NULL
+                              AND approved_at IS NULL
+                              AND rejected_reason IS NOT NULL
+                              AND length(btrim(rejected_reason)) > 0
+            ELSE FALSE
+        END
+    ),
+    -- C-6. FOUR EYES, AT THE USER LEVEL. The approver must not be the requester.
+    -- This is a CHECK rather than a permission because roles overlap by design
+    -- (§20.5 gives school_owner all 25 fees.* permissions and accountant 22), so
+    -- a role-level separation would be unenforced; separating the two ACTORS is
+    -- enforceable, and it is the control the previous revision said it did not
+    -- have.
+    CONSTRAINT fin_invoice_adjustments_no_self_approval_ck CHECK (
+        approved_by IS NULL OR approved_by <> requested_by
+    ),
+    -- C-5. NO SELF-REVERSAL. `reverses_adjustment_id` references
+    -- (tenant_id, id) of the same table, so a row may name itself -- the FK is
+    -- satisfied by the row being inserted. The previous revision had no
+    -- conjunct forbidding it, and §9.5.1's prose ("the reversal is a NEW row")
+    -- was the only thing standing between an implementation and a row whose
+    -- `reverses_adjustment_id` is its own `id`. `IS DISTINCT FROM` rather than
+    -- `<>` because the non-correction case leaves the column NULL, and NULL must
+    -- pass.
+    CONSTRAINT fin_invoice_adjustments_no_self_reversal_ck CHECK (
+        reverses_adjustment_id IS DISTINCT FROM id
     )
 );
 -- Revoke the 0001 default-privilege grant immediately (§35.4, §30.3).
@@ -2040,43 +2726,643 @@ REVOKE ALL ON fin_invoice_adjustments FROM school_app_rw;
 
 
 
--- The intra-file forward FK from §8.7, closed now that fin_invoices exists.
+-- ═══════════════════════════════════════════════════════════════════════════
+-- C-3 + C-4. THE DEFERRED FORWARD FK FROM §8.7 — PLACEMENT AND DELETE ACTION
+-- ═══════════════════════════════════════════════════════════════════════════
+--
+-- PLACEMENT (C-3): 0023, here, at the END of this file. Six places in the design
+-- and one in the applied 0022 header said 0023; §35.2's FK map row said 0024.
+-- The majority is also the only placement that can be correct: the FK targets
+-- fin_invoices, which 0023 creates, so the earliest legal placement is the end
+-- of 0023. Putting it in 0024 would leave fin_billing_run_items.invoice_id
+-- unconstrained for a whole extra migration, for no stated reason. §35.2 is
+-- corrected to 0023.
+--
+-- DELETE ACTION (C-4): ON DELETE RESTRICT. This is the decision the previous
+-- revision never made, and the 0022 checkpoint report explicitly declined to
+-- make it on the design's behalf, flagging it for 0023. It is RESTRICT, and the
+-- reasoning is in §8.7.1's "attaching the invoice" clause, which is normative. The
+-- short form, because it is the
+-- part an implementer needs:
+--
+--   * ON DELETE SET NULL is IMPOSSIBLE, not merely undesirable. PostgreSQL
+--     implements it as a referential UPDATE, and the update it performs is
+--     invoice_id: NOT NULL -> NULL. §8.7.1's
+--     trg_fin_billing_run_items_freeze admits exactly ONE update to a
+--     committed run's item, and it is the opposite direction:
+--     OLD.invoice_id IS NULL AND NEW.invoice_id IS NOT NULL. The mirror image
+--     reaches the RAISE, so a SET NULL action could never fire. An FK whose
+--     action can never fire is worse than no FK, because it reads as protection
+--     — which is the exact defect 0022 found and corrected on
+--     fin_fee_structures.published_by (D7).
+--
+--   * The bare form is worse still, and is separately wrong. On a composite FK
+--     a bare SET NULL tries to null tenant_id as well, which is NOT NULL, so
+--     the delete fails 23502 rather than doing anything useful. This is the
+--     same defect 0021 found and corrected on
+--     fin_tenant_settings_tax_profile_fk. So even a column-list
+--     SET NULL (invoice_id) — the form 0022's header anticipated — is excluded
+--     by the first bullet, not merely by the second.
+--
+--   * RESTRICT preserves the audit meaning. An invoice that a committed billing
+--     run produced and that a parent has been shown cannot be deleted while
+--     that link exists. §9.2.1 already removed the hard-delete path for drafts
+--     (C-13), so there is no legitimate caller that this action would block.
+--
+--   * RESTRICT matches the five sibling FKs on the same table. Every one of
+--     fin_bri_run_fk, fin_bri_enrollment_fk, fin_bri_student_fk,
+--     fin_bri_structure_fk and fin_bri_assignment_fk is ON DELETE RESTRICT, and
+--     so is the D7 precedent. A sixth action on one table would be the odd one
+--     out for no stated reason.
+--
+-- COMPOSITE, therefore tenant-safe (C-3): (tenant_id, invoice_id) references
+-- (tenant_id, id) against fin_invoices_ten_id_uq, which §9.1 declares. The
+-- tenant column participates in the key, so a cross-tenant attachment is
+-- unrepresentable rather than merely unlikely, and §6.3 R1/R2 are satisfied
+-- without an elision. MATCH SIMPLE is the default, so every pre-commit item —
+-- every row whose invoice_id is still NULL, which is all of them until 0023's
+-- attachment step — remains legal with the column NULL, which is exactly the
+-- state it is in.
 ALTER TABLE fin_billing_run_items
     ADD CONSTRAINT fin_bri_invoice_fk
     FOREIGN KEY (tenant_id, invoice_id)
-    REFERENCES fin_invoices (tenant_id, id) ON DELETE SET NULL;
+    REFERENCES fin_invoices (tenant_id, id) ON DELETE RESTRICT;
 ```
+
+**Placement within the file, and why the position is not arbitrary.** The
+`ALTER` follows all four `CREATE TABLE`s because the FK's target must exist
+first. It does **not** need to follow `fin_challans` or any trigger, and the
+ordering that matters is: `fin_invoices` → `fin_invoice_items` →
+`fin_invoice_adjustments` → `fin_challans` → the `ALTER`. §30.3.1's composite
+type rule does not bite here, because the `ALTER` is a DDL statement resolved at
+`ALTER` time rather than a plpgsql body, and `fin_invoices_ten_id_uq` is declared
+inline in `fin_invoices` and not by the `ALTER` — a detail the previous
+revision's §35.2 row got wrong, attributing that anchor to the `ALTER`.
+
+**What 0023 does not do, stated for the audit.** The `ALTER` adds the
+constraint. It does not backfill: every `fin_billing_run_items` row that exists
+at 0023 time has `invoice_id IS NULL`, because the attachment happens in the
+same migration's service step after invoices are generated, and because
+`MATCH SIMPLE` makes the NULL case legal either way. C-16 requires 0023 to
+assert the constraint's presence, its composite shape, its target and its delete
+action, so a later migration cannot quietly drop or weaken it.
+
+**Two constraints were removed from the previous revision, and it is worth saying why rather
+than letting the DDL quietly get shorter.**
+
+* `fin_invoice_adjustments_requires_approval_ck CHECK (status <> 'pending' OR TRUE)` was
+  **vacuous by construction** — `X OR TRUE` is TRUE for every row, so the constraint asserted
+  nothing while appearing, in a constraint list, to be the enforcement of C-6. A reader
+  scanning the DDL for "where is approval required?" would find it. It was retained in the
+  previous revision with a note admitting it was vacuous, on the theory that a named placeholder
+  is informative. **It is not**: a constraint that cannot fail is worse than no constraint,
+  because it occupies the position where a real one belongs and it survives review by looking
+  deliberate.
+* `fin_invoice_adjustments_rejects_pending_ck CHECK (status IN ('pending','approved','rejected'))`
+  **duplicated the column-level CHECK** already declared on `status` four constraints earlier, in
+  a weaker form (the column CHECK also rejects NULL via NOT NULL). Two constraints, one meaning.
+
+C-6's enforcement is now stated only where it is real, and it is three mechanisms, none of which
+is a CHECK:
+
+1. `status` defaults to `pending`, and `fin_invoice_adjustments_approval_ck` makes the three
+   states' metadata mutually exclusive — an `approved` row cannot exist without an `approved_by`
+   and an `approved_at`, so "approved" is not a label anyone can write.
+2. `fin_invoice_adjustments_no_self_approval_ck` refuses `approved_by = requested_by`.
+3. `trg_fin_invoice_adjustment_approval` (§9.6.2) is the only writer of the four approval columns,
+   permits only `pending → approved|rejected`, and is where draft-only enforcement lives — the
+   parent invoice's state is not visible to a CHECK.
+
+**Why no CHECK can do this job, stated once so it is not re-attempted.** "An adjustment requires
+approval before it counts" is a statement about an invoice's *total*, which is a SUM over sibling
+rows; a CHECK constraint sees one row and cannot express an aggregate over the table. Any CHECK
+attempting it degenerates into either a tautology (`OR TRUE`) or a restatement of the single
+row's own status (`status <> 'pending'`), which is `approval_ck` again. Aggregate-level rules live
+in §17's invariant catalogue, are enforced by the recompute, and are tested as multi-row tests —
+that is the correct home for them, and this is the note that says so.
+
+### 9.5.1 The adjustment lifecycle, in full (C-5, C-6)
+
+The previous revision had no lifecycle for adjustments at all — no status, no
+approval transition, no statement of what a pending row did to the total. Here it
+is, completely.
+
+**Immutability.** Once inserted, an adjustment row is immutable in every field
+except the approval transition. `invoice_id`, `adjustment_type`, `amount`,
+`reason`, `requested_by`, `reverses_adjustment_id` and `created_at` are frozen
+at INSERT. The only permitted `UPDATE` is
+`pending → approved` (setting `approved_by`, `approved_at`) or
+`pending → rejected` (setting `rejected_reason`), and
+`trg_fin_invoice_adjustment_approval` refuses everything else with `55000`.
+
+**Approval is only possible while the invoice is a draft.** The line freeze
+(`trg_fin_invoice_items_freeze`, second binding) already refuses any `UPDATE` to
+an adjustment whose parent invoice is not a draft, and it runs `BEFORE UPDATE OR
+DELETE` on the same rows. So an adjustment cannot be approved after issue — the
+correction route for that is a new `correction` adjustment, which is the correct
+accounting answer and the one §9.2's `issued → issued` row already pointed at.
+
+**Before approval** (`status = 'pending'`): the row exists, is visible to
+`finance_staff`, and contributes **nothing** to `subtotal` or `total`, because
+§9.6.2's second scan filters on `status = 'approved'`.
+
+**After approval** (`status = 'approved'`): the row contributes its signed
+`amount` to `total` from the moment the `UPDATE` commits, because the recompute
+trigger is `AFTER INSERT OR UPDATE OR DELETE` on this table.
+
+**After rejection** (`status = 'rejected'`): the row is a permanent record that
+the request was considered and declined, contributing nothing. It is not deleted,
+because "the audit requirement is on the row, not on a separate log that can be
+pruned" — the same reason `reason` is mandatory.
+
+**Who may reject.** A user holding `fees.adjustments.approve`, who is not the
+requester. The four-eyes CHECK makes a self-rejection impossible for the same
+reason it makes a self-approval impossible.
+
+**Reversal.** A `correction` reverses an existing approved adjustment and must
+name it in `reverses_adjustment_id`. The reversal is a NEW row and the target is
+never modified, which is what makes the pair an audit trail rather than an edit.
+`reverses_adjustment_id` is a self-reference on `(tenant_id, id)`, so a
+correction cannot point at another tenant's adjustment, and
+`fin_invoice_adjustments_no_self_reversal_ck` forbids self-reference. Reversing a
+`correction` is legal — the chain is unbounded by
+design, because truncating it is what an audit would object to. A
+`reverses_adjustment_id` that names a `pending` or `rejected` row is refused with
+`fee_adjustment_reversal_invalid` (§21.4) by the same trigger.
+
+**Ledger boundary.** An approved adjustment posts through §15.1's account pairs
+at issue, and its reversal posts the mirror image. `fin_invoice_adjustments` has
+no ledger FK and no ledger write of its own; the posting is
+`post_fin_ledger_group`'s job in 0026.
+
+**API representation** (§21.3 is corrected to match). The request body and
+response both use `adjustment_type` and a signed `amount`; `type` and
+`direction` are not part of the wire format. The create route requires
+`fees.adjustments.create`; the approve route requires
+`fees.adjustments.approve` and is a **separate** `POST
+/finance/invoices/:id/adjustments/:aid/approve`, which is the change OD-15's
+resolution forces: a single route that both creates and approves cannot express a
+two-step process. The reject route is `…/:aid/reject`. Both are added to §35.5.
+
+**What OD-15's resolution costs, stated plainly.** A single-role school with one
+finance user can no longer create a concession. That is the point of four eyes,
+but it is a real operational change and the owner should hear it from the design
+rather than discover it in production. The escape hatch is a second user in the
+same role, not a weaker check: §20.5's backfill is unchanged, so both users
+already hold both permissions, and the CHECK separates the two people rather than
+the two roles.
 
 **Three consequences of those CHECK constraints that the owner should see, because they are policy
 expressed as schema and will change what a school can do.**
 
-1. **A "waiver" can never increase a fee.** `fin_invoice_adjustments_sign_ck` forces
-   `amount < 0` for `waiver` and `discount`. A school that wants to add a charge must use `fine` or
-   `correction`, both of which require an approver. This is deliberate: a positive amount on a row
-   typed `waiver` would be a fee increase that skipped the fee head's `is_waivable = false` rule and
-   the waiver permission, because permissions are chosen by route, not by row content.
-2. **A waiver and a fine cannot be entered without a named approver.** That is the separation-of-
-   duties rule in one CHECK. It means a migration or backfill that bulk-creates historical waivers
-   must supply `approved_by` or fail — which is the correct failure, and worth flagging to whoever
-   owns the data migration.
-3. **A line amount is never zero** (`fin_invoice_items_amount_ck`). A zero line is either a mistake
-   or a placeholder; both are better expressed by deleting the line, and admitting zero rows makes
-   "did this invoice have a line for this fee?" ambiguous between "no" and "a zero one".
+1. **A "waiver" can never increase a fee.** `fin_invoice_adjustments_sign_ck` now forces
+   `amount < 0` for `waiver`, `concession` and `discount`, and `amount > 0` for `fine` and
+   `late_fee` — every type, exhaustively, where the previous revision's CHECK covered only two of
+   them and left a `fine` free to reduce a family's bill. A school that wants to add a charge uses
+   `fine` or `late_fee`, both of which require approval. This is deliberate: a positive amount on a
+   row typed `waiver` would be a fee increase that skipped the fee head's `is_waivable = false`
+   rule and the waiver permission, because permissions are chosen by route, not by row content.
+2. **No adjustment changes an invoice's total until a different user approves it** (C-6), and the
+   pending row is not a footnote — it is a `pending` state that the total recompute filters out. A
+   migration or backfill that bulk-creates historical concessions must therefore create them with
+   `status = 'approved'` and a `requested_by` distinct from `approved_by`, or the four-eyes CHECK
+   fails — which is the correct failure, and worth flagging to whoever owns the data migration. It
+   cannot be satisfied by writing the same uuid twice.
+3. **A line amount is never zero and never negative**
+   (`fin_invoice_items_amount_ck CHECK (amount > 0 …)`). A zero line is either a mistake or a
+   placeholder; both are better expressed by deleting the line, and admitting zero rows makes "did
+   this invoice have a line for this fee?" ambiguous between "no" and "a zero one". A negative line
+   is a concession, and concessions go through the approval gate. See §9.5's comment on the column
+   for why the previous revision's prose here was right about the consequence and wrong about the
+   mechanism.
 
-### 9.6 The three invoice trigger functions, in full (NORMATIVE)
+### 9.6 The invoice trigger functions, in full (NORMATIVE)
 
 `trg_fin_invoice_number`, `trg_fin_invoice_item_total` and `trg_fin_invoice_void` were bound in
 §35.3's binding block and referenced by name in §9.1–§9.4 and §16.5, with no `CREATE FUNCTION`
 anywhere in the document. A binding block that names a function nothing creates produces
 `function … does not exist` when migration `0023` is applied.
 
+**The 0023 / 0024 split, stated once so the ten functions below are not read as
+one set (C-1, C-2).** 0023 creates **seven** bound functions and binds them **nine**
+times; 0024 creates **three** more bound functions and binds them **five** times, plus the
+**one unbound helper** `fin_invoice_reapply_derived_state` (§12.4.1), which 0024 also creates and
+which is counted in the 0024 function total but not in its binding total:
+
+| Function | Created in | Why |
+|---|---|---|
+| `trg_fin_invoice_header_guard` | **0023** | names only `fin_invoices`, `fin_fee_structures`, `fin_fee_installment_plans` |
+| `trg_fin_invoice_freeze_lines` | **0023** | names only `fin_invoice_items`; **new in this revision** — it is the header guard's former clause (6), and §9.6.0/§9.6.0.1 set out why it had to move |
+| `trg_fin_invoice_number` | **0023** | names only `fin_document_counters` (0021) |
+| `trg_fin_invoice_item_amount` | **0023** | names nothing outside `fin_invoice_items` |
+| `trg_fin_invoice_item_total` | **0023** | names only the two 0023 children and the header |
+| `trg_fin_invoice_items_freeze` | **0023** | names only `fin_invoices` |
+| `trg_fin_invoice_adjustment_approval` | **0023** | names only `fin_invoice_adjustments`, `fin_invoices` |
+| `trg_fin_invoice_balance_recompute` | **0024** | **reads `fin_payment_allocations`** (C-1) |
+| `trg_fin_invoice_void` | **0024** | **reads `fin_payment_allocations`** (C-2) |
+| `trg_fin_challan_status` | **0024** | **reads `fin_v_invoice_balance`**, created in 0024 (C-2) |
+
+The rule that puts the last three in 0024 is §30.3.1's, applied in its strict
+form: **a function created by migration *N* may not name a relation created by a
+migration later than *N*** — in its body, in a `DECLARE`, or in a row type.
+§30.3.1 stated the `DECLARE` half as a `CREATE FUNCTION` failure and the body
+half as a first-execution failure; both are real, and the strict form removes the
+second by never writing the function. The previous revision broke this rule three
+times and then wrote, in §12.4.1, a comment saying it was the rule.
+
+The window this opens is stated rather than glossed: between the 0023 landing and
+the 0024 landing, `fin_invoices.balance` is 0, `fin_invoices.status` cannot leave
+`issued`, no invoice can be voided, and no challan can have its status derived.
+None of that is reachable by an application, because 0023 is UNREACHABLE (§35.1)
+until 0028 grants — and 0028 comes after 0024. The rule is not "it is fine right
+now"; it is "the schema never contains a trigger that names a relation it does
+not have".
+
+#### 9.6.0 The header guard — server-owned fields and `due_date` (C-8, C-9.1)
+
+```sql
+-- NEW in 0023 (C-8, C-9, C-SEC). One function, one job: the fields of fin_invoices
+-- that the runtime role does not own. It is the reason §9.4's "header is outside
+-- the freeze" exemption is an exemption, and the reason due_date is never
+-- absent.
+--
+-- SECURITY INVOKER, and that is load-bearing rather than incidental.
+--
+-- §16.5.2's rule is "a function needs SECURITY DEFINER if and only if it issues
+-- a statement of its own against a column the caller cannot write; assigning to
+-- NEW does not count". This function used to violate that rule in exactly one
+-- place — clause (6), which issued `UPDATE fin_invoice_items SET frozen_at` from
+-- inside a BEFORE UPDATE trigger on fin_invoices — and was a definer for that one
+-- clause alone. Clause (6) now lives in trg_fin_invoice_freeze_lines (§9.6.0.1),
+-- so nothing here issues a statement and §16.5.2's rule says INVOKER. The rule
+-- did not need amending; only the membership of F5d changed. WHOLE-PHASE that is five
+-- (rows 4, 4d, 6, 13, 8a) and always was -- but THIS file asserts 3 of them, because rows 13
+-- and 8a are 0024's. C-SEC-M4a therefore counts 3 at the 0023 checkpoint (§28.3.1).
+--
+-- IT MUST NOT BECOME A DEFINER AGAIN, and clause (2) below is why. Definership
+-- sets current_user to school_migrator for EVERY caller, which erases the one
+-- difference clause (2) depends on: that the runtime role's own UPDATE and a
+-- maintenance writer's nested UPDATE are different statements. SECURITY DEFINER
+-- changes the effective ROLE of a function body; it does not suppress this
+-- trigger, so a definer guard would run the identical refusal for both. Asserted
+-- by C-SEC-M4a (§28.3.1).
+CREATE OR REPLACE FUNCTION trg_fin_invoice_header_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE v_derived    date;
+        v_scope       text;
+        v_line_dirty  boolean;
+        v_bal_dirty   boolean;
+        v_ident_dirty boolean;
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        -- (1) C-SEC. A caller may not seed the caches. Forcing them to 0 here
+        -- rather than trusting the DEFAULT is the point: DEFAULT is not a
+        -- privilege, so a route that lists subtotal/total in its INSERT column
+        -- list would otherwise write them, and nothing downstream could tell
+        -- the difference between a computed zero and a supplied zero.
+        NEW.subtotal := 0;
+        NEW.total    := 0;
+        NEW.balance  := 0;   -- stays 0 until 0024 writes it (C-1)
+        NEW.paid_at  := NULL;
+    ELSE
+        -- (2) C-SEC. These are server-owned on UPDATE — and NOT unconditionally,
+        -- which is the whole remediation.
+        --
+        -- The previous revision refused every change to all seven columns, and
+        -- §9.6.2's cache writer is a trigger that issues its own
+        -- `UPDATE fin_invoices SET subtotal, total, updated_at`. SECURITY DEFINER
+        -- does not suppress this trigger, so that statement hit this clause and
+        -- the first line INSERT on any invoice raised 55000. The caches were
+        -- therefore unreachable: every invoice read subtotal = total = balance = 0
+        -- forever, and every report derived from them reported zero. A refusal
+        -- that fires on the maintenance path is not protection — it is a broken
+        -- design that also blocks the caller. The same trap waits in 0024:
+        -- fin_invoice_reapply_derived_state issues
+        -- `UPDATE fin_invoices SET balance, status, paid_at, updated_at`.
+        --
+        -- TWO FACTORS, BOTH REQUIRED, and neither is sufficient alone.
+        --
+        --   A. STRUCTURAL — pg_trigger_depth() >= 2. The header UPDATE was itself
+        --      issued from inside a trigger. This is not a flag and nothing can
+        --      set it: it is a property of where the statement sits in the
+        --      trigger stack, so it cannot be forged by a role, a GUC, a SECURITY
+        --      DEFINER function or a compromised route handler. A statement
+        --      issued directly by ANY role, school_app_rw or school_migrator
+        --      alike, arrives here at depth 1 and is refused. "The owner has no
+        --      bypass" is then a fact rather than a hope (C-SEC-M7).
+        --
+        --   B. SCOPED — current_setting('fin.invoice_maintenance_scope', true)
+        --      is exactly one of two values, and the columns that actually moved
+        --      must be a subset of THAT value's column set. §9.6.0.1 publishes the
+        --      vocabulary, the producer, the lifetime and the cleanup.
+        --
+        -- The three flags are grouped by writer, not by column, because the
+        -- scopes are: invoice_line_totals may move the line pair, and
+        -- invoice_balance_state the balance pair. The identity triple
+        -- (invoice_no, issued_at, voided_at) is in NEITHER scope and is refused
+        -- unconditionally below — which is not an omission but a fact about how
+        -- those three are written: §9.6.1 and §9.3.1 assign them to NEW inside a
+        -- BEFORE trigger and never issue an UPDATE of them, so no maintenance
+        -- path exists that legitimately needs to reach them. A third scope can
+        -- therefore never be added to make them writable without also writing the
+        -- writer, which is the property that makes the closed set safe to extend.
+        v_line_dirty := NEW.subtotal  IS DISTINCT FROM OLD.subtotal
+                     OR NEW.total      IS DISTINCT FROM OLD.total;
+        v_bal_dirty  := NEW.balance   IS DISTINCT FROM OLD.balance
+                     OR NEW.paid_at    IS DISTINCT FROM OLD.paid_at;
+        v_ident_dirty:= NEW.invoice_no IS DISTINCT FROM OLD.invoice_no
+                     OR NEW.issued_at  IS DISTINCT FROM OLD.issued_at
+                     OR NEW.voided_at  IS DISTINCT FROM OLD.voided_at;
+
+        IF v_line_dirty OR v_bal_dirty OR v_ident_dirty THEN
+            -- Factor A. Refusal names the depth, because a reader who hits this
+            -- on a maintenance path needs to know immediately that the UPDATE was
+            -- not nested inside a trigger.
+            IF pg_trigger_depth() < 2 THEN
+                RAISE EXCEPTION
+                    'subtotal, total, balance, invoice_no, issued_at, voided_at and paid_at are trigger-maintained; a directly issued UPDATE is never a maintenance write'
+                    USING ERRCODE = '55000';
+            END IF;
+
+            -- Factor B. current_setting's second argument is missing_ok: it yields
+            -- NULL when the GUC is unset rather than raising. And NULL = 'anything'
+            -- is NULL, so an absent scope falls to the ELSE branch and is refused.
+            -- That is the intended reading: no authorization, no write.
+            v_scope := current_setting('fin.invoice_maintenance_scope', true);
+            IF v_scope = 'invoice_line_totals' THEN
+                IF v_bal_dirty OR v_ident_dirty THEN
+                    RAISE EXCEPTION
+                        'maintenance scope % does not cover balance, paid_at, invoice_no, issued_at or voided_at',
+                        v_scope
+                        USING ERRCODE = '55000';
+                END IF;
+            ELSIF v_scope = 'invoice_balance_state' THEN
+                IF v_line_dirty OR v_ident_dirty THEN
+                    RAISE EXCEPTION
+                        'maintenance scope % does not cover subtotal, total, invoice_no, issued_at or voided_at',
+                        v_scope
+                        USING ERRCODE = '55000';
+                END IF;
+            ELSE
+                RAISE EXCEPTION
+                    'no internal maintenance authorization is established for this write (fin.invoice_maintenance_scope = %)', COALESCE(v_scope, '<unset>')
+                    USING ERRCODE = '55000';
+            END IF;
+        END IF;
+    END IF;
+
+    -- (3) due_date, immutable once the invoice leaves draft. C-8: the previous
+    -- revision declared `due_date date NOT NULL` with no DEFAULT, no derivation
+    -- and no writer anywhere in the phase, which is a NOT NULL column that
+    -- fails at INSERT for every invoice whose author did not know a secret rule.
+    IF TG_OP = 'UPDATE' AND OLD.status <> 'draft' AND NEW.due_date IS DISTINCT FROM OLD.due_date THEN
+        RAISE EXCEPTION 'due_date cannot be changed after issue' USING ERRCODE = '55000';
+    END IF;
+
+    IF NEW.due_date IS NULL THEN
+        -- (4) Derivation, in precedence order. The two derived sources are
+        -- exactly the two cases applied 0022 already documents: a structure
+        -- with plan rows bills on the FIRST installment's due_on, and a
+        -- structure with no plan rows "bills as a single installment on
+        -- effective_from" (0022_fin_fee_structures.sql, section 3 header).
+        -- MIN(due_on) is deterministic because
+        -- fin_installment_plans_uq makes due_on distinct per (structure,
+        -- installment_no).
+        IF NEW.structure_id IS NOT NULL THEN
+            SELECT MIN(p.due_on) INTO v_derived
+              FROM fin_fee_installment_plans p
+             WHERE p.tenant_id = NEW.tenant_id
+               AND p.structure_id = NEW.structure_id;
+
+            IF v_derived IS NULL THEN
+                SELECT s.effective_from INTO v_derived
+                  FROM fin_fee_structures s
+                 WHERE s.tenant_id = NEW.tenant_id
+                   AND s.id = NEW.structure_id;
+            END IF;
+        END IF;
+
+        -- (5) No structure, or a structure with neither plans nor an
+        -- effective_from (impossible - effective_from is NOT NULL - so this is
+        -- the no-structure case). The caller must supply it. Fails closed with a
+        -- message that names the fix rather than a bare not-null violation.
+        IF v_derived IS NULL THEN
+            RAISE EXCEPTION
+                'due_date is required on an invoice with no fee structure to derive it from'
+                USING ERRCODE = '55000';
+        END IF;
+        NEW.due_date := v_derived;
+    END IF;
+
+    -- (6) MOVED to trg_fin_invoice_freeze_lines (§9.6.0.1, inventory row 4d).
+    -- This is the single most load-bearing deletion in the phase, and it is the
+    -- direct cause of the P0 the previous revision shipped.
+    --
+    -- It was `UPDATE fin_invoice_items SET frozen_at = now()` issued from inside a
+    -- BEFORE UPDATE trigger on fin_invoices, on draft -> non-draft. Two defects,
+    -- one loud and one quiet:
+    --
+    --   LOUD.  That UPDATE re-fires trg_fin_invoice_item_total (§9.6.2), whose own
+    --          `UPDATE fin_invoices SET subtotal, total, updated_at` came straight
+    --          back into the clause (2) above and raised 55000. Issuing an invoice
+    --          failed, and adding a line to a draft failed.
+    --
+    --   QUIET, and worse.  It was a nested UPDATE against the very row the outer
+    --          statement was mid-way through. Widening clause (2) alone would NOT
+    --          have fixed it: the nested write lands, and then the OUTER statement
+    --          stores its own (pre-image + NEW-assignments), clobbering it. A loud
+    --          55000 would have become a silently stale cache, which is strictly
+    --          worse in a financial system because nothing reports it.
+    --
+    -- So the fix is structural rather than a widening of clause (2): the stamp is
+    -- now an AFTER UPDATE OF status trigger on fin_invoices, which fires once the
+    -- header row is STORED and therefore writes a row no outer statement still
+    -- owns. The cost of moving it — the parent now reads 'issued' by the time the
+    -- stamp runs, so trg_fin_invoice_items_freeze has to admit its own stamp — is
+    -- paid explicitly in §9.4.1, where the freeze names that exemption.
+    --
+    -- The previous revision described this clause approvingly as "the one clause in
+    -- a BEFORE trigger that behaves like an AFTER trigger, and it is why the
+    -- function is in F5d rather than in F5". It did behave like one. That was the
+    -- defect, not the observation.
+    RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION trg_fin_invoice_header_guard() FROM PUBLIC;
+```
+
+**C-8 answered in one place.** `fin_invoices.due_date` is:
+* **input** — a caller-supplied value, honoured only on `INSERT`, or omitted;
+* **derivation** — `MIN(due_on)` over the structure's `fin_fee_installment_plans`, else
+  `fin_fee_structures.effective_from`, else the caller's value, else refusal;
+* **precedence** — caller-supplied wins over derived, and only on `INSERT`; derived wins on
+  `UPDATE` because `due_date` is immutable once the invoice leaves `draft`;
+* **date semantics** — `date`, not `timestamptz`. There is no timezone question, and
+  stating that is the point: a due date is a calendar day in the tenant's locale and
+  the tenant is a single-timezone entity by §16.1's currency rule. No conversion, no
+  `AT TIME ZONE`, no offset column;
+* **who may override** — the actor creating the invoice, holding
+  `fees.invoices.create`, and only on the `INSERT`. There is no post-issue
+  override and no separate permission for it, because there is no post-issue
+  override;
+* **billing-run authority** — a run-generated invoice inherits the structure's
+  first-installment date automatically, which is the correct answer and requires no
+  run-specific rule. A billing run cannot set `due_date` to anything else;
+* **immutability after issue** — enforced by clause (3), and a manual invoice is
+  indistinguishable from a run-generated one at this point, which is deliberate.
+
+#### 9.6.0.1 The issue-time line freeze, and the internal maintenance context (C-SEC)
+
+Two things live here. The first is the writer that §9.6.0 clause (6) used to be. The second is
+the context that decides, in one closed vocabulary, which internal writer is allowed to move which
+server-owned column — and they are in the same subsection because the first is the reason the second
+cannot be a general bypass.
+
+**The writer.** `frozen_at` is written by exactly one statement in the phase. After the move it is
+its own bound function, and it is `SECURITY DEFINER` for exactly the reason §16.5.2's rule gives:
+it issues a statement of its own against a column the caller cannot write.
+
+```sql
+-- NEW in 0023 (C-SEC). The issue-time line stamp, moved out of the header guard's
+-- clause (6). §9.6.0 records why the move was mandatory; this is the replacement.
+--
+-- SECURITY DEFINER: `frozen_at` is not granted to school_app_rw (§16.5.1), so this
+-- UPDATE is a statement of this function's own and §16.5.2's rule makes it a
+-- definer. This function replaces trg_fin_invoice_header_guard in F5d — its definership
+-- replaced row 4a's, it did not add a fifth: the whole-phase figure was four
+-- (rows 4, 4d, 6, 13) until P0-07 made trg_fin_challan_refresh (row 8a) a fifth.
+-- Read at THIS migration's checkpoint it is THREE, because rows 13 and 8a belong to
+-- 0024 -- so the count an implementer asserts here is 3, and C-SEC-M4a (§28.3.1) is what asserts it.
+CREATE OR REPLACE FUNCTION trg_fin_invoice_freeze_lines() RETURNS trigger
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+    -- `frozen_at IS NULL` makes this idempotent and makes it safe that the
+    -- trigger may fire more than once for one transition: re-stamping an already
+    -- stamped line would otherwise restate when the invoice was issued, on a row
+    -- whose contents are meant to be permanent evidence.
+    UPDATE fin_invoice_items
+       SET frozen_at = now()
+     WHERE tenant_id = NEW.tenant_id
+       AND invoice_id = NEW.id
+       AND frozen_at IS NULL;
+
+    -- RETURN NULL in an AFTER row trigger: the return value is ignored, and
+    -- returning NEW invites the next reader to copy the pattern into a BEFORE
+    -- trigger where it is wrong (§12.4.1 makes the same point for row 13).
+    RETURN NULL;
+END $$;
+REVOKE ALL ON FUNCTION trg_fin_invoice_freeze_lines() FROM PUBLIC;
+
+-- The trigger NAME follows this block's convention (fin_invoices_header_guard
+-- -> trg_fin_invoice_header_guard), so it is not the function name. The binding
+-- an implementer copies is in §35.3.2; this copy is here because the WHEN clause
+-- is part of the design decision, not a mechanical detail.
+CREATE TRIGGER fin_invoices_freeze_lines
+    AFTER UPDATE OF status ON fin_invoices
+    FOR EACH ROW
+    WHEN (OLD.status = 'draft' AND NEW.status <> 'draft' AND NEW.status <> 'void')
+    EXECUTE FUNCTION trg_fin_invoice_freeze_lines();
+```
+
+**Why `AFTER`, and what the `WHEN` clause is actually load-bearing for.**
+
+`AFTER` is the remediation, not a preference. In a `BEFORE UPDATE` trigger on `fin_invoices`, the
+outer statement has not stored the row yet; a nested `UPDATE` of that same row from inside the
+trigger writes a tuple version that the outer statement then overwrites with its own pre-image plus
+its `NEW` assignments. Widening §9.6.0's clause (2) to let that write through would have converted
+a loud `55000` into a silent stale cache. `AFTER` fires once the row is stored, so the stamp's
+re-entrant `trg_fin_invoice_item_total` write (§9.6.2) lands on a row no outer statement still owns.
+
+`AFTER UPDATE OF status` is a *column filter*, not the transition test — it fires whenever `status`
+appears in the statement's `SET` list, whether or not the value changed. That matters because
+`fin_invoice_reapply_derived_state` (§12.4.1) **does** list `status` in its own `UPDATE`. The
+transition is therefore decided by the `WHEN` clause, and the `WHEN` clause's first conjunct
+(`OLD.status = 'draft'`) is what keeps the two paths apart:
+
+* the freeze stamp only ever fires on `draft → non-draft`;
+* the 0024 balance writer, by §12.4.1's own explicit rule, **never moves an invoice out of `draft`
+  or `void`** — it preserves both (`IF v_status IN ('draft','void') THEN v_new_status := v_status`).
+  So when it names `status`, `OLD.status = 'draft'` implies `NEW.status = 'draft'` and the `WHEN`
+  clause is false.
+
+That is an assumption about 0024's body held by 0023's trigger, so it is stated as an invariant and
+asserted. **C-SEC-M6b** (§28.3.1) drives row 13 to a **draft** invoice and asserts that the line's
+`frozen_at` is still `NULL`, that `balance` is still **0** and that `status` is still `draft`; it then
+drives the one transition the clause turns away — the **`draft → void`** discard — and asserts the same
+unstamped line. **The earlier wording of this paragraph said M6b "recomputes `balance` on a draft
+invoice", and that was wrong in a way worth stating plainly: it does not.** §12.4.1's rule is that the
+writer *never moves* a draft or a void invoice out of that state, and it implements that by
+**early-returning before issuing any `UPDATE` at all** — so on a draft there is no recomputation to
+observe, only the absence of one. That is strictly the stronger fact, and it is the fact the assertion
+makes: a design that preserved the draft *label* while still executing the `UPDATE` would leave a
+draft carrying a 100-rupee line at `balance = 100`, which `fin_v_invoice_balance` (which excludes
+drafts) and §9.6.0 (`a draft's balance is 0`) would both contradict. **Preserving the label is not
+preserving the invariant.** M6b's producer is a **line write** rather than an allocation because
+§12.5.1's D9 refuses an allocation naming a draft — see §28.3.1's Option C. If a future revision lets
+the balance writer settle a draft, or drop its early return, the assertion fails on the `balance` and
+`status` pair and the freeze start is wrong — which is the correct direction for it to fail.
+
+**The context.** One custom GUC, two values, one producer per value, one consumer.
+
+| Question | Answer |
+|---|---|
+| Exact name | `fin.invoice_maintenance_scope` |
+| Established by | `trg_fin_invoice_item_total` (§9.6.2, bound, 0023) → `'invoice_line_totals'`; `fin_invoice_reapply_derived_state` (§12.4.1, unbound helper called only from the bound definer `trg_fin_invoice_balance_recompute`, 0024) → `'invoice_balance_state'` |
+| Consumed by | `trg_fin_invoice_header_guard` clause (2) **only**. No other function in the phase reads it, and it is never compared against anything else |
+| Columns each value may move | `'invoice_line_totals'` → `subtotal`, `total`. `'invoice_balance_state'` → `balance`, `paid_at`. `invoice_no`, `issued_at`, `voided_at` are in **no** scope and are refused by every branch |
+| How established | `set_config('fin.invoice_maintenance_scope', <value>, true)` immediately before the writer's `UPDATE`, via `pg_catalog.set_config` (schema-qualified — `search_path` is pinned, and an unqualified call is a needless dependency on resolution order) |
+| Lifetime | Transaction-local. `is_local := true` means the setting is discarded at `COMMIT`, at `ROLLBACK`, **and on subtransaction rollback**, so a PL/pgSQL `EXCEPTION` block cannot leave one behind |
+| How cleared | Each producer resets it on the statement after its `UPDATE`, with no `RETURN` between them |
+| If the writer raises | The transaction aborts; the setting dies with it. There is no path on which a failed writer's authorization is visible to the next statement |
+| Second factor | `pg_trigger_depth() >= 2` (§9.6.0 clause (2)). **Required, and the actual boundary** |
+
+**The GUC is forgeable, and the design says so rather than relying on it.** Any role can
+`SET fin.invoice_maintenance_scope = 'invoice_line_totals'`, and PostgreSQL 16's
+`GRANT SET ON PARAMETER` applies to real configuration parameters, not to custom namespaced ones,
+so the setting cannot be revoked either. The design does not pretend otherwise: **Factor A is the
+security boundary, the GUC is the column-scoped policy that Factor A is checked against.** Forged
+by the application, the GUC buys nothing twice over — the depth check still refuses a directly
+issued `UPDATE`, and independently `school_app_rw` holds no `UPDATE` on those columns at all
+(§16.5.1), so the statement fails `42501` before the guard is reached. C-SEC-M4a asserts exactly that
+sequence.
+
+**Why both factors, given that each holds the property on its own.** They are redundant in one
+direction and that redundancy is the point. If a producer's cleanup were skipped, the value would
+remain set for the rest of the transaction — and Factor A still holds, because a later
+directly-issued `UPDATE` arrives at depth 1 and is refused. Conversely, if a future revision relaxed
+the depth check, the closed column map still refuses a scope writing a column it does not own
+(C-SEC-M5). Neither factor is load-bearing for the application's protection, which is held three
+times over: the column ACL, Factor A, and the ACL again on the way in. They are both required
+because the design should not depend on a future edit to either.
+
+#### 9.6.1 Number allocation
+
+
 ```sql
 -- ── 1. Number allocation ──────────────────────────────────────────────────
 -- draft ⟺ no number, enforced in one place. §9.1's CHECK states the rule; this
 -- trigger is what MAKES it true, and the two must agree or the trigger will be
 -- fighting the constraint.
+--
+-- C-SEC: SECURITY DEFINER. One of five in Phase 7 (§19.7.2's F5d, amended) -- three of
+-- them in THIS file, since rows 13 and 8a are 0024's. Both numbers are asserted, separately, by
+-- C-SEC-M4a (3 at 0023) and C-SEC-M4b (5 at 0024). See §28.3.1.
+-- The reason is the `UPDATE fin_document_counters` below: §35.4 gives the counter
+-- table SELECT and INSERT
+-- and REVOKES UPDATE, precisely so that a counter can only be advanced by this
+-- function. Under SECURITY INVOKER the function would inherit the caller's
+-- privileges and that UPDATE would fail 42501 the first time an invoice was
+-- issued. The contract is in §16.5.2: owned by school_migrator, search_path
+-- pinned, ALL revoked from PUBLIC, EXECUTE granted to school_app_rw only, and
+-- the function body is reviewed in §19.7.4 as F5d's first member.
 CREATE OR REPLACE FUNCTION trg_fin_invoice_number() RETURNS trigger
     LANGUAGE plpgsql
+    SECURITY DEFINER
     SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE v_next bigint;
@@ -2086,6 +3372,17 @@ BEGIN
         -- of a number that was already printed and handed to a parent.
         NEW.invoice_no := NULL;
         NEW.issued_at  := NULL;
+        RETURN NEW;
+    END IF;
+
+    -- C-13. A DRAFT that is discarded must not burn a counter value. Under the
+    -- previous revision's code, draft -> void fell through to the allocation
+    -- branch below and consumed a number from a document that was never issued
+    -- and never printed — an observable gap in the tenant's invoice sequence
+    -- caused by throwing away a mistake, and a direct contradiction of
+    -- fin_invoices_number_ck's CASE, which permits a void invoice to have no
+    -- number precisely so that this case has somewhere to go.
+    IF NEW.status = 'void' AND NEW.invoice_no IS NULL THEN
         RETURN NEW;
     END IF;
 
@@ -2106,7 +3403,8 @@ BEGIN
         -- Zero-padded so the number sorts lexicographically in the same order it
         -- sorts numerically, which matters because challans and receipts are
         -- printed and filed in order.
-        NEW.invoice_no := 'INV-' || NEW.academic_year_id::text::left(4)
+        -- `::left(4)` is a cast to a type named `left`; see the migration's note.
+        NEW.invoice_no := 'INV-' || left(NEW.academic_year_id::text, 4)
                          || '-' || lpad(v_next::text, 6, '0');
         NEW.issued_at  := now();
     END IF;
@@ -2115,13 +3413,18 @@ BEGIN
     RETURN NEW;
 END $$;
 REVOKE ALL ON FUNCTION trg_fin_invoice_number() FROM PUBLIC;
+```
 
--- ── 2. Line and adjustment total recomputation ────────────────────────────
+#### 9.6.2 The `subtotal`/`total` cache, and the line amount, and the approval transition
+
+```sql
+-- ── Line and adjustment total recomputation ────────────────────────────────
 -- The invoice header's money columns are a CACHE, maintained here from the
 -- authoritative lines. This is the §16.5 rule, and it is the documented exception
 -- to the §9.4 freeze: the header is writable after issue for exactly this reason.
 CREATE OR REPLACE FUNCTION trg_fin_invoice_item_total() RETURNS trigger
     LANGUAGE plpgsql
+    SECURITY DEFINER
     SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
@@ -2154,60 +3457,246 @@ BEGIN
     SELECT COALESCE(SUM(amount), 0) INTO v_sub
       FROM fin_invoice_items
      WHERE tenant_id = v_tenant AND invoice_id = v_invoice;
+    -- C-6. `AND status = 'approved'` is the enforcement of "an adjustment does
+    -- not count until a second user approves it", and it is here rather than in
+    -- a CHECK because a CHECK cannot see a SUM. The previous revision had no
+    -- status column at all, so this filter is new behaviour AND new syntax: a
+    -- pending row is now visible to finance staff and invisible to the total,
+    -- which is the whole point of having asked for it separately.
     SELECT COALESCE(SUM(amount), 0) INTO v_adj
       FROM fin_invoice_adjustments
-     WHERE tenant_id = v_tenant AND invoice_id = v_invoice;
+     WHERE tenant_id = v_tenant AND invoice_id = v_invoice
+       AND status = 'approved';
     SELECT COALESCE(SUM(tax_amount), 0) INTO v_tax
       FROM fin_invoice_items
      WHERE tenant_id = v_tenant AND invoice_id = v_invoice;
 
-    -- subtotal is LINES ONLY. total is subtotal + adjustments + tax. Keeping them
-    -- separate is what lets a report show "billed 100, waived 10, tax 0" rather
-    -- than a single opaque 90, and it is why three columns exist rather than one.
+    -- subtotal is LINES ONLY. total is subtotal + APPROVED adjustments + tax.
+    -- Keeping them separate is what lets a report show "billed 100, waived 10,
+    -- tax 0" rather than a single opaque 90, and it is why three columns exist
+    -- rather than one.
+    --
+    -- C-SEC: this UPDATE is the reason the function is SECURITY DEFINER.
+    -- subtotal and total are NOT granted to school_app_rw (§16.5.1), so under
+    -- SECURITY INVOKER this statement would fail 42501 on the first line
+    -- inserted. The function is the writer; the role is not.
+    --
+    -- C-SEC: it is ALSO why this UPDATE needs the maintenance context, and the
+    -- two requirements are different questions. Definership answers "may this
+    -- statement write subtotal at all"; the context answers "which of the
+    -- server-owned columns is this writer entitled to move". §9.6.0's clause (2)
+    -- asks the second question on the way in, and without the context below this
+    -- statement is refused by the guard it exists to satisfy — which is the P0
+    -- this revision fixes.
+    --
+    -- The scope is established immediately before the UPDATE and reset
+    -- immediately after, with no RETURN between them. `pg_catalog.` is qualified
+    -- even though search_path is pinned: this statement is the reason a reader
+    -- must not have to reason about resolution order to see who is authorized.
+    PERFORM pg_catalog.set_config('fin.invoice_maintenance_scope',
+                                  'invoice_line_totals', true);
     UPDATE fin_invoices
        SET subtotal = v_sub,
            total    = v_sub + v_adj + v_tax,
            updated_at = now()
      WHERE tenant_id = v_tenant AND id = v_invoice;
+    -- Back to '' rather than to NULL: set_config stores a string, and '' is the
+    -- value §9.6.0's ELSE branch refuses, which is the same answer either way.
+    -- This reset is hygiene, not the protection -- pg_trigger_depth() >= 2 in
+    -- §9.6.0 already makes a leaked value inert (§9.6.0.1).
+    PERFORM pg_catalog.set_config('fin.invoice_maintenance_scope', '', true);
     RETURN NULL;
 END $$;
 REVOKE ALL ON FUNCTION trg_fin_invoice_item_total() FROM PUBLIC;
 
--- ── 3. Void preconditions ─────────────────────────────────────────────────
-CREATE OR REPLACE FUNCTION trg_fin_invoice_void() RETURNS trigger
+-- ── The line amount snapshot (C-9.1) ────────────────────────────────────────
+-- NEW in 0023. fin_invoice_items.amount is a CACHE of quantity * unit_amount,
+-- and the previous revision named a writer for it that does not write it
+-- (trg_fin_invoice_item_total touches only the header). It has to be BEFORE,
+-- because an AFTER trigger cannot set NEW, and it has to be its own function
+-- because §9.6.2's function is AFTER and is bound to two tables.
+CREATE OR REPLACE FUNCTION trg_fin_invoice_item_amount() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path = pg_catalog, public, pg_temp
 AS $$
-DECLARE v_paid numeric(19,4);
 BEGIN
-    IF NEW.status <> 'void' OR OLD.status = 'void' THEN
-        RETURN NEW;   -- not a void transition
-    END IF;
-
-    -- Balance is DERIVED from allocations, never read from a cached column. §9.3
-    -- requires the balance to be exactly zero, and a cache would let a stale value
-    -- pass a void that should have been refused.
-    SELECT COALESCE(SUM(a.amount), 0) INTO v_paid
-      FROM fin_payment_allocations a
-     WHERE a.tenant_id = NEW.tenant_id
-       AND a.invoice_id = NEW.id
-       AND a.effect = 'apply';
-    IF v_paid <> 0 THEN
-        RAISE EXCEPTION 'cannot void an invoice with a settled balance of %', v_paid
-            USING ERRCODE = '55000';
-    END IF;
-
-    -- A void needs a reason, and the reason is not optional prose: an unreasoned
-    -- void is indistinguishable from a deletion in an audit.
-    IF NEW.void_reason IS NULL OR length(btrim(NEW.void_reason)) = 0 THEN
-        RAISE EXCEPTION 'voiding an invoice requires a reason'
-            USING ERRCODE = '55000';
-    END IF;
-    NEW.voided_at := now();
+    -- §16.3: round HALF-UP on the absolute value, exactly once, at the point of
+    -- division. Rounding the absolute value and then restoring the sign is what
+    -- makes -0.5 round to -0.01 rather than to 0.00, which a bare
+    -- round(quantity * unit_amount, 2) would do for negative products. The
+    -- CHECK on the column then refuses the zero case, so a line that rounds away
+    -- to nothing is a loud failure rather than a silent disappearance.
+    --
+    -- quantity may be negative on paper (the CHECK only bars zero) but
+    -- unit_amount may not be, and the CHECK on amount is amount > 0, so a
+    -- negative product is refused at the constraint. The sign convention of
+    -- this column is therefore POSITIVE by construction, and no rounding rule
+    -- is needed for negatives in practice - which is why the code is written
+    -- the simple way and the comment explains the one case it is defensive
+    -- about.
+    NEW.amount := round(NEW.quantity * NEW.unit_amount, 2);
     RETURN NEW;
 END $$;
-REVOKE ALL ON FUNCTION trg_fin_invoice_void() FROM PUBLIC;
+REVOKE ALL ON FUNCTION trg_fin_invoice_item_amount() FROM PUBLIC;
+
+-- ── The approval transition (C-6) ───────────────────────────────────────────
+-- NEW in 0023. This is the ONLY UPDATE the runtime role may perform on
+-- fin_invoice_adjustments (§16.5.1 grants UPDATE on exactly status, approved_by,
+-- approved_at, rejected_reason), and this function is what makes those four
+-- columns the only ones it can change.
+CREATE OR REPLACE FUNCTION trg_fin_invoice_adjustment_approval() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE v_invoice_status text;
+        v_target_status    text;
+BEGIN
+    -- C-6, DRAFT-ONLY APPROVAL, enforced here and nowhere else. The parent
+    -- invoice's state is a fact about a DIFFERENT row, so no CHECK on this table
+    -- can see it -- this is the same aggregate-visibility problem as the
+    -- removed requires_approval_ck, and the same reason the rule lives in a
+    -- trigger. Without it, a concession could be approved on an already-issued
+    -- invoice, which §9.2 does not allow and which §9.5.1's prose promised.
+    --
+    -- The previous revision of this function read the invoice but never compared
+    -- its status, so `v_invoice_status` was selected and discarded.
+    SELECT i.status INTO v_invoice_status
+      FROM fin_invoices i
+     WHERE i.tenant_id = OLD.tenant_id
+       AND i.id = OLD.invoice_id;
+    IF v_invoice_status IS NULL THEN
+        RAISE EXCEPTION
+            'an adjustment requires an existing invoice, tenant % invoice %',
+            OLD.tenant_id, OLD.invoice_id
+            USING ERRCODE = '55000';
+    END IF;
+    IF v_invoice_status <> 'draft' THEN
+        RAISE EXCEPTION
+            'an adjustment may only be approved while the invoice is a draft, but invoice % is %',
+            OLD.invoice_id, v_invoice_status
+            USING ERRCODE = '55000';
+    END IF;
+
+    -- Every field that is NOT part of the approval transition. Written as a
+    -- positive list of what MUST be unchanged, because a negative list has to be
+    -- extended every time a column is added, and a column added without
+    -- extending it becomes silently mutable.
+    IF NEW.invoice_id           IS DISTINCT FROM OLD.invoice_id
+       OR NEW.adjustment_type   IS DISTINCT FROM OLD.adjustment_type
+       OR NEW.amount            IS DISTINCT FROM OLD.amount
+       OR NEW.reason            IS DISTINCT FROM OLD.reason
+       OR NEW.requested_by      IS DISTINCT FROM OLD.requested_by
+       OR NEW.reverses_adjustment_id IS DISTINCT FROM OLD.reverses_adjustment_id
+       OR NEW.created_at        IS DISTINCT FROM OLD.created_at
+    THEN
+        RAISE EXCEPTION
+            'an invoice adjustment is immutable; only its approval may change'
+            USING ERRCODE = '55000';
+    END IF;
+
+    -- The only two legal transitions. status is not among the fields above,
+    -- because it IS the thing being transitioned.
+    IF NOT ( (OLD.status = 'pending'  AND NEW.status = 'approved')
+          OR (OLD.status = 'pending'  AND NEW.status = 'rejected') ) THEN
+        RAISE EXCEPTION
+            'an adjustment may only move from pending to approved or rejected, not % to %',
+            OLD.status, NEW.status
+            USING ERRCODE = '55000';
+    END IF;
+
+    -- Approved means somebody who is not the requester, and a timestamp. The
+    -- four-eyes and state-shape rules are also CHECK constraints; this clause is
+    -- what turns the *absence* of those constraints failing (a 55000 from
+    -- fin_invoice_adjustments_no_self_approval_ck) into a message that names the
+    -- control. Belt and braces, and deliberately: the CHECK is the enforcement,
+    -- this is the diagnosis.
+    IF NEW.status = 'approved' AND NEW.approved_by IS NOT NULL
+       AND NEW.approved_by = NEW.requested_by THEN
+        RAISE EXCEPTION
+            'an adjustment cannot be approved by the user who requested it'
+            USING ERRCODE = '55000';
+    END IF;
+    IF NEW.status = 'approved' AND NEW.approved_at IS NULL THEN
+        NEW.approved_at := now();
+    END IF;
+
+    -- A reversal must point at an APPROVED adjustment. A `correction` that
+    -- reverses a pending or rejected row is reversing nothing, and §21.4's
+    -- fee_adjustment_reversal_invalid is the API's name for this refusal.
+    IF NEW.reverses_adjustment_id IS NOT NULL THEN
+        SELECT a.status INTO v_target_status
+          FROM fin_invoice_adjustments a
+         WHERE a.tenant_id = OLD.tenant_id
+           AND a.id = NEW.reverses_adjustment_id;
+        IF v_target_status IS NULL OR v_target_status <> 'approved' THEN
+            RAISE EXCEPTION
+                'a correction may only reverse an approved adjustment'
+                USING ERRCODE = '55000';
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION trg_fin_invoice_adjustment_approval() FROM PUBLIC;
 ```
+
+#### 9.6.4 The three 0024 functions (C-1, C-2) — named here, created by 0024
+
+**These are named here so §9.1–§9.5's references resolve, but 0024 creates them**, because each
+names a relation 0024 creates. `trg_fin_invoice_balance_recompute` and its helper were already
+correctly placed in 0024 by §12.4.1 of the previous revision. The two that were misplaced are
+`trg_fin_invoice_void` and `trg_fin_challan_status`, both of which sat in §9.6 — and therefore in
+0023 — in the previous revision. C-2 is what moves them, and §35.3 and §30.2 are corrected to match.
+
+The bodies are not duplicated here. `trg_fin_invoice_balance_recompute` and
+`fin_invoice_reapply_derived_state` are written out in full in §12.4.1, because §12.4 is their
+home. `trg_fin_invoice_void` is the function whose body §9.3 describes in prose and which §9.6.4's
+removed SQL block used to hold; it is written out in full in **§9.3.1**, below, because a void guard
+that exists only as three prose clauses is exactly the thing C-2 exposed when it moved files.
+`trg_fin_challan_status` remains in §10.2, which has always held it.
+
+#### 9.6.5 Ownership rule for the invoice state transitions (C-9.2)
+
+Stated as a table, because the previous revision described the transitions in
+three places and assigned the implementation of none of them.
+
+| `fin_invoices` column | Writer | Migration |
+|---|---|---|
+| `status` on `INSERT` | column `DEFAULT 'draft'` | 0023 |
+| `status` `draft → issued` | the service, gated by `trg_fin_invoice_number` (allocates the number and sets `issued_at`) and `trg_fin_invoice_freeze_lines` (stamps every line's `frozen_at`, **AFTER UPDATE OF status** — §9.6.0.1; it is *not* the header guard, whose former clause (6) it was) | 0023 |
+| `status` `issued → partially_paid → paid` | **`trg_fin_invoice_balance_recompute`**, AFTER INSERT OR UPDATE OR DELETE on `fin_invoice_items`, `fin_invoice_adjustments` and `fin_payment_allocations` | **0024** |
+| `status` `→ void` | the service, gated by `trg_fin_invoice_void` | **0024** |
+| `status` back to `draft` | the service; `trg_fin_invoice_number` clears `invoice_no` and `issued_at` on the way | 0023 |
+| `subtotal`, `total` | `trg_fin_invoice_item_total`, two bindings | 0023 |
+| `balance` | `trg_fin_invoice_balance_recompute` | **0024** |
+| `paid_at` | `trg_fin_invoice_balance_recompute` — set on the transition INTO `paid`, cleared on the transition out of it, so `fin_invoices_paid_at_ck` always holds | **0024** |
+| `invoice_no`, `issued_at` | `trg_fin_invoice_number` | 0023 |
+| `voided_at` | `trg_fin_invoice_void` | **0024** |
+| `due_date` | `trg_fin_invoice_header_guard` | 0023 |
+| `frozen_at` on every line | `trg_fin_invoice_freeze_lines` (row 4d) — `SECURITY DEFINER`, because §16.5.1 does not grant `frozen_at` to `school_app_rw`, so the one statement that writes it is `UPDATE fin_invoice_items SET frozen_at = now() …` issued from inside the function | 0023 |
+| `amount` on every line | `trg_fin_invoice_item_amount` | 0023 |
+| `updated_at` | `trg_fin_invoice_item_total` and `trg_fin_invoice_balance_recompute` | 0023 / 0024 |
+
+**There is no server-owned column in this design that appears in downstream semantics
+without a writer named above.** That is the test C-9 set, and this table is its answer.
+The previous revision's `paid_at` was a row in §16.5 and not a column in the DDL;
+it is now a column with a writer and a CHECK.
+
+**The word *server-owned* is load-bearing, and the earlier phrasing of this claim was too
+strong.** Read universally it was false: `tenant_id`, `student_id`, `academic_year_id`,
+`enrollment_id`, `structure_id`, `created_by` and `void_reason` all appear in downstream semantics
+— they are §35.2's foreign keys and §19's tenant predicates — and **none has a row here**, because none is
+server-owned. `void_reason` is the instructive one: §10.2's challan trigger *reads* it
+(`NEW.void_reason := v_inv.void_reason`) and §9.3's void guard *validates* it, yet the caller writes it,
+under `GRANT UPDATE (status, due_date, void_reason)`. A column can be central to every derived
+value in the system and still belong to the request rather than to a trigger — which is exactly
+what makes the derived values checkable. **The other half of the answer is §16.5.1**, whose grant
+tables name the caller's column set per operation (INSERT: `tenant_id, student_id,
+academic_year_id, enrollment_id, structure_id, due_date, void_reason, created_by`; UPDATE:
+`status`, `due_date` draft-only, `void_reason`). **Between this table and §16.5.1 every column has exactly
+one writer**, and that pair is the real form of the C-9 answer; this table alone was never
+meant to be the whole of it.
+
 
 **Why three separate scans rather than one join.** Items and adjustments are aggregated separately,
 in three statements, and never joined to each other. Joining them on `(tenant_id, invoice_id)`
@@ -2234,8 +3723,8 @@ Concretely:
 - **All reporting and the parent portal read invoice state, not challan state.** The challan is a
   *presentation document* (a printable Pakistan bank-deposit instrument) whose status label exists so
   a parent staring at a slip of paper sees the right word.
-- Because the challan mirrors rather than records, `paid → partially_paid` after a refund is
-  automatic and needs no challan-specific transition.
+- Because the challan mirrors rather than records, `paid → partially_paid` after a refund (or
+  `paid → expired` when the invoice is past due) is automatic and needs no challan-specific transition.
 
 **Why current state, and why this matters.** If a challan recorded *historical* settlement, a refund
 would leave a challan claiming "PAID" while the invoice showed a balance — two conflicting truths on
@@ -2251,8 +3740,10 @@ the source.
                      │ and balance > 0              │ net applied              │
                      ▼                              ▼                          ▼
                   expired ◄───────────────────  partially_paid            partially_paid
-                     │                              │
-                     └──────────────────────────────┘
+                     │
+                     │ balance = 0, or the invoice is voided
+                     ▼
+                  paid / void
 
   ANY non-void state ──invoice voided (balance = 0 required)──► void   (terminal)
 ```
@@ -2261,9 +3752,20 @@ the source.
 |---|---|---|---|
 | `issued` | invoice issued, `balance > 0`, `issued_at <= due_on` | none | `partially_paid`, `expired`, `void` |
 | `partially_paid` | `0 < balance < total` | none | `paid`, `partially_paid` (refund), `expired`, `void` |
-| `paid` | `balance = 0` | none | `partially_paid` (refund reopens the balance), `void` |
-| `expired` | `issued_at > due_on` **and** `balance > 0` | none | `partially_paid`, `paid`, `void` |
+| `paid` | `balance = 0` | none | `partially_paid` (refund reopens the balance), **`void` is NOT an exit — C-12** |
+| `expired` | `issued_at > due_on` **and** `balance > 0` | none | `paid` (full payment) or `void`; **overdue dominates**, so a partial payment does *not* yield `partially_paid` |
 | `void` | **the owning invoice enters `void`** | none — the invoice's own reversal postings already moved the money | *terminal* |
+
+**The `paid` row's exits column is a change from the previous revision, and it is a direct consequence of
+C-12.** The table above previously listed `void` as an exit from `paid` while §9.3 forbade the
+transition, so the challan state machine inherited a contradiction it could not express. With C-12
+adjudicated — a paid invoice must be refunded before it can be voided — the challan follows its parent
+and **never enters `void` from `paid`**. It reaches `void` by the refund first: the refund moves the
+invoice to `partially_paid` (or, if past due, the challan resolves to `expired` — also representable
+and non-terminal), and the void that follows moves both. The challan's `paid → partially_paid (refund)` edge is therefore **load-bearing for C-12**, not
+cosmetic: without it there would be no representable path from a paid challan to a voided one.
+
+**Precedence, stated once because three sections depend on it: `void` > `paid` > `expired` > `partially_paid` > `issued`.** Because `expired` is tested before `partially_paid`, an overdue challan with *any* outstanding balance is `expired`, even after a partial payment; it leaves `expired` only by clearing its balance (`paid`) or by its invoice being voided. `partially_paid` therefore describes only a not-yet-overdue challan with `0 < balance < total`.
 
 **`void` is required, and the previous revision's state machine was not closed (P1-02).** The state
 set was `{issued, partially_paid, paid, expired}` with no `void`, while the invoice state set
@@ -2397,6 +3899,12 @@ BEGIN
 
     -- The closed derivation of §10.2, in precedence order.
     IF v_inv.status = 'void' THEN
+        -- C-12, and this is where it becomes reachable. Because `paid` is no
+        -- longer an exit into `void`, this branch is now reachable ONLY after a
+        -- refund has moved the invoice off `paid` — which is exactly what C-12
+        -- requires. Without the refund, the invoice is still `paid`, this branch
+        -- is not taken, and the challan correctly follows it to `paid` rather
+        -- than to a void state the invoice refused to enter.
         v_new_status := 'void';
     ELSIF v_balance = 0 THEN
         v_new_status := 'paid';
@@ -2427,13 +3935,121 @@ END $$;
 REVOKE ALL ON FUNCTION trg_fin_challan_status() FROM PUBLIC;
 -- Bound as `fin_challans_status` in §35.3.2. It is not repeated here so there is
 -- exactly one CREATE TRIGGER for this function in the document; a second copy in
--- a migration would fail with 42710 (duplicate trigger).
+-- a migration would fail with 42710 (duplicate trigger). Its companion
+-- trg_fin_challan_refresh is written out below and bound in the same 0024 block.
 -- No DELETE trigger is needed because there is no DELETE route and no DELETE
 -- policy; §19.2 records DELETE as app_privileged()-only, which is a backstop, not
 -- the control. The control is that no such route exists.
 ```
 
-**Two decisions inside that trigger worth arguing with, stated so they can be overruled.**
+### 10.2.1 P0-07 — the refresh point the previous revision omitted
+
+**`fin_challans.status` was a cache with no invalidation. That is the defect this subsection
+records, and it is the reason `trg_fin_challan_refresh` exists.**
+
+§10.1 declares the column a "trigger-maintained cache of the owning invoice's derived balance" and
+§10.2's table gives it five states with edges — `issued → partially_paid → paid`,
+`paid → partially_paid` (refund), `* → void`. The trigger that maintains it, `trg_fin_challan_status`,
+is bound **`BEFORE INSERT OR UPDATE ON fin_challans`**. So it fires when a *challan* row is written and
+at no other time. Three facts, each checked mechanically against this document, close the case:
+
+| # | Fact | Where |
+|---|---|---|
+| 1 | **Before the fix below, this document contained no `UPDATE fin_challans` statement anywhere** — a whole-document scan returned nothing. The only writer of the column was the BEFORE trigger itself | §10.2, §35.3.2 |
+| 2 | The invoice's balance writer reaches the invoice through `UPDATE fin_invoices SET balance, status, paid_at`, and its own `UPDATE` names **only** `fin_invoices`. It does not touch `fin_challans` | `fin_invoice_reapply_derived_state`, §12.4.1 |
+| 3 | `school_app_rw` is granted **`SELECT, INSERT`** on `fin_challans` and no `UPDATE`, and §35.5 records no route that updates a challan — so the runtime role cannot repair it either | §35.4, §35.5 |
+| 4 | **The applied `0023` baseline is worse than the design was.** `0023_fin_invoices.sql` binds **no trigger to `fin_challans` at all** — all nine of its `CREATE TRIGGER`s are on `fin_invoices`, `fin_invoice_items` and `fin_invoice_adjustments` — and contains no `UPDATE fin_challans`, so at the applied checkpoint the column has **no writer whatsoever**. §35.4's `SELECT, INSERT` grant arrives only in `0028` | `0023_fin_invoices.sql`, lines 1231–1279 and 572 |
+
+Fact 2 is the load-bearing one, and it is not a defect in the balance writer. `trg_fin_invoice_balance_recompute`
+(row 13) is correctly bound to the **three tables that feed** `balance` — `fin_invoice_items`,
+`fin_invoice_adjustments`, `fin_payment_allocations` — and deliberately **not** to `fin_challans`, which
+feeds nothing. The invoice cache is right. The challan cache simply has no subscriber.
+
+**So a challan froze at whatever its balance was on the day it was issued.** Post a payment: the
+invoice goes `issued → paid` through row 13, the portal — which §10.1 correctly says reads *invoice*
+state — shows PAID, and the challan row still says `issued`. Void a paid invoice and the challan
+cannot follow: `trg_fin_challan_void`'s terminality arm, `fin_challans_void_ck`, and §10.2's
+"never enters `void` from `paid`" reasoning are all unreachable code, because the only transition that
+could set it is an `UPDATE` no role is permitted to issue. A printed bank-deposit instrument keeps
+asserting a payable amount against a cancelled debt — which is the fraud exposure §10.2 itself
+identifies at line 3748 and then leaves unmitigated.
+
+**The fix is one binding on `fin_invoices`, and it is placed on the invoice's `status` column
+deliberately.** `AFTER UPDATE OF status ON fin_invoices` fires for **every** writer of that column,
+so it does not care whether the status changed because of an allocation, a refund, a line
+correction, or a void — one subscriber, no second derivation, and no dependence on knowing which of
+row 5, row 13 or a caller's `UPDATE` was the cause. This is the same column-specific binding row 4d
+already relies on: C-SEC-M6b drives row 13 to a draft and asserts that row 13's `UPDATE` "names
+`status` in its `UPDATE` and is therefore *filtered in* by `AFTER UPDATE OF status`", with only the
+`WHEN` clause holding the stamp back. The mechanism was already load-bearing for the line freeze; it
+is now load-bearing for the challan mirror as well, and one test covers both.
+
+```sql
+-- The refresh point. It does NOT derive the status -- row 8 does, and there is
+-- exactly one derivation of the five-state rule in this document, which is the
+-- property §12.4's "one implementation, one home" rule exists to preserve. This
+-- function's whole job is to make a challan row be re-written so that row 8's
+-- BEFORE trigger re-runs. `SET status = status` is deliberate: it is a
+-- self-assignment that changes nothing, and it is the cheapest way to say
+-- "re-derive this row". It also satisfies row 8's immutability guard, which
+-- refuses changes to invoice_id / issued_at / due_on / snapshot and not to
+-- status -- otherwise the refresh would reject itself.
+--
+-- SECURITY DEFINER, and this is the one place the §10.2 argument about
+-- definership does not apply. Row 8 is SECURITY INVOKER because it accepts a
+-- caller's WRITE to a challan row, and a definer version could accept a
+-- cross-tenant write that the caller's own view returned as zero rows. This
+-- function issues no user-supplied write: it writes only
+-- WHERE tenant_id = NEW.tenant_id AND invoice_id = NEW.id, both taken from an
+-- invoice row the current session was already authorized to UPDATE under §19.2's
+-- RLS. The view read inside row 8 therefore resolves under the owner, which is
+-- correct -- and the guard is no longer the view's RLS but the invoice RLS that
+-- produced NEW. That trade is stated here rather than left for a reader to
+-- infer, because it is the one place in this document where the two differ.
+--
+-- No recursion: this writes fin_challans, row 8 assigns NEW.status and writes
+-- nothing further, and nothing here writes fin_invoices.
+CREATE OR REPLACE FUNCTION trg_fin_challan_refresh() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+    -- Skip drafts: no challan is ever issued against one (§10.2's entry
+    -- condition is balance > 0), and a draft's status is not payment state.
+    IF NEW.status = 'draft' THEN
+        RETURN NULL;
+    END IF;
+    UPDATE fin_challans
+       SET status = status
+     WHERE tenant_id = NEW.tenant_id
+       AND invoice_id = NEW.id;
+    RETURN NULL;
+END $$;
+REVOKE ALL ON FUNCTION trg_fin_challan_refresh() FROM PUBLIC;
+```
+
+**Two properties of this binding are worth asserting rather than assuming, and both are named here so
+`finance-trigger-inventory.test.ts` can close them:**
+
+* **The void edge is now reachable.** A void transition is a caller `UPDATE fin_invoices SET status =
+  'void'`; row 5 refuses it unless `balance = 0`; this trigger then re-derives the challan, and row 8
+  takes its `v_inv.status = 'void'` arm and inherits `voided_at`/`void_reason` from the invoice, which
+  is what satisfies `fin_challans_void_ck`. Without it that arm is unreachable and the CHECK is
+  satisfied only by `status` never becoming `void`.
+* **A refund is a refresh, not a challan transition.** §10.1's claim that "`paid → partially_paid`
+  after a refund is automatic and needs no challan-specific transition" becomes true only once this
+  binding exists. Before it, the sentence described behaviour the schema did not have.
+
+**What is deliberately *not* done here.** `trg_fin_challan_refresh` is not bound to
+`AFTER UPDATE OF balance`, `total`, or `due_on`, and it is not bound to `fin_invoice_items` or
+`fin_invoice_adjustments`. The invoice's status already encodes every change those can make — a line
+correction that moves the balance moves the status through row 13, which is the same `UPDATE` this
+trigger listens to. Binding to `balance` as well would fire the refresh twice per allocation for no
+additional coverage, and §35.3.2's binding arithmetic is exact rather than generous.
+
+**Two decisions inside row 8 — `trg_fin_challan_status`, the `SECURITY INVOKER` deriver this refresh
+makes re-run, *not* the `SECURITY DEFINER` refresh above — are worth arguing with, stated so they can
+be overruled.**
 
 1. **`status` is assigned unconditionally on every write, so the column is genuinely a cache** and
    cannot be set directly by a caller. A caller that `INSERT`s a challan with `status='paid'` gets
@@ -2448,7 +4064,7 @@ REVOKE ALL ON FUNCTION trg_fin_challan_status() FROM PUBLIC;
    reason F5's are (§19.7.2).
 
 **`void` is terminal on the challan, and that is not in tension with the refund reopening the
-invoice.** A refund moves `paid → partially_paid` because it creates a real balance, and §9.3
+invoice.** A refund moves `paid → partially_paid` (or → `expired` when past due) because it creates a real balance, and §9.3
 forbids voiding an invoice that has a balance — so a voided invoice can never acquire one, and the
 challan can never need to leave `void`. The terminality is a consequence of the void precondition, not
 an extra rule.
@@ -2465,8 +4081,9 @@ still fully payable; it is a marker for the school's collections follow-up and f
 buckets. This is stated explicitly because a reader could otherwise assume `expired` implies a
 penalty.
 
-`expired` is **not a terminal state**: paying an expired challan moves it to `partially_paid`/`paid`.
-An invoice whose balance reaches 0 by refund is `paid`, not `expired`, even if long past due.
+`expired` is **not a terminal state**: paying an expired challan *in full* moves it to `paid`.
+A *partial* payment leaves it `expired`, because overdue dominates `partially_paid` (the precedence
+rule in §10.2); only clearing the balance moves it off `expired`. An invoice whose balance reaches 0 by refund is `paid`, not `expired`, even if long past due.
 
 ### 10.3 `due_on` resolution
 
@@ -2536,7 +4153,7 @@ inference is "the invoice is linked to some student, and some guardian is linked
 which is a many-to-many relation and admits several unrelated guardians. That is the P0-09 hole — a
 cashier (or a compromised API token) could apply one family's cash to a **different** family's invoice
 and the database would accept it, because every FK was individually satisfied. With
-`payer_guardian_id` stored, `trg_fin_allocation_family_guard` (§12.6) can state the rule precisely:
+`payer_guardian_id` stored, `trg_fin_allocation_family_guard` (§12.5) can state the rule precisely:
 
 > Every invoice named by an allocation of payment `p` must have **at least one** student enrolled
 > under `p.payer_guardian_id` via a live `student_guardians` row.
@@ -2661,9 +4278,49 @@ CREATE TABLE fin_payment_allocations (
 );
 -- Revoke the 0001 default-privilege grant immediately (§35.4, §30.3).
 REVOKE ALL ON fin_payment_allocations FROM school_app_rw;
-
-
 ```
+
+**Allocation DELETE policy (canonical).**
+
+fin_payment_allocations is **append-only at the database boundary**. DELETE is
+prohibited for all runtime and application roles. There is no legitimate internal
+DELETE path. The only permitted mutations are INSERT and the specific UPDATE
+operations implied by the correction/reversal semantics already specified.
+
+Enforcement (database-level guard):
+
+- A BEFORE DELETE trigger on fin_payment_allocations (`trg_fin_allocations_delete_guard`, bound to
+  `trg_fin_pa_delete_guard()`)
+  rejects every DELETE with SQLSTATE `55000` and message
+  "fin_payment_allocations is append-only; DELETE is not permitted".
+- The trigger executes as SECURITY INVOKER (not DEFINER) and runs for every row
+  on DELETE; it does not rely on column privileges alone. The trigger function
+  is created with SET search_path = pg_catalog, public, pg_temp and REVOKE ALL
+  FROM PUBLIC.
+- This guard is in addition to privilege revocations. Even the table owner cannot
+  perform an unauthorized DELETE through the runtime path; the guard is a hard
+  database invariant.
+- The AFTER DELETE trigger on allocations that maintains invoice balances is
+  never reached because the BEFORE DELETE guard aborts the statement first. There
+  is no conflict between the guard and balance recomputation triggers.
+
+Provenance and audit protection:
+
+- reversal_of_allocation_id, refund_id, effect, amount, and all immutable
+  provenance fields remain part of the append-only history. No permitted path
+  removes them. The guard prevents destroying historical provenance.
+- The payment credit reversal and on-account return terms in fin_v_payment_position
+  remain well-defined over the append-only set.
+
+Interaction with future phases:
+
+- The 0025 refund FK addition does not affect this policy. No DELETE is ever
+  needed for referential integrity repair under this model.
+- UPDATE remains limited to cases already specified by the correction/reversal
+  model; the guard does not constrain UPDATE beyond existing rules.
+
+Test contract (C-ALLOC-DEL-1 through C-ALLOC-DEL-10): see §28.3.2.
+Assertion: A19 (allocation DELETE prohibition), stated with those ten controls in §28.3.2.
 
 **Why `on_account_return` is a named effect and not just "a negative row with a NULL invoice".**
 Before this revision, `invoice_id IS NULL AND amount < 0` was described in prose but had no name, and
@@ -2696,7 +4353,13 @@ BEGIN
     -- a second time at COMMIT for every row in the transaction (§13.3.1). One
     -- copy, two callers: two copies would drift, and the drifted copy would be
     -- the one that is not under test.
-    PERFORM trg_fin_reversal_shape_check(NEW.tenant_id, NEW.id);
+    --
+    -- The helper is handed this row's FIELDS, not its id. See the note under the
+    -- helper's own definition: re-reading the row by id is impossible here,
+    -- because this is a BEFORE trigger and the row does not exist yet.
+    PERFORM trg_fin_reversal_shape_check(
+        NEW.tenant_id, NEW.id, NEW.reversal_of_allocation_id,
+        NEW.invoice_id, NEW.amount);
     RETURN NEW;
 END $$;
 REVOKE ALL ON FUNCTION trg_fin_reversal_shape() FROM PUBLIC;
@@ -2706,39 +4369,56 @@ REVOKE ALL ON FUNCTION trg_fin_reversal_shape() FROM PUBLIC;
 -- (b) fn_fin_refund_ceiling can RE-ENFORCE it at COMMIT for every reversal row
 --     the transaction wrote, not only the last one.
 CREATE OR REPLACE FUNCTION trg_fin_reversal_shape_check(
-    p_tenant uuid, p_allocation_id uuid
+    p_tenant        uuid,
+    p_reversal_id   uuid,            -- the reversal row's own id (NEW.id / OLD.id)
+    p_target_id     uuid,            -- reversal_of_allocation_id
+    p_invoice_id    uuid,            -- the invoice this reversal claims to touch
+    p_amount        numeric(19,4)    -- negative, by fin_pa_effect_ck
 ) RETURNS void
     LANGUAGE plpgsql
     SECURITY INVOKER
     SET search_path = pg_catalog, public, pg_temp
 AS $$
-DECLARE v_reversal           fin_payment_allocations;
-        v_original_invoice   uuid;
+DECLARE v_original_invoice   uuid;
         v_original_amount    numeric(19,4);
         v_already_reversed   numeric(19,4);
         v_available          numeric(19,4);
 BEGIN
-    SELECT * INTO v_reversal
-      FROM fin_payment_allocations
-     WHERE tenant_id = p_tenant AND id = p_allocation_id;
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'reversal % does not exist in tenant %', p_allocation_id, p_tenant
+    -- CONTRACT. The caller passes the candidate reversal's fields. This function
+    -- deliberately does NOT re-read the reversal row by id, because the BEFORE
+    -- caller cannot: the row it is validating has not been written yet, so a
+    -- a SELECT whose whole predicate is `WHERE id = NEW.id` finds nothing and
+    -- every correction reversal
+    -- would be refused with "reversal % does not exist in tenant %". That was not
+    -- a subtle defect -- it made the feature impossible to use at all.
+    --
+    -- The same two callers therefore guarantee, and this function relies on,
+    -- three things about the row they pass:
+    --   (a) it is a reversal -- `trg_fin_reversal_shape` returns early for
+    --       `apply` and `on_account_return`, and `fn_fin_refund_ceiling` runs
+    --       only for rows carrying a `refund_id`, which `fin_pa_effect_ck`
+    --       admits on the `reverse` branch alone;
+    --   (b) `p_target_id` is NOT NULL -- `fin_pa_effect_ck` requires
+    --       `reversal_of_allocation_id` on every `reverse` row;
+    --   (c) `p_amount < 0` -- likewise from the CHECK.
+    -- The TARGET row is still read by id, and that read is legitimate: it is a
+    -- row that already exists.
+
+    IF p_target_id IS NULL THEN
+        RAISE EXCEPTION 'a reversal must name the allocation it reverses'
             USING ERRCODE = '55000';
-    END IF;
-    IF v_reversal.effect <> 'reverse' THEN
-        RETURN;   -- only a reversal has a target and a ceiling
     END IF;
 
     SELECT a.invoice_id, a.amount INTO v_original_invoice, v_original_amount
       FROM fin_payment_allocations a
-     WHERE a.tenant_id = p_tenant AND a.id = v_reversal.reversal_of_allocation_id;
+     WHERE a.tenant_id = p_tenant AND a.id = p_target_id;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'reversal target does not exist in this tenant'
             USING ERRCODE = '55000';
     END IF;
 
     -- P1-13, part 1 of 2: a reversal may not name an invoice its target did not name.
-    IF v_reversal.invoice_id IS DISTINCT FROM v_original_invoice THEN
+    IF p_invoice_id IS DISTINCT FROM v_original_invoice THEN
         RAISE EXCEPTION 'reversal must target the same invoice as the allocation it reverses'
             USING ERRCODE = '55000';
     END IF;
@@ -2748,27 +4428,28 @@ BEGIN
     -- The already-reversed magnitude is the sum of every OTHER existing reversal of
     -- this allocation, in EITHER flavour: a correction reversal and N refund
     -- reversals all draw down the same ceiling, which is why both are summed here.
-    -- `a.id <> p_allocation_id` is load-bearing on two counts. It makes the helper
+    -- `a.id <> p_reversal_id` is load-bearing on two counts. It makes the helper
     -- idempotent, so re-running it at COMMIT is safe; and on the UPDATE path the
     -- row being checked is already in the table, so without the exclusion its own
     -- OLD version would be counted as a prior reversal and the row would be
-    -- charged twice against its own ceiling.
+    -- charged twice against its own ceiling. On the INSERT path the id is new and
+    -- matches nothing, so the clause is a no-op there rather than an error.
     SELECT COALESCE(SUM(-a.amount), 0) INTO v_already_reversed
       FROM fin_payment_allocations a
      WHERE a.tenant_id = p_tenant
-       AND a.reversal_of_allocation_id = v_reversal.reversal_of_allocation_id
+       AND a.reversal_of_allocation_id = p_target_id
        AND a.amount < 0
-       AND a.id <> p_allocation_id;
+       AND a.id <> p_reversal_id;
     v_available := v_original_amount - v_already_reversed;
 
-    IF -v_reversal.amount > v_available THEN
+    IF -p_amount > v_available THEN
         RAISE EXCEPTION
             'reversal % exceeds the % still available on allocation %',
-            -v_reversal.amount, v_available, v_reversal.reversal_of_allocation_id
+            -p_amount, v_available, p_target_id
             USING ERRCODE = '55000';
     END IF;
 END $$;
-REVOKE ALL ON FUNCTION trg_fin_reversal_shape_check(uuid, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION trg_fin_reversal_shape_check(uuid, uuid, uuid, uuid, numeric) FROM PUBLIC;
 ```
 
 **The magnitude bound this trigger adds is not optional.** The previous revision computed
@@ -2880,23 +4561,47 @@ payment_refunded(p)          = -SUM a.amount WHERE a.payment_id = p
 --        payment_unallocated = p.amount - SUM(amount WHERE refund_id IS NULL)
 --     which subtracted correction reversals AND on_account returns, and also
 --     subtracted an on-account *credit* -- three separate ways to go negative.
---     The correct statement: a payment's cash is either applied to a charge,
---     still held on account, or handed back. Those three partition it exactly.
+--     The correct statement: a payment's own cash is either applied to a charge or
+--     still held unapplied on account, minus whatever has been handed back out.
+--     Those partition it exactly, and the residual is non-negative by construction.
 --
 --     applied:       effect='apply'        AND invoice_id IS NOT NULL
---     still on acct: effect='apply'        AND invoice_id IS NULL
---     handed back:   effect='on_account_return'
---     (refund rows are NOT part of unallocated -- a refund is a different
---      operation against already-applied cash, tracked by (3))
+--     still on acct: p.amount - applied    (the REMAINDER -- no row names it,
+--                    which is the whole point: an unallocated remainder is the
+--                    absence of a row, not a row)
+--     handed back:   effect='on_account_return'  and corrections of on-account
+--                    credits, both of which are <= 0 and both lower the balance
 --
 payment_unallocated(p)       = p.amount
                                - payment_applied(p)
                                + payment_on_account_returned(p)
+                               + payment_credit_reversed(p)
                                + payment_refund_reapplied(p)
 -- payment_refund_reapplied(p) = 0 in this design. It is named explicitly because
 -- it is the term that a "refund that returns to on-account" variant would need,
 -- and naming it prevents the P0-07 class of bug from being reintroduced silently
 -- in a future revision. See §15.1 for why a refund never returns to on-account.
+--
+-- `fin_v_payment_position` is the executable form of this formula and omits this
+-- one term. The omission is stated in the view itself (its header comment) and
+-- is safe only while the term is zero, so this line is the normative place that
+-- says so: if a future revision ever gives `payment_refund_reapplied(p)` a
+-- non-zero value, it must add the term to the view in the same revision.
+--
+-- payment_credit_reversed(p) = SUM a.amount WHERE a.payment_id = p
+--                               AND a.effect = 'reverse'
+--                               AND a.refund_id IS NULL
+--                               AND a.invoice_id IS NULL      -- <= 0
+--
+-- The previous revision's formula omitted payment_credit_reversed entirely, so
+-- reversing an on-account credit removed cash from the family's account without
+-- changing any of the four published figures -- the same class of hole as the
+-- original P0-07, one partition step further out. It is a correction reversal
+-- (§12.2's third negative row) of a row that named no invoice, so it is
+-- invisible to payment_applied by construction and invisible to
+-- payment_on_account_returned because that term filters effect='on_account_return'.
+-- Without the fourth term, payment_unallocated silently overstated the balance by
+-- the magnitude of every corrected credit.
 
 payment_refundable(p)        = payment_applied(p) - payment_refunded(p)
 ```
@@ -2919,13 +4624,49 @@ it under-counted the family's claim. Both directions of error are removed by par
 
 ```text
 payment.amount
-  = payment_applied(p)                      -- against charges
-  + (on-account credits, effect='apply' AND invoice_id IS NULL)
-  + payment_on_account_returned(p)          -- <= 0
+  = payment_applied(p)                      -- against charges, both signs
+  + payment_unallocated(p)                  -- the REMAINDER, >= 0, no row names it
+
+payment_unallocated(p) = p.amount − payment_applied(p)
+                       + payment_on_account_returned(p)
+                       + payment_credit_reversed(p)
+                       >= 0
 ```
 
-with every quantity `>= 0` except the returned amount, and
-`payment_unallocated(p) = on-account credits - payment_on_account_returned(p) >= 0`.
+with every quantity `>= 0` except the two return terms, which are `<= 0`.
+
+**Why this is an identity and not the equality the previous revision printed.** That revision stated
+`payment.amount = payment_applied + on-account credits + returned`, which asserts that **every peso of
+a payment is represented by an allocation row**. It is false for the most ordinary case in the model:
+§11.3 makes a **partially-allocated payment legal and normal** — "A payment may be fully unallocated
+('on account') … parents prepay a term" — and for a *partial* allocation the remainder has **no row
+at all**, because §12.1 defines an allocation as "money from this payment moved here", and cash that
+has moved nowhere is the **absence** of a row. Take 100,000 applied 60,000 to an invoice: the rows
+sum to 60,000, and §12.4's view derives the 40,000 residual arithmetically. The previous revision's
+equality is therefore falsified by its own model one screen earlier, and no test would have caught it,
+because the two sides are equal for every fully-allocated payment and the register's own worked
+examples are all fully-allocated or fully-returned.
+
+The identity above is the correct statement — `payment_unallocated` **is** the residual — and it is
+what makes the `>= 0` bound load-bearing. An equality with no residual on either side cannot go
+negative, so it asserts nothing; the entire P0-07 class of bug *is* the residual going negative.
+
+**A distinction this forces, stated once because the previous revision conflated it.** A payment's
+*own* uncollected cash is `payment_unallocated(p)`. A **family's** on-account balance is a different
+and larger quantity, because it pools several payments' remainders and adds the credits moved between
+them:
+
+```text
+family_on_account(family) = Σ_p payment_unallocated(p)        -- the family's own remainders
+                          + Σ_p payment_credit_on_account(p)  -- credits moved in (family-level)
+```
+
+The previous revision's prose — "`payment_unallocated(p) = on-account credits −
+payment_on_account_returned(p)`" — was the family-level quantity wearing the payment-level name: it
+dropped `p.amount` and `payment_applied` entirely, so for a fully-allocated payment it reported the
+*negative* of the amount returned. A parent-portal "balance in account" widget must use the
+family-level form above; the per-payment form under-reports it by the pooled remainder, which is the
+common case rather than the exception.
 
 `payment_refundable` is bounded by **cash actually applied to a charge**, not by the payment amount.
 This is the single most consequential line in the block and it is easy to get wrong: the naive
@@ -3006,12 +4747,42 @@ expressions, published as `SECURITY INVOKER` views:
 
 ```sql
 CREATE VIEW fin_v_payment_position WITH (security_invoker = on) AS
+-- Two notes on this statement, both recorded because each has already been
+-- misread as a defect by a reader who did not check the catalog.
+--
+-- (1) The GROUP BY below lists only `p.tenant_id, p.id`, yet the target list
+--     projects `p.payment_no` and `p.amount`. That is valid, not an oversight:
+--     `fin_payments.id` is a single-column PRIMARY KEY, and PostgreSQL accepts
+--     any other column of that relation in the target list once every column of
+--     its primary key appears in the GROUP BY (`check_ungrouped_columns`).
+--     Functional dependency is inferred from the PK alone and does NOT extend to
+--     composite UNIQUE constraints, which is why `fin_payments_ten_id_uq` on
+--     `(tenant_id, id)` would not have been sufficient on its own. A revision
+--     that "corrects" this by adding the projected columns to the GROUP BY is
+--     harmless but redundant; a revision that drops `p.id` from the GROUP BY is
+--     a genuine `42803` error.
+-- (2) §12.2's `payment_unallocated` formula carries one term this view omits:
+--     `payment_refund_reapplied(p)`. That term is identically zero in this
+--     design — §12.2 says so inline and explains that it is named only so that
+--     the future "refund that returns to on-account" variant has a place to put
+--     its arithmetic. Omitting a term that is provably zero keeps the view and
+--     the formula numerically identical, and the omission is stated here rather
+--     than left for a reader to discover by comparing the two.
 SELECT p.tenant_id, p.id AS payment_id, p.payment_no, p.amount,
        -- P0-07: partition by effect/refund_id, never by sign. See §12.2.
+       -- NOTE the two `<= 0` correction terms: an on_account_return, and the
+       -- correction of an on-account credit (reverse / refund_id IS NULL /
+       -- invoice_id IS NULL). The previous revision had only the first, so
+       -- reversing an on-account credit moved the family's money without moving
+       -- any published figure. Both are named so the view and §12.2 state one
+       -- formula rather than two that agree by luck.
        p.amount
        - COALESCE(SUM(a.amount) FILTER (WHERE a.refund_id IS NULL
                                          AND a.invoice_id IS NOT NULL), 0)
        + COALESCE(SUM(a.amount) FILTER (WHERE a.effect = 'on_account_return'), 0)
+       + COALESCE(SUM(a.amount) FILTER (WHERE a.refund_id IS NULL
+                                         AND a.invoice_id IS NULL
+                                         AND a.effect = 'reverse'), 0)
          AS unallocated_amount,
        COALESCE(-SUM(a.amount) FILTER (WHERE a.refund_id IS NOT NULL), 0) AS refunded_amount,
        -- FI-005: the refund ceiling is cash APPLIED TO A CHARGE, not p.amount.
@@ -3059,9 +4830,10 @@ SELECT i.tenant_id,
        COALESCE((SELECT SUM(it.amount)
                    FROM fin_invoice_items it
                   WHERE it.tenant_id = i.tenant_id AND it.invoice_id = i.id), 0)
-     + COALESCE((SELECT SUM(a.amount)
-                   FROM fin_invoice_adjustments a
-                  WHERE a.tenant_id = i.tenant_id AND a.invoice_id = i.id), 0)
++ COALESCE((SELECT SUM(a.amount)
+                    FROM fin_invoice_adjustments a
+                   WHERE a.tenant_id = i.tenant_id AND a.invoice_id = i.id
+                     AND a.status = 'approved'), 0)
      + COALESCE((SELECT SUM(it.tax_amount)
                    FROM fin_invoice_items it
                   WHERE it.tenant_id = i.tenant_id AND it.invoice_id = i.id), 0)
@@ -3076,9 +4848,10 @@ SELECT i.tenant_id,
        COALESCE((SELECT SUM(it.amount)
                    FROM fin_invoice_items it
                   WHERE it.tenant_id = i.tenant_id AND it.invoice_id = i.id), 0)
-     + COALESCE((SELECT SUM(a.amount)
-                   FROM fin_invoice_adjustments a
-                  WHERE a.tenant_id = i.tenant_id AND a.invoice_id = i.id), 0)
++ COALESCE((SELECT SUM(a.amount)
+                    FROM fin_invoice_adjustments a
+                   WHERE a.tenant_id = i.tenant_id AND a.invoice_id = i.id
+                     AND a.status = 'approved'), 0)
      + COALESCE((SELECT SUM(it.tax_amount)
                    FROM fin_invoice_items it
                   WHERE it.tenant_id = i.tenant_id AND it.invoice_id = i.id), 0)
@@ -3100,17 +4873,23 @@ The `balance` expression repeats three of them rather than aliasing `invoice_tot
 because a view's output column cannot be referenced in the same `SELECT` list.
 
 ```sql
--- The CACHE writer for fin_invoices.balance. Bound in 0024 (not 0023) because
--- fin_payment_allocations is created by 0024 — a trigger on one table reading
--- another is fine, but this trigger's function may only be created once every
--- relation it names exists.
+-- The CACHE writer for fin_invoices.balance, status and paid_at — the three
+-- fields C-9.2 moves to 0024. Bound in 0024 (not 0023) because
+-- fin_payment_allocations is created by 0024: a trigger on one table reading
+-- another is fine, but this function may only be created once every relation it
+-- names exists (§30.3.1, strict form).
+--
+-- SECURITY DEFINER: it writes balance/status/paid_at, none of which §16.5.1
+-- grants to school_app_rw. The arithmetic AND the status decision live in
+-- fin_invoice_reapply_derived_state below; this function only decides WHICH
+-- invoices to reapply.
 CREATE OR REPLACE FUNCTION trg_fin_invoice_balance_recompute() RETURNS trigger
     LANGUAGE plpgsql
+    SECURITY DEFINER
     SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE v_invoice uuid;
         v_tenant  uuid;
-        v_balance numeric(19,4);
 BEGIN
     -- The FIRST write. On UPDATE this is the invoice the row is leaving; the
     -- second pass below handles the one it is joining. Both sides must be
@@ -3120,7 +4899,7 @@ BEGIN
         v_invoice := OLD.invoice_id;
         v_tenant  := OLD.tenant_id;
         IF v_invoice IS NOT NULL THEN
-            PERFORM trg_fin_invoice_recalc_balance(v_tenant, v_invoice);
+            PERFORM fin_invoice_reapply_derived_state(v_tenant, v_invoice);
         END IF;
     END IF;
 
@@ -3136,16 +4915,37 @@ BEGIN
     v_invoice := NEW.invoice_id;
     v_tenant  := NEW.tenant_id;
     IF v_invoice IS NOT NULL THEN
-        PERFORM trg_fin_invoice_recalc_balance(v_tenant, v_invoice);
+        PERFORM fin_invoice_reapply_derived_state(v_tenant, v_invoice);
     END IF;
     RETURN NULL;
 END $$;
 REVOKE ALL ON FUNCTION trg_fin_invoice_balance_recompute() FROM PUBLIC;
 ```
 
-**The arithmetic lives in a second function, `trg_fin_invoice_recalc_balance(tenant, invoice)`, and
-the trigger does nothing but decide *which* invoice to recompute.** Three reasons, in order of how
-much damage the alternative does:
+**The arithmetic and the status decision live in a second function,
+`fin_invoice_reapply_derived_state(tenant, invoice)`, and the trigger does nothing but
+decide *which* invoices to reapply.** Two names were considered and the choice matters:
+
+* `trg_fin_invoice_recalc_balance` — rejected. The `trg_` prefix is reserved by §35.3 for
+  **bound trigger functions**, and this is not one; a `trg_`-prefixed function that appears in no
+  `CREATE TRIGGER` is precisely the confusion F5h exists to record, and adding a second one would
+  make that row worse rather than better.
+* `fin_invoice_reapply_derived_state` — chosen. It names **what it does** (reapply the state
+  derived from three inputs) and it is honest about C-9.2's scope: it does not only recompute
+  `balance`, it decides `status` and stamps `paid_at`. A name saying "balance" over a function
+  that writes three columns is how `paid_at` ended up being a §16.5 mention with no writer.
+
+It returns `void`, takes its arguments by name, and is `PERFORM`ed rather than bound, which is what
+keeps it out of §35.3's inventory as a 29th trigger function.
+
+**Why `status` and `paid_at` are decided here and not in the trigger.** The trigger may fire on an
+allocation insert, and the decision "is this invoice now fully paid" requires the new balance, which
+requires the arithmetic. Putting the transition in the trigger would mean either computing the
+balance twice or passing it in — and passing it in would put the value that `status` depends on in a
+parameter, which is the shape of bug where the trigger's decision and the helper's arithmetic are
+edited independently and drift. One function owns the number *and* the decision made from it.
+
+Three reasons for the factoring, in order of how much damage the alternative does:
 
 1. **`UPDATE` can move an allocation between invoices.** A trigger that reads
    `COALESCE(NEW.invoice_id, OLD.invoice_id)` gets exactly one id, and on a move it gets the
@@ -3165,12 +4965,33 @@ much damage the alternative does:
    against nothing.
 
 ```sql
-CREATE OR REPLACE FUNCTION trg_fin_invoice_recalc_balance(p_tenant uuid, p_invoice uuid)
+-- SECURITY INVOKER, and this is the pair's load-bearing detail. This function
+-- issues `UPDATE fin_invoices SET balance, status, paid_at` on columns
+-- school_app_rw cannot write, so in isolation it would need DEFINER. It does
+-- not, because its ONLY caller is trg_fin_invoice_balance_recompute, which IS a
+-- definer: a nested SECURITY INVOKER function executes with the *caller's*
+-- current role, and the caller's current role here is school_migrator. The
+-- elevation is therefore supplied by row 13 and this function inherits it.
+--
+-- The alternative -- marking this one DEFINER too -- was the previous revision's
+-- choice, and it is worse in a specific way: this function is NOT bound to any
+-- trigger, so it is an ordinary callable function with a uuid signature. F5d
+-- must therefore grant EXECUTE on it to nobody. A definer helper that nobody may
+-- execute is safe but pointless; an invoker helper called only by a definer is
+-- both safe and reachable. §19.7.4 records the count: FIVE definers, all five
+-- bound, and this is not one of them. That five IS correct here -- row 13 and row 8a
+-- are both 0024's, so a reader standing at the 0024 checkpoint sees all five.
+-- At 0023 the figure is three (C-SEC-M4a).
+CREATE OR REPLACE FUNCTION fin_invoice_reapply_derived_state(p_tenant uuid, p_invoice uuid)
 RETURNS void
     LANGUAGE plpgsql
+    SECURITY INVOKER
     SET search_path = pg_catalog, public, pg_temp
 AS $$
-DECLARE v_balance numeric(19,4);
+DECLARE v_balance    numeric(19,4);
+        v_status     text;
+        v_new_status text;
+        v_total      numeric(19,4);
 BEGIN
     -- ONE statement, ONE local. An earlier draft of the trigger read items and
     -- adjustments into two locals, then reassigned one of them from a combined
@@ -3179,27 +5000,136 @@ BEGIN
     -- property test (10,000 random operations asserting
     -- `balance == total - net_applied`) is the only thing that would catch the two
     -- readings ever disagreeing. One expression, one assignment.
+    --
+    -- C-6: `a.status = 'approved'` — identical to the filter in
+    -- fin_v_invoice_balance (§12.4) and in trg_fin_invoice_item_total (§9.6.2).
+    -- Three copies of "what an adjustment is worth", which is why §16.4 keeps the
+    -- definition in ONE place and these three are cross-references rather than
+    -- independent definitions. That is a real duplication risk and it is
+    -- acknowledged rather than pretended away: the three are enumerated in the
+    -- FI-002 property test so a fourth, or an edit to only one of the three,
+    -- fails it.
     SELECT (COALESCE((SELECT SUM(it.amount) FROM fin_invoice_items it
                        WHERE it.tenant_id = p_tenant AND it.invoice_id = p_invoice), 0)
           + COALESCE((SELECT SUM(a.amount) FROM fin_invoice_adjustments a
-                       WHERE a.tenant_id = p_tenant AND a.invoice_id = p_invoice), 0)
+                       WHERE a.tenant_id = p_tenant AND a.invoice_id = p_invoice
+                         AND a.status = 'approved'), 0)
           + COALESCE((SELECT SUM(it2.tax_amount) FROM fin_invoice_items it2
                        WHERE it2.tenant_id = p_tenant AND it2.invoice_id = p_invoice), 0)
           - COALESCE((SELECT SUM(pa.amount) FROM fin_payment_allocations pa
                        WHERE pa.tenant_id = p_tenant AND pa.invoice_id = p_invoice), 0))
       INTO v_balance;
 
+    -- (C-9.2) The status decision, derived from the number just computed. It is
+    -- HERE and not in the trigger for the reason given above the function: the
+    -- trigger fires on an allocation insert, and deciding "is this now fully
+    -- paid" requires the new balance, which requires this arithmetic. Passing the
+    -- balance in as a parameter would put the value `status` depends on in two
+    -- places, which is the shape of bug where a decision and its input drift.
+    SELECT i.status, i.total INTO v_status, v_total
+      FROM fin_invoices i
+     WHERE i.tenant_id = p_tenant AND i.id = p_invoice;
+    IF NOT FOUND THEN
+        RETURN;   -- deleted in the same transaction; nothing to reapply
+    END IF;
+
+    -- (C-9.2 / P1-02) A DRAFT has no derived state to reapply, and a VOID
+    -- invoice is terminal. Both are RETURNED FROM rather than carried through
+    -- the arithmetic below, and the reason is a defect the previous revision
+    -- shipped: it preserved the status *label* (`draft` stayed `draft`) but
+    -- still executed the UPDATE, so `balance = v_balance` was written. A draft
+    -- with a 100 line and no allocation therefore ended the transaction with
+    -- `balance = 100`, while `fin_v_invoice_balance` excludes drafts and §9.6.0
+    -- states a draft's balance is 0. Preserving the label is not preserving the
+    -- invariant, and C-SEC-M6b (a line edit on a draft) is the case that
+    -- witnesses it.
+    --
+    -- The early return also makes C-SEC-M6b STRUCTURAL rather than incidental:
+    -- this writer now never names `fin_invoices` for a draft at all, so the
+    -- `AFTER UPDATE OF status` freeze trigger cannot fire on this path. That
+    -- trigger's WHEN clause is still load-bearing, but for the `draft -> void`
+    -- discard transition (§9.6.0.1), not for this writer. Both facts are stated
+    -- so a future revision cannot remove the WHEN clause or the early return on
+    -- the belief that the other one is doing the work.
+    --
+    -- `expired` is deliberately NOT in the early-return set. An expired invoice
+    -- still owes money, and an allocation against it must move it to
+    -- `partially_paid` / `paid`; that is the whole reason the state is a cache.
+    IF v_status IN ('draft', 'void') THEN
+        RETURN;
+    END IF;
+
+    IF v_balance <= 0 THEN
+        -- Zero or below: nothing is owed. A credit balance (§12.1, signed
+        -- allocations) lands here too, and is 'paid' in the sense that no money
+        -- is due — which is why this cannot be written as
+        -- `net_applied > 0`, a rule that would leave every credit-balance
+        -- invoice stuck at 'partially_paid' forever.
+        v_new_status := 'paid';
+    ELSIF v_balance < v_total THEN
+        v_new_status := 'partially_paid';
+    ELSE
+        v_new_status := 'issued';
+    END IF;
+
+    -- (C-9.2) paid_at is set on entry to 'paid' and CLEARED on exit, so
+    -- fin_invoices_paid_at_ck is an equality rather than an implication. The
+    -- CASE keeps the original timestamp on a no-op recompute: re-running
+    -- `now()` on an already-paid invoice would silently restate when it settled,
+    -- and a refund (which moves it back to partially_paid and clears paid_at)
+    -- followed by re-payment is the only thing that should produce a new one.
+    --
+    -- C-SEC: `status` here is the reason the two paths must stay apart. This
+    -- statement names `status`, so it satisfies the column filter of
+    -- trg_fin_invoice_freeze_lines' `AFTER UPDATE OF status` binding (§9.6.0.1)
+    -- and that trigger really does fire. What stops it stamping anything is, in
+    -- the first instance, the early return above: for a draft this writer never
+    -- reaches the UPDATE at all. The WHEN clause is the second line of defence
+    -- and, unlike this writer, it also covers the `draft -> void` discard
+    -- transition. Stated precisely because the previous revision credited the
+    -- WHEN clause with suppressing a write that its own code had already decided
+    -- not to make -- and in fact did make, with `balance = v_balance`. Asserted
+    -- by C-SEC-M6b (§28.3.1); the structural half C-SEC-M6a pins the clause at
+    -- the 0023 checkpoint. If either the early return or the WHEN clause is
+    -- relaxed, both fail, which is the correct direction for them to fail.
+    --
+    -- C-SEC: the maintenance context. This is the SECOND producer of
+    -- fin.invoice_maintenance_scope and the only one that establishes
+    -- 'invoice_balance_state'. The vocabulary and the column map are 0023's
+    -- (§9.6.0 clause (2)); 0023 publishes the name and both values and produces
+    -- one of them, 0024 produces the other. Asserted asymmetrically at the end of
+    -- 0023 (§30.3.4, assertions A14 and A16) so the 0023/0024 boundary is a
+    -- checked fact rather than a reading convention.
+    PERFORM pg_catalog.set_config('fin.invoice_maintenance_scope',
+                                  'invoice_balance_state', true);
     UPDATE fin_invoices
-       SET balance = v_balance, updated_at = now()
+       SET balance = v_balance,
+           status  = v_new_status,
+           paid_at = CASE
+                       WHEN v_new_status = 'paid' AND v_status <> 'paid' THEN now()
+                       WHEN v_new_status <> 'paid' THEN NULL
+                       ELSE paid_at
+                     END,
+           updated_at = now()
      WHERE tenant_id = p_tenant AND id = p_invoice;
+    PERFORM pg_catalog.set_config('fin.invoice_maintenance_scope', '', true);
 END $$;
-REVOKE ALL ON FUNCTION trg_fin_invoice_recalc_balance(uuid, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION fin_invoice_reapply_derived_state(uuid, uuid) FROM PUBLIC;
 ```
 
-**`trg_fin_invoice_recalc_balance` is deliberately NOT a trigger function** — it returns `void`, takes
-its arguments by name, and is `PERFORM`ed rather than bound. That is what stops it appearing in the
-§35.3 inventory as a 24th trigger function, and it is why the inventory's "every row is a trigger
-function" rule stays true. It is a plain helper with the same REVOKE as the triggers.
+**`fin_invoice_reapply_derived_state` is deliberately NOT a trigger function** — it returns `void`,
+takes its arguments by name, and is `PERFORM`ed rather than bound. That is what stops it appearing in
+the §35.3 inventory as a 29th trigger function, and it is why the inventory's "every row is a trigger
+function" rule stays true. It is a plain helper with the same REVOKE as the triggers, and it is
+**`SECURITY INVOKER`** — it writes `balance`, `status` and `paid_at`, none of which §16.5.1 grants to
+`school_app_rw`, and it needs no definership precisely because its only caller,
+`trg_fin_invoice_balance_recompute`, is a definer and supplies the elevation. It is **not** one of
+the five F5d definers (§19.7.4); it is the callee of one. **`F5d` names five functions** — rows 4, 4d, 6,
+13 and 8a — and nothing else. This helper has its own row, **`F5h`**, precisely because it is a declared,
+unbound, `SECURITY INVOKER` helper and does not belong in a row whose membership criterion is "issues
+its own `UPDATE` on a column §16.5.1 does not grant": it issues no statement of its own, and it is
+invoked *by* a definer. §35.3.2's count is definers among bound functions (5 whole-phase), and a helper
+with no `CREATE TRIGGER` could not be a definer of anything in any case.
 
 **The four independent sub-queries, not one joined aggregate, in both the view and the trigger.**
 This is the same defect `trg_fin_invoice_item_total` is written to avoid (§9.6): joining
@@ -3350,8 +5280,121 @@ their conditions are disjoint on `effect` — the family guard returns early for
 and the shape trigger returns early for every `apply` row — but it is recorded here so a future
 reader does not assume the ordering is load-bearing. `fin_allocations_bounds` is also `BEFORE` and
 runs before both alphabetically; it returns early for `reverse` rows and for every `refund_id` row,
-so it is disjoint from both. `fin_allocations_refund_ceiling` is a **deferred** constraint trigger
+so it is disjoint from both. A fourth `BEFORE` trigger, `fin_allocations_target_state`
+(`trg_fin_allocation_target_state`, inventory row 12a, D9), was added by §12.5.1 and runs **after** all
+three of these; §12.5.1's "The actual firing order on `fin_payment_allocations`" states all four in the
+order PostgreSQL fires them, and is the single place that claim is made — the earlier version of this
+paragraph and the one in §12.5.1 each described part of the order and one of the two was wrong.
+`fin_allocations_refund_ceiling` is a **deferred** constraint trigger
 and therefore always runs last, at `COMMIT` (§13.3.1).
+
+#### 12.5.1 The invoice state an allocation may name (P0-09's second half)
+
+**The hole this closes.** `fin_invoice_reapply_derived_state`'s comment claimed *"no allocation may
+name a draft invoice (§12.6)"*, and §12.4.1 relied on that claim to argue a draft's balance cannot be
+moved. But §12.6 is the concurrent-allocation **lock protocol** — it says nothing about invoice state —
+and no trigger, CHECK, or FK enforced the rule anywhere. The claim was load-bearing and false. It
+matters more since §12.4.1 now returns early for a draft: with the claim unenforced, an `apply` row
+naming a draft is **accepted**, the payment position counts it as applied (`fin_v_payment_position`),
+and the invoice side silently ignores it, so the two authoritative views disagree with **no error
+raised**. That is a worse failure than a rejection.
+
+**The rule.** An `apply` allocation may name an invoice only in a state where money may be received:
+`issued`, `partially_paid`, `expired`, or `paid`. `draft` is refused because the document has not been
+issued and its balance is defined to be `0`; `void` is refused because it is terminal (P1-02).
+`paid` is deliberately **allowed**: §12.1's signed allocations and the documented over-credit state mean
+a second payment against a settled invoice is a *credit*, not an error. `expired` is allowed for the
+obvious reason — an expired invoice still owes money and paying it is exactly how it leaves `expired`.
+
+```sql
+CREATE OR REPLACE FUNCTION trg_fin_allocation_target_state() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE v_status text;
+BEGIN
+    -- Only an `apply` names an invoice as the thing being paid. A `reverse`
+    -- names its target's invoice, which trg_fin_reversal_shape already pins to
+    -- the target allocation; an `on_account_return` names none (§12.1's table).
+    IF NEW.effect <> 'apply' OR NEW.invoice_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT i.status INTO v_status
+      FROM fin_invoices i
+     WHERE i.tenant_id = NEW.tenant_id AND i.id = NEW.invoice_id;
+
+    -- A missing invoice is the composite FK's job to reject and it will do so
+    -- immediately, in the same statement; duplicating that here would give two
+    -- error paths for one condition.
+    IF NOT FOUND THEN
+        RETURN NEW;
+    END IF;
+
+    IF v_status IN ('draft', 'void') THEN
+        RAISE EXCEPTION
+            'cash may not be applied to invoice % in state %; only an issued invoice may be paid',
+            NEW.invoice_id, v_status
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION trg_fin_allocation_target_state() FROM PUBLIC;
+
+-- Bound as `fin_allocations_target_state` in §35.3.2. See "The actual firing order"
+-- below for its position among the four BEFORE triggers on this table.
+```
+
+#### The actual firing order on `fin_payment_allocations`
+
+**This comment previously claimed that `fin_allocations_target_state` "alphabetically runs between
+`fin_allocations_shape` and `fin_allocations_bounds`". That was false, and it was false in a way worth
+naming: it was the *only* place in §12.5 that made a claim about trigger order, and §12.5's own
+ordering paragraph — twenty lines earlier — got the other three right.** Two adjacent passages in one
+section, one correct and one not, is the shape of the defect class this document has now produced
+repeatedly (§36.2 rows 22, 39, 44): a figure written beside a table is not a measurement of the table.
+
+The four `BEFORE INSERT OR UPDATE` triggers bound to `fin_payment_allocations`, in the order
+PostgreSQL actually fires them:
+
+| # | Trigger name | Function | Inventory row |
+|---|---|---|---|
+| 1 | `fin_allocations_bounds` | `trg_fin_allocation_bounds` | 12 |
+| 2 | `fin_allocations_family` | `trg_fin_allocation_family_guard` | 11 |
+| 3 | `fin_allocations_shape` | `trg_fin_reversal_shape` | 10 |
+| 4 | `fin_allocations_target_state` | `trg_fin_allocation_target_state` | 12a |
+
+`fin_allocations_target_state` therefore runs **last**, not second — `target_state` sorts after both
+`shape` and `bounds` because `_t` > `_s` > `_b` on the second letter of the distinguishing word. The
+fifth trigger on the table, `fin_allocations_refund_ceiling`, is a `CONSTRAINT TRIGGER … DEFERRABLE
+INITIALLY DEFERRED` and is **not** in this list at all: it runs once at `COMMIT`, after every row of the
+transaction exists (§13.3.1).
+
+**The ordering is not load-bearing, and the reason is that the four are pairwise disjoint on `effect`,
+not that they happen to be sequenced well.** `bounds` returns early for every `refund_id` row; `shape`
+returns early for every `apply` row and every non-reversal row; `target_state` returns early for every
+non-`apply` row and for a row naming no invoice; `family` returns early for every non-`apply` row. No
+two of them reach a `RAISE` for the same row, so no order could change an outcome. That is worth stating
+because it means a future reader who reorders them — by renaming one, or by splitting one in two — is not
+walking a dependency they must preserve. What a future reader **must** preserve is the disjointness, and
+that is a property of the `effect` guards rather than of the names.
+
+**The one ordering fact that is load-bearing is the last row of the table above:** the deferred ceiling
+runs after the four, at `COMMIT`, and only because it is deferred. §13.3.1 is the whole argument for
+`DEFERRABLE INITIALLY DEFERRED` — an immediate trigger cannot see the sibling reversal rows of a refund
+that the same transaction is still writing — and the ceiling is the only mechanism that can.
+
+**Why a fourth trigger rather than a clause in an existing one.** §12.5's family guard is the only
+other trigger that reads `fin_invoices` for an `apply` row, and the tempting edit is to append this
+`status` test there. It is the wrong home for two reasons. First, the family guard's remit is *whose*
+invoice may be paid; this one's is *which state* it may be in, and §12.5 already states the principle
+that "two triggers with one job each is deliberate" because the two failure modes — cash crossing a
+family boundary, and cash applied to a document that cannot receive it — are witnessed by different
+tests and deserve different error messages. Second, folding them would make the family guard's early
+return for non-`apply` rows do double duty and hide that a `reverse` row's invoice is *not* subject to
+this check (it is subject to `trg_fin_reversal_shape`'s same-invoice rule instead). The guard is
+`SECURITY INVOKER`, reads only rows the calling role could already read, and takes no lock, so it adds
+no privilege surface and no ordering constraint.
 
 ### 12.6 Concurrent allocation — the deadlock-safe lock protocol
 Two cashiers allocating the last 1,000 PKR to the same invoice would race on `net_applied`. The
@@ -3466,9 +5509,15 @@ CREATE OR REPLACE FUNCTION trg_fin_refund_provenance() RETURNS trigger
     SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
-    v_payment  uuid;
+    -- `v_payment` was declared and never assigned in the previous revision: the
+    -- allocations-side branch reads `NEW.payment_id` and `v_target.payment_id`
+    -- directly and never needed it. An unused plpgsql variable is not an error,
+    -- so it survived, and it is removed here because a declaration that looks
+    -- load-bearing and is not is the same defect as a comment that describes a
+    -- check the code does not perform.
     v_target   fin_payment_allocations;
     v_refund   fin_refunds;
+    v_stray    fin_payment_allocations;
 BEGIN
     -- On an allocation that claims to be caused by a refund R, THREE rows must agree
     -- on the payment: the allocation, the row it reverses, and the refund. Checking
@@ -3522,29 +5571,249 @@ BEGIN
         -- be tested independently, and "provenance" and "bounds" fail differently.
     END IF;
 
-    -- The mirror direction: a refund row must be able to name the allocations it
-    -- reverses, and those must belong to the refund's own payment. Without this a
-    -- refund could be approved against allocations the refund's payment never had.
+    -- The mirror direction: a refund row must not be able to name allocations
+    -- that do not belong to its own payment. The previous revision wrote this
+    -- branch as a bare `PERFORM 1 FROM fin_payment_allocations
+    -- WHERE refund_id = NEW.id` with no
+    -- `IF NOT FOUND` and no assignment to anything, which is not a check at all:
+    -- the row count is computed and discarded, so the branch could not fail on
+    -- any input whatsoever, and the comment beneath it described an existence
+    -- check the code did not perform.
+    --
+    -- There is a real constraint here, and it is a DIFFERENT one from what the old
+    -- comment claimed, so the branch is rewritten to enforce the one that is
+    -- true at INSERT time. A refund is requested BEFORE its reversal rows exist
+    -- (§13.2 stages them together), so "this refund already has reversal rows"
+    -- is FALSE for every legitimate request and cannot be asserted. What IS true
+    -- is the negative form: an allocation carrying this `refund_id` must not
+    -- already name a different payment than the refund does. That is checkable
+    -- here, on the rows that exist, and it is the property that stops a reversal
+    -- being pre-attached to somebody else's refund.
+    --
+    -- Completeness -- "every proposed allocation became exactly one reversal row,
+    -- summing to `amount`" -- is a different property again, it is false at INSERT
+    -- by construction, and it is enforced at COMMIT by the deferred constraint
+    -- trigger `fn_fin_refund_ceiling` (§13.3.1, FI-006). Three properties, three
+    -- places, and this branch is the one that can only be checked on insertion.
     IF TG_OP = 'INSERT' AND TG_TABLE_NAME = 'fin_refunds' THEN
         IF NEW.amount IS NULL OR NEW.amount <= 0 THEN
             RAISE EXCEPTION 'refund amount must be positive'
                 USING ERRCODE = '55000';
         END IF;
-        PERFORM 1
-          FROM fin_payment_allocations a
-         WHERE a.tenant_id = NEW.tenant_id
-           AND a.payment_id = NEW.payment_id
-           AND a.refund_id = NEW.id;
-        -- Zero rows is NORMAL here: a refund is requested BEFORE its reversal
-        -- allocations exist (§13.2 stages them together, and completeness is
-        -- enforced at COMMIT by the deferred trigger). So this is a targeted
-        -- existence check, not a completeness check.
+
+        -- Lock the candidate rows before reading them, for the same TOCTOU
+        -- reason the allocations-side branch locks its target: without `FOR
+        -- UPDATE` a concurrent transaction could move an allocation's payment_id
+        -- between this read and this row's commit.
+        FOR v_stray IN
+            SELECT a.payment_id
+              FROM fin_payment_allocations a
+             WHERE a.tenant_id = NEW.tenant_id
+               AND a.refund_id = NEW.id
+               AND a.payment_id IS DISTINCT FROM NEW.payment_id
+             FOR UPDATE
+        LOOP
+            RAISE EXCEPTION
+                'refund % already carries a reversal naming payment %, but the refund names payment %',
+                NEW.id, v_stray.payment_id, NEW.payment_id
+                USING ERRCODE = '55000';
+        END LOOP;
     END IF;
 
     RETURN NEW;
 END $$;
 REVOKE ALL ON FUNCTION trg_fin_refund_provenance() FROM PUBLIC;
 ```
+
+#### 13.1.1 `0025` forward-remediation decision record — D2 / D2B / D2C / D3 (AMENDED)
+
+> **Design Amendment / Decision Record.** Phase 7 · D2/D3 Re-Adjudication · 2026-10-05.
+> Authoritative design source: `stash@{0}:docs/PHASE_7_FINANCE_DESIGN.md`,
+> blob `1b29d6bc3d1bdb82564152ccb887a707922cf70c`, 16,036 lines.
+> This entry **adds** to the design. No prior audit, implementation or re-audit conclusion recorded
+> elsewhere in this document is erased or rewritten; historical evidence remains historical.
+
+##### D2 — the refund-side branch is removed, on a corrected rationale
+
+The refund-side `FOR UPDATE` scan is removed from the canonical `trg_fin_refund_provenance`
+implementation. The justification is **scope**, and two earlier framings of it are withdrawn:
+
+- it is **not** that `fin_pa_refund_fk` being `NOT DEFERRABLE` makes the branch universally
+  unreachable; and
+- it is **not** that the FK makes every `UPDATE` path safe.
+
+The precise finding is:
+
+1. this design scopes the refund-side branch to
+   `IF TG_OP = 'INSERT' AND TG_TABLE_NAME = 'fin_refunds'`;
+2. on that path `NEW.id` is a fresh refund UUID;
+3. `fin_pa_refund_fk` is an immediate `NOT DEFERRABLE` foreign key;
+4. therefore no `fin_payment_allocations` row can reference that newly inserted refund at the moment
+   the `INSERT`-side branch executes, so the scan returns an **empty result** on the canonical path;
+5. the branch's other two checks are independently enforced — amount positivity by
+   `fin_refunds_amount_check`, and the reversal-shape invariants by the `0024` reversal-shape
+   constraints and `trg_fin_reversal_shape`.
+
+The **immutable** `0025_fin_refunds.sql` omitted the `TG_OP = 'INSERT'` predicate. **That omission is
+itself the defect**: it unnecessarily widened the branch so that it also fired on `UPDATE`. Removing
+the refund-side scan therefore *restores* the authoritative `INSERT`-only design and removes **no**
+independent integrity invariant. The superseded "the FK makes all paths safe" rationale was
+over-broad and is withdrawn.
+
+**A prior checkpoint expectation is retired, not weakened.** The `R1b` assertion that expected `55000`
+on a refund `UPDATE` was testing the immutable implementation defect, not a required design invariant
+— no design-specified check ever existed on that path. The old `UPDATE`-side scan is **not**
+restored, and `fin_refunds` `UPDATE` remains revoked to `school_app_rw` by §35.4.
+
+##### D2B — `trg_fin_refund_provenance` is `SECURITY INVOKER`
+
+| Property | Canonical value |
+|---|---|
+| Classification | **`SECURITY INVOKER`** |
+| Owner | `school_migrator` |
+| `search_path` | `pg_catalog, public, pg_temp` |
+| `PUBLIC EXECUTE` | revoked |
+| `school_app_rw EXECUTE` | revoked |
+
+Per §16.5.2 the function needs no elevation: it performs validation reads, writes no protected
+column, takes no row lock requiring privilege, and must preserve caller and RLS semantics.
+
+**Source/live discrepancy — recorded, not repaired.** The **immutable** `0025` source declares
+`SECURITY DEFINER` for this function, while this design and the verified live `school_saas_dev` /
+`school_saas_test` catalogs are `SECURITY INVOKER`. This is **source/live drift**, not permission to
+edit `0025`. Immutable migration files **must not** be edited; reconciliation requires a **forward-only
+corrective migration**, separately implemented and independently audited. See §36.6.
+
+##### D2C — `fin_lock_payment_amount` is an unbound `SECURITY DEFINER` **support function**
+
+```sql
+CREATE OR REPLACE FUNCTION fin_lock_payment_amount(
+    p_tenant_id   uuid,
+    p_payment_id  uuid
+) RETURNS numeric(19,4)
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE v_amount numeric(19,4);
+BEGIN
+    SELECT fin_payments.amount INTO v_amount
+      FROM fin_payments
+     WHERE fin_payments.tenant_id = p_tenant_id
+       AND fin_payments.id       = p_payment_id
+     FOR UPDATE;
+    RETURN v_amount;
+END $$;
+```
+
+| Property | Value |
+|---|---|
+| Category | **unbound `SECURITY DEFINER` support function** — *not* a §35.3.1 helper |
+| Bound? | **no** — named by no `CREATE TRIGGER` |
+| Trigger function? | **no** — `RETURNS numeric`, not `trigger` |
+| Owner | `school_migrator` |
+| Volatility | `VOLATILE` (it takes a row lock) |
+| `search_path` | `pg_catalog, public, pg_temp` |
+| `PUBLIC EXECUTE` | **revoked** |
+| `school_app_rw EXECUTE` | **revoked** |
+| Only intended callers | `trg_fin_allocation_bounds`, `trg_fin_on_account_return_bounds` (both `0024`, both `SECURITY INVOKER`) |
+| Responsibility | the privileged `SELECT … FOR UPDATE` on the single identified `fin_payments` row |
+
+It performs no writes, contains no dynamic SQL, locks only the explicitly identified
+`(tenant_id, payment_id)` row, and **requires** the tenant predicate so it cannot be coerced into a
+cross-tenant lock. It is internal to the two payment-lock triggers and is **not** exposed as a runtime
+application function: with `PUBLIC` and `school_app_rw` `EXECUTE` both revoked, the only reachable
+path is through its two definers.
+
+**Why it is not a third §35.3.1 helper, and why the definition was not weakened to let it fit.** The
+§35.3.1 category is defined by three properties: `RETURNS void`, `PERFORM`ed from inside another
+trigger function, and named by no `CREATE TRIGGER`. This function satisfies the third and fails the
+first two — it returns `numeric(19,4)` and is called as an expression, not `PERFORM`ed for effect.
+Widen the definition to admit it and the tripwire stops meaning anything, because the definition's
+purpose is to keep an unbound, never-reachable-through-the-API surface from growing without
+remark. The tripwire therefore stands at **two**, and the new function is carried in a separately
+named category (§19.7.2 `F5s`) that is stated, counted and audited on its own terms.
+
+##### Missing provenance invariants — canonical design target ≠ implemented
+
+Two checks present in the canonical DDL above are **absent from the immutable `0025` implementation
+and from live state**. They are recorded here as forward implementation requirements. They are
+**not** attributable to D2, **not** implemented, and **not** to be silently absorbed into the D2
+decision:
+
+| # | Canonical invariant | Canonical enforcement | Live status |
+|---|---|---|---|
+| 1 | `reversal_of_allocation_id` may reference only an allocation whose `effect = 'apply'` | `IF v_target.effect <> 'apply' THEN RAISE 'only an applied allocation can be reversed by a refund'` | **absent** from `0025` and live |
+| 2 | the named refund's `status` must be `requested` or `approved` | `IF v_refund.status NOT IN ('requested','approved') THEN RAISE 'a reversal may only be created for a requested or approved refund'` | **absent** from `0025` and live |
+
+Invariant 1 is a genuine gap rather than a duplicate: the `0024` reversal-shape validation proves the
+target **exists**, is in the **same tenant**, shares the **invoice identity**, and carries a **valid
+magnitude** — and none of those four implies the target's `effect` is `apply`. A non-`apply` target
+satisfies every one of them. Invariant 2 has no other enforcement anywhere in the design.
+
+Both must be resolved by forward remediation before the refund runtime path may be called complete.
+The exact trigger mechanism is deliberately **not** specified here; it is an implementation decision
+for that pass.
+
+##### D3 — canonical refund linkage is `ON DELETE NO ACTION`
+
+```sql
+ALTER TABLE fin_payment_allocations
+    ADD CONSTRAINT fin_pa_refund_fk
+    FOREIGN KEY (tenant_id, refund_id)
+    REFERENCES fin_refunds (tenant_id, id);          -- ON DELETE NO ACTION
+```
+
+`NO ACTION` is the canonical target and is **not** to be substituted with `RESTRICT`; where this
+document uses `RESTRICT` elsewhere (for example `fin_bri_invoice_fk`, §35.1) that is a different
+constraint with a different rationale, and the two are not to be conflated.
+
+**Live discrepancy — defective.** Both `school_saas_dev` and `school_saas_test` currently carry
+`ON DELETE SET NULL` (`confdeltype = 'n'`). That is defective, and the defect is structural rather
+than cosmetic:
+
+- `fin_payment_allocations.tenant_id` is `NOT NULL`;
+- composite `SET NULL` nulls **all** referencing columns of the composite key;
+- therefore deleting a referenced refund reaches **`23502 not_null_violation`** — the intended action
+  can never execute, so the constraint's delete behaviour is silently non-functional.
+
+The canonical DDL above is **not** altered to match live state. The correction is a **future
+forward-only migration** replacing the constraint with `ON ACTION NO ACTION` behaviour; the immutable
+`0025` file **must not** be edited. Not implemented.
+
+##### Deferred forward targets — CANONICAL DESIGN TARGET ≠ IMPLEMENTED
+
+None of the following is implemented. Each is a forward-only remediation requiring separate
+implementation and independent audit:
+
+| # | Deferred target | Canonical | Current |
+|---|---|---|---|
+| 1 | `0025` provenance definership reconciliation | `SECURITY INVOKER` | immutable source says `DEFINER`; live is `INVOKER` |
+| 2 | `fin_pa_refund_fk` delete action | `ON DELETE NO ACTION` | live `ON DELETE SET NULL` |
+| 3 | reversal target `effect` | must be `'apply'` | unenforced |
+| 4 | refund `status` on link creation | `requested` / `approved` only | unenforced |
+| 5 | `schema_migrations` migration checksums | byte-drift detection | ledger stores `version` + `applied_at` only |
+| 6 | F11/F12 `p_session_id` signature | 3-arg / 5-arg forms (§19.7.2) | documented at 2-arg / 4-arg; `0028`-owned |
+
+##### Source/live reproducibility is **not** closed
+
+**The immutable `0021`–`0025` migration set does not currently reproduce the live catalog exactly.**
+Known causes, each traceable to a specific immutable file rather than to an unknown:
+
+1. `0025` declares `trg_fin_refund_provenance` `SECURITY DEFINER` where canonical design and live are
+   `SECURITY INVOKER`;
+2. `0025` omits the `TG_OP = 'INSERT'` predicate, so its refund-side branch is broader than the
+   canonical design's;
+3. `0025`'s composite refund FK uses `ON DELETE SET NULL` where canonical is `ON DELETE NO ACTION`;
+4. forward remediation for the above has already been applied/represented **outside** the immutable
+   set, by separate files;
+5. `schema_migrations` carries no migration checksums, so the runner cannot independently detect
+   byte drift in an already-applied file.
+
+Consequence: reproducibility may be declared closed **only** after forward remediation reconciles the
+immutable history with the live catalog. A ledger without checksums is recorded here as a
+**reproducibility observation**; redesigning the migration runner is explicitly **out of scope** for
+this amendment.
 
 **Layer 2 — the structural model already prevents it.** Because a refund is expressed as a
 *reversal allocation carrying `refund_id` on the same row* (§12.2), provenance is not two
@@ -3602,6 +5871,13 @@ CREATE TABLE fin_refunds (
     processed_by          uuid,
     processed_at          timestamptz,
     rejection_reason      text,
+    -- The disbursing bank's own reference for the payout (transfer id, cheque no).
+    -- Server-owned and NOT NULL exactly when status = 'processed', because §35.7
+    -- row 4 makes "a disbursement reference is present" the guard on the one
+    -- transition where cash actually leaves. It is the field that reconciles a
+    -- refund against a bank statement, which is why it is stored rather than left
+    -- in the ledger group's memo.
+    disbursement_reference text,
     idempotency_key       text NOT NULL,
     CONSTRAINT fin_refunds_payment_fk
         FOREIGN KEY (tenant_id, payment_id)
@@ -3609,17 +5885,31 @@ CREATE TABLE fin_refunds (
     CONSTRAINT fin_refunds_no_uq  UNIQUE (tenant_id, refund_no),
     CONSTRAINT fin_refunds_idem_uq UNIQUE (tenant_id, idempotency_key),
     -- State/field coherence: a decided refund records who and when; a processed one
-    -- also records the processor. A 'requested' refund has no decision.
-    CONSTRAINT fin_refunds_decision_ck CHECK (
+    -- also records the processor and the disbursement reference. A 'requested' refund
+    -- has no decision. The four arms are disjoint, so status selects exactly one.
+    -- The previous revision collapsed 'approved' and 'processed' into one arm and so
+    -- never enforced processed_by/processed_at or disbursement_reference at all,
+    -- while the comment above it claimed it did (§36.2 row 53).
+CONSTRAINT fin_refunds_decision_ck CHECK (
         (status = 'requested' AND decided_by IS NULL AND decided_at IS NULL
                                 AND rejection_reason IS NULL
+                                AND disbursement_reference IS NULL
                                 AND applied_allocations IS NULL)
-     OR (status IN ('approved','processed') AND decided_by IS NOT NULL
+     OR (status = 'approved' AND decided_by IS NOT NULL
+                                AND decided_at IS NOT NULL
+                                AND rejection_reason IS NULL
+                                AND disbursement_reference IS NULL
+                                AND applied_allocations IS NOT NULL)
+     OR (status = 'processed' AND decided_by IS NOT NULL
                                  AND decided_at IS NOT NULL
+                                 AND processed_by IS NOT NULL
+                                 AND processed_at IS NOT NULL
                                  AND rejection_reason IS NULL
+                                 AND disbursement_reference IS NOT NULL
                                  AND applied_allocations IS NOT NULL)
      OR (status = 'rejected' AND decided_by IS NOT NULL AND decided_at IS NOT NULL
                               AND rejection_reason IS NOT NULL
+                              AND disbursement_reference IS NULL
                               AND applied_allocations IS NULL)
     ),
     CONSTRAINT fin_refunds_ten_id_uq UNIQUE (tenant_id, id)
@@ -3642,29 +5932,115 @@ REVOKE ALL ON fin_refunds FROM school_app_rw;
 
 ```text
   requested ──approve──► approved ──process──► processed      (terminal, irreversible)
-      │                     │
-      └──reject──► rejected  └──reject──► rejected
+      │
+      └──reject──► rejected                                (terminal — §35.7 rows 5–7)
+
+  THREE edges, not four. The previous revision of this diagram also drew
+  `approved → rejected`, and §35.7 row 7 declares that edge forbidden. It is not
+  merely discouraged — it is unrepresentable: the `rejected` arm of
+  `fin_refunds_decision_ck` requires `applied_allocations IS NULL`, and an
+  approved refund's is NOT NULL by construction, so the CHECK refuses the write
+  with 23514 before any state-machine logic is reached. There is also nothing to
+  un-write, which is the better reason: approval has already created the reversal
+  rows, and `fin_payment_allocations` is append-only with DELETE forbidden
+  (§12.1/D1), so "reject an approved refund" would mean deleting the reversal and
+  un-posting the Dr 1200 / Cr 2200 group. The ledger has no reversal of a
+  reversal, so the edge is not closed by a rule — it does not exist.
+
+  AT THE 0025 CHECKPOINT — no transition is reachable at all:
+
+  requested ──(INSERT only; UPDATE is revoked, §35.4)──► requested
+      │
+      └── approve / process / reject: UNREACHABLE. F11 and F12 are 0028's, and
+          §30.3.1 forbids a 0025 object from naming them (§13.2.1).
 ```
 
-| Transition | Permission | Ledger | Allocation rows |
-|---|---|---|---|
-| create `requested` | `fees.refunds.request` | **none** — a request is not a financial event | **none** — `proposed_allocations` is advisory JSON |
-| `→ approved` | `fees.refunds.approve`, **step-up MFA** (§19.8) | `Dr 1200 / Cr 2200` | **created here**, one negative row per proposed allocation, each with `refund_id = refund.id` |
-| `→ processed` | `fees.refunds.process`, **step-up MFA** | `Dr 2200 / Cr 1000` | none — the rows already exist |
-| `→ rejected` | `fees.refunds.approve` | none | none — nothing was ever written |
+| Transition | Permission | Ledger | Allocation rows | **First executable at** |
+|---|---|---|---|---|
+| create `requested` | `fees.refunds.request` | **none** — a request is not a financial event | **none** — `proposed_allocations` is advisory JSON | **`0025`** |
+| `→ approved` | `fees.refunds.approve`, **step-up MFA** (§19.8) | `Dr 1200 / Cr 2200` | **created here**, one negative row per proposed allocation, each with `refund_id = refund.id` | **`0028`** |
+| `→ processed` | `fees.refunds.process`, **step-up MFA** | `Dr 2200 / Cr 1000/1100` | none — the rows already exist | **`0028`** |
+| `→ rejected` | `fees.refunds.approve` | none | none — nothing was ever written | **`0028`** |
 
 `rejected` is terminal. A rejected refund leaves allocations untouched **because none were ever
 created** — that is the whole point of staging, and it removes an entire class of "approve then
 rollback" partial-failure state. `approved → rejected` is **rejected** (a decision is not
 reversible), so the only pre-financial branch is `requested → rejected`.
 
-**The approve transaction, in order, as a single atomic unit** (`postRefundApproval`, §19.7.2 F5):
+#### 13.2.1 What the `0025` checkpoint actually delivers, and what it deliberately does not
+
+**Read this before implementing `0025`.** The state diagram above has three edges and `0025` can execute
+**none** of them — only the `INSERT` that creates a `requested` row. That is not an oversight left for
+the implementer to discover, and it is not a half-built machine: it is the consequence of two facts
+that are each individually forced.
+
+**Fact 1 — every transition writes `fin_refunds.status`, and `school_app_rw` cannot write that column.**
+§35.4 grants `SELECT, INSERT` on `fin_refunds` and **revokes `UPDATE` table-wide**, because
+`status`, `decided_by`, `decided_at`, `processed_by`, `processed_at`, `rejection_reason`,
+`disbursement_reference` and `applied_allocations` are all server-owned (§16.4) — **eight** columns.
+That revocation is correct and is not in question —
+a caller who could `UPDATE` a refund could skip the three-permission separation and the step-up MFA
+entirely, which is the whole reason the columns are ungranted. It follows that **no transition is
+executable except through a `SECURITY DEFINER` function that owns the write**, and no such function
+exists in `0025`.
+
+**Fact 2 — the approve transition cannot be a `0025` object.** It posts a ledger group, so it needs
+**F4 `post_fin_ledger_group()`**, which `0026` creates. It verifies a step-up challenge, so it needs
+**F8 `app_consume_step_up()`**, which `0028` creates. §30.3.1 forbids a migration naming a later
+migration's object as though it existed, and plpgsql resolves a function call at plan time — so a
+`0025`-owned `postRefundApproval` would have been *created* successfully and then raised
+**`42883 undefined_function` on every single call**. The document previously specified exactly that,
+which is §36.2 row 49.
+
+**Therefore `0025` ships the refund *foundation* and `0028` ships the refund *state machine*.**
+
+| `0025` delivers | `0028` delivers |
+|---|---|
+| `fin_refunds` — the table, its two FKs, its four CHECKs, its unique keys | `postRefundApproval` (**F11**) — `requested → approved`, the whole nine-step transaction |
+| `fin_pa_refund_fk` — closes the `0024` window in which `refund_id` was unconstrained | `postRefundProcess` — `approved → processed`, `requested → rejected` (§19.7.2) |
+| `trg_fin_refund_provenance` — function **and both** bindings | step-up MFA substrate: `auth_mfa_factors`, `auth_step_up_challenges`, F7–F10 |
+| `fn_fin_refund_ceiling` as `fin_allocations_refund_ceiling` — the deferred FI-006/FI-017 ceiling | `fin_ledger_entry_groups`, `fin_ledger_entries`, F4 — already `0026`, named here only because F11 calls it |
+| the `requested` insert path, end to end | the RLS policies for `fin_refunds` (§19.4's deferred set) |
+
+**At the `0025` checkpoint, `fin_refunds` is a write-once staging table.** A `finance_staff` actor
+holding `fees.refunds.request` may `INSERT` a `requested` row and may `SELECT` it. No actor, and no
+function, may move it to any other state: the columns that would express the move are ungranted and no
+definer exists. This is **fail-closed by construction rather than by a trigger** — there is no
+`trg_fin_refund_state` that could be bypassed, because there is no state to bypass it *into*. The
+integrity that matters at `0025` is enforced by three mechanisms that are all present at `0025`:
+
+| Property | Enforced by | Live at `0025`? |
+|---|---|---|
+| `refund_id` names a real refund in the same tenant | `fin_pa_refund_fk` (the composite FK) | **yes** — this is what `0025` exists for |
+| a reversal, its target and the refund agree on the payment | `trg_fin_refund_provenance`, both bindings | **yes** |
+| per-refund completeness and per-payment `Σ refunded ≤ applied` | `fn_fin_refund_ceiling`, at `COMMIT` | **yes** |
+| `status` may only change `requested → approved → processed` / `requested → rejected` | **F11 and its siblings** | **no — `0028`** |
+
+**A `0025` test may therefore assert that a reversal allocation cannot be written against a bogus or
+cross-tenant `refund_id`, that provenance violations raise `55000`, and that the ceiling rejects an
+over-refund at `COMMIT`. It may not assert that a refund can be approved**, because no `0025` object can
+approve one, and §28.4's `refund` operation is therefore owned by `0028`, not `0025` (row 47's reasoning
+applies here with the ownership moved one migration later than that row recorded).
+
+**One thing that must not be done to make `0025` "complete": granting `UPDATE` on `fin_refunds`.** It
+would make all four transitions reachable at `0025` and would delete the separation of duties, the
+step-up requirement and the ledger atomicity guarantee in a single grant. §36.2 row 49 records that the
+alternative tried here — granting the column — was rejected for exactly this reason.
+
+#### 13.2.2 The approve transaction (a `0028` object)
+
+**`postRefundApproval` is F11 and lives in `0028`** (§19.7.2, §19.7.3). It is named here because the
+*sequence* is normative even though the function is not a `0025` deliverable; §30.3.1's rule is about
+what a migration may **create**, and prose that describes the intended order is not a migration naming
+a later object.
 
 1. `SELECT … FROM fin_refunds WHERE id = $1 AND status = 'requested' FOR UPDATE` — serialises two
    concurrent approvers; the loser reads `approved` and returns the existing result (idempotent).
 2. Verify the **step-up MFA** challenge for this refund (§19.8), unexpired, single-use, bound to
-   `(user, tenant, refund_id, amount)`.
-3. Verify the requesting actor is **not** the approver (three-permission separation, §20.1) and that
+   `(user, tenant, refund_id, amount)` — by calling **F8 `app_consume_step_up()`**, which is also
+   `0028`. Both live in the same migration deliberately: a `0025` version of this step had nothing to
+   call.
+3. Verify the requesting actor is **not** the approver (three-permission separation, §20.3) and that
    the approver holds `fees.refunds.approve`.
 4. Lock the payment row `FOR UPDATE`; recompute `payment_refundable(payment_id)` **from the rows**
    (§12.6 protocol — never from a value read before the lock).
@@ -3672,16 +6048,23 @@ reversible), so the only pre-financial branch is `requested → rejected`.
    refund_exceeds_payment`. Both map to a documented 409/422.
 6. Insert the reversal rows, each with `reversal_of_allocation_id` naming a real `apply` row on the
    same payment, `refund_id = refund.id`, `amount < 0`. `trg_fin_reversal_shape` enforces the
-   per-allocation magnitude bound and the invoice identity.
-7. Post the ledger group `Dr 1200 / Cr 2200` via `postLedgerGroup()`; a failure aborts the whole
-   transaction, so a refund is never approved without its ledger entry.
+   per-allocation magnitude bound and the invoice identity, and `trg_fin_refund_provenance` enforces
+   the three-way payment agreement. **Both are live at `0025`**, so the rows this step writes are
+   validated by `0025` machinery even though the step that writes them is `0028`.
+7. Post the ledger group `Dr 1200 / Cr 2200` via **F4 `post_fin_ledger_group()`**; a failure aborts the
+   whole transaction, so a refund is never approved without its ledger entry.
 8. `UPDATE fin_refunds SET status='approved', decided_by=…, decided_at=…, applied_allocations=…`.
+   **This and F12's two branch updates are the only `UPDATE`s on `fin_refunds` anywhere in Phase 7**
+   — three statements in two functions, both definers — and F11 performs it *as the
+   definer*, which is the entire reason F11 is `SECURITY DEFINER` and not `SECURITY INVOKER`. An
+   invoker version would raise `42501` on step 8 and could not express the state machine at all.
 9. The **deferred** trigger of §13.3.1 runs at COMMIT and verifies completeness across the whole
    refund. If it fails, the entire transaction rolls back — including the ledger posting.
 
 **Process transaction.** Locks the refund `FOR UPDATE`, verifies `status='approved'`, verifies
-step-up MFA bound to `(user, tenant, refund_id, amount)`, posts `Dr 2200 / Cr 1000`, sets
-`processed`. `processed` is terminal; there is no `processed → refund` edge and no reversal of a
+step-up MFA bound to `(user, tenant, refund_id, amount)` through F8, posts `Dr 2200 / Cr 1000/1100`
+through F4, sets `processed`. Also `0028`, and also a definer, for the same reason as step 8.
+`processed` is terminal; there is no `processed → refund` edge and no reversal of a
 processed refund (Example 4).
 
 ### 13.3 Refundable-amount bounds — enforced in the database, at COMMIT
@@ -3735,6 +6118,10 @@ DECLARE
     v_covered   numeric(19,4);
     v_tenant    uuid;
     v_refund_id uuid;
+    v_row_id    uuid;
+    v_target_id uuid;
+    v_invoice   uuid;
+    v_row_amt   numeric(19,4);
 BEGIN
     -- TG_OP, not COALESCE(NEW.refund_id, OLD.refund_id). This is a
     -- DEFERRABLE INITIALLY DEFERRED CONSTRAINT TRIGGER bound to
@@ -3742,12 +6129,24 @@ BEGIN
     -- still fires per-row and the per-row record is assigned, but the safe
     -- reading is TG_OP — COALESCE would dereference NEW first, and OLD is
     -- unassigned precisely on the INSERT that a first-of-a-refund reversal is.
+    -- The same branch also lifts the reversal's own fields, because the helper
+    -- is handed fields rather than an id (see its CONTRACT block): COALESCE(NEW.x,
+    -- OLD.x) is not an option here for the same reason, and `NEW` is not merely
+    -- null but *unassigned* on DELETE, so touching it at all would raise.
     IF TG_OP = 'DELETE' THEN
         v_tenant    := OLD.tenant_id;
         v_refund_id := OLD.refund_id;
+        v_row_id    := OLD.id;
+        v_target_id := OLD.reversal_of_allocation_id;
+        v_invoice   := OLD.invoice_id;
+        v_row_amt   := OLD.amount;
     ELSE
         v_tenant    := NEW.tenant_id;
         v_refund_id := NEW.refund_id;
+        v_row_id    := NEW.id;
+        v_target_id := NEW.reversal_of_allocation_id;
+        v_invoice   := NEW.invoice_id;
+        v_row_amt   := NEW.amount;
     END IF;
 
     IF v_refund_id IS NULL THEN
@@ -3780,7 +6179,12 @@ BEGIN
     --     Called as a bare PERFORM: the helper returns void, and wrapping a
     --     void-returning function in a FROM-clause is a syntax error. Its RAISE
     --     is the only channel it needs, so void is the right signature.
-    PERFORM trg_fin_reversal_shape_check(v_tenant, NEW.id);
+    --     The row's own fields are passed rather than its id, because at COMMIT
+    --     the helper excludes the row being checked from its own
+    --     already-reversed sum and therefore needs the id as a *value*; it
+    --     never needs to read the row back.
+    PERFORM trg_fin_reversal_shape_check(
+        v_tenant, v_row_id, v_target_id, v_invoice, v_row_amt);
 
     -- (2) FI-006 COMPLETENESS, now actually non-vacuous: this reads rows written
     --     earlier in THIS transaction, which the BEFORE INSERT version could not.
@@ -3820,10 +6224,17 @@ END $$;
 REVOKE ALL ON FUNCTION fn_fin_refund_ceiling() FROM PUBLIC;
 ```
 
-`trg_fin_reversal_shape_check(tenant, allocation_id)` is factored out of
+`trg_fin_reversal_shape_check(tenant, reversal_id, target_id, invoice_id, amount)` is factored out of
 `trg_fin_reversal_shape` as a `RETURNS void` helper so the per-allocation bound can be re-verified at
 COMMIT for every row in the transaction, not only for the row that happened to be inserted last. This
 avoids duplicating the arithmetic in two places, which is how the two copies would drift.
+
+**It takes fields rather than an id, and that is the whole point of the signature.** The `BEFORE`
+caller is validating a row that does not exist yet; a helper that looked the row up by id would find
+nothing and refuse every correction reversal, which is what the previous revision's two-argument form
+did. Passing `p_reversal_id` as a *value* is still required, because the helper excludes the row under
+test from its own already-reversed sum — that exclusion is what makes a re-check at `COMMIT`
+idempotent, and it cannot be expressed if the helper only has the target id.
 
 **The cases the deferral is required for, and what each now does:**
 
@@ -3861,10 +6272,19 @@ BEGIN
     PERFORM id FROM fin_payments
     WHERE tenant_id = NEW.tenant_id AND id = NEW.payment_id
     ORDER BY id FOR UPDATE;
+    -- Exclude the row being checked on the UPDATE path, exactly as
+    -- trg_fin_allocation_bounds does and for the same reason. NEW.id is non-null
+    -- there, so without this the row's own OLD value is inside v_held and NEW.amount
+    -- is counted twice: an existing return of -40,000 updated to -60,000 evaluates
+    -- -60,000 + (-40,000) = -100,000 < 0 and is refused with 55000, so an in-place
+    -- correction that *lowers* the return is impossible and one that *raises* it past
+    -- the ceiling is refused for the wrong reason. The bound must measure the OTHER
+    -- rows plus the pending row, never the pending row's own predecessor as well.
     SELECT COALESCE(SUM(a.amount), 0) INTO v_held
     FROM fin_payment_allocations a
     WHERE a.tenant_id = NEW.tenant_id AND a.payment_id = NEW.payment_id
-      AND a.refund_id IS NULL AND a.invoice_id IS NULL;
+      AND a.refund_id IS NULL AND a.invoice_id IS NULL
+      AND a.id <> NEW.id;
     -- a BEFORE INSERT row is not yet counted, so compare with the pending row included
     IF NEW.amount + v_held < 0 THEN
         RAISE EXCEPTION
@@ -3875,6 +6295,18 @@ BEGIN
     RETURN NEW;
 END $$;
 REVOKE ALL ON FUNCTION trg_fin_on_account_return_bounds() FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION trg_fin_pa_delete_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+    RAISE EXCEPTION 'fin_payment_allocations is append-only; DELETE is not permitted'
+        USING ERRCODE = '55000';
+END $$;
+REVOKE ALL ON FUNCTION trg_fin_pa_delete_guard() FROM PUBLIC;
+
 ```
 
 This one **is** correctly a `BEFORE INSERT OR UPDATE` trigger, unlike the refund ceiling: there is
@@ -4440,10 +6872,11 @@ CREATE UNIQUE INDEX fin_recon_payment_final_uq
     WHERE is_final;
 ```
 
-**Note the two state columns that are now closed.** `exception` is a real state here (a batch can sit
-in exception with non-zero variance and no reason), and `cancelled` carries a mandatory timestamp. The
-previous revision's `fin_recon_batch_state_ck` only constrained `completed`, which meant a batch could
-be `cancelled` with no cancellation record and a reader could not tell an abandoned batch from one
+**Note the state columns that are now closed.** `cancelled` carries a mandatory timestamp, and
+`exception` is **not** a state — it was removed by this revision, and §14.4's remediation for a
+non-zero variance is `cancelled`-and-restart, never `exception`. The previous revision's
+`fin_recon_batch_state_ck` only constrained `completed`, which meant a batch could be
+`cancelled` with no cancellation record and a reader could not tell an abandoned batch from one
 that was never started.
 
 `completion_snapshot` and `completion_hash` are written **once**; a trigger raises on any later
@@ -4459,8 +6892,12 @@ authoritative match rows, never supplied by the client, and it is included in th
 - `variance = statement_total − matched_total`.
 - `|variance| <= variance_tolerance` → `completed` directly.
 - Otherwise → the operator must set `variance_reason` (non-empty, from a tenant-configured reason
-  list) or move the batch to `exception`. **Completing with a non-zero variance and no reason is
-  rejected by CHECK.**
+  list). **Completing with a non-zero variance and no reason is rejected by CHECK.**
+- There is **no `exception` state to move the batch to** (§14.3). The correct remediation for an
+  out-of-tolerance variance is `cancel` the batch and start a new one against a corrected statement —
+  which is exactly the meaning `cancelled` was given, and exactly what T-FIN-28's `/cancel`-from-
+  `matching` requirement exists to serve. A batch cannot be "parked" in an unreconcilable state,
+  because a state with no exit is a state a batch can never leave.
 
 ---
 
@@ -5056,19 +7493,60 @@ CREATE TABLE fin_ledger_entry_groups (
     total_credit    numeric(19,4) NOT NULL DEFAULT 0,
     entry_count     integer,
     sealed_at       timestamptz,
-    posted_at       timestamptz NOT NULL DEFAULT now(),
     created_by      uuid,
     correlation_id  uuid,
     CONSTRAINT fin_leg_groups_reversal_fk
         FOREIGN KEY (tenant_id, reversal_of_group)
         REFERENCES fin_ledger_entry_groups (tenant_id, id) ON DELETE RESTRICT,
     CONSTRAINT fin_leg_groups_ten_id_uq UNIQUE (tenant_id, id),
+    -- IDEMPOTENCY (F-02). One origin group per business event per source row.
+    -- `source_type` is DELIBERATELY ABSENT from this key, and its absence is the
+    -- control: `source_type` is a *derived* column (F4 reads it from
+    -- `fin_ledger_event_types` for the given `event_type`), so a caller cannot
+    -- mint a second origin for the same invoice by relabelling the source —
+    -- `('payment','PAYMENT')` collapse to one value before the key is ever
+    -- compared. Keying on the caller's free-form `source_type` instead would
+    -- make the duplicate-suppression property a function of an untrusted string.
+    CONSTRAINT fin_leg_groups_origin_uq UNIQUE (tenant_id, event_type, source_id)
+        WHERE reversal_of_group IS NULL,
+    -- ONE REVERSAL PER TARGET (F-03). Enforced by the index, not only by the
+    -- body: two concurrent reversal transactions both pass F4's
+    -- `SELECT … FOR UPDATE` on the target, and the second one must lose here.
+    CONSTRAINT fin_leg_groups_reversal_uq UNIQUE (tenant_id, reversal_of_group)
+        WHERE reversal_of_group IS NOT NULL,
     CONSTRAINT fin_leg_groups_balanced_ck CHECK (
         sealed_at IS NULL OR (total_debit = total_credit AND entry_count IS NOT NULL)
     )
 );
+-- `posted_at` is deliberately NOT on the group. A group has no independent posting
+-- instant: it is sealed by the same statement sequence that writes its legs, and the
+-- leg rows' own `posted_at` is what every report and every aging query reads. A second
+-- timestamp on the header could disagree with its legs and there would be no constraint
+-- to say which is right.
 -- Revoke the 0001 default-privilege grant immediately (§35.4, §30.3).
 REVOKE ALL ON fin_ledger_entry_groups FROM school_app_rw;
+
+-- The closed event catalogue (F-02). `event_type` is the ONLY provenance token a
+-- caller supplies; `source_type` and the source-existence rule are looked up here,
+-- so provenance cannot be re-stated by the caller and cannot drift from the taxonomy.
+CREATE TABLE fin_ledger_event_types (
+    event_type      text PRIMARY KEY,
+    source_type     text NOT NULL,
+    source_table    text NOT NULL,
+    -- A reversal event must carry `reversal_of_group`; an origin event must not.
+    is_reversal     boolean NOT NULL,
+    -- TRUE once `source_table` physically exists. 0026 seeds only rows whose table
+    -- is created at or before 0026; 0027/0028 append their own rows in the same
+    -- owner-only DDL that creates the table. This is how 0026 avoids a forward
+    -- reference to a `0027` relation while still refusing an unverifiable source.
+    source_exists   boolean NOT NULL DEFAULT true,
+    CONSTRAINT fin_ledger_event_types_ck CHECK (
+        (is_reversal AND source_type LIKE '%.reversal') OR
+        (NOT is_reversal AND source_type NOT LIKE '%.reversal')
+    )
+);
+REVOKE ALL ON fin_ledger_event_types FROM school_app_rw;
+REVOKE ALL ON fin_ledger_event_types FROM PUBLIC;
 
 
 
@@ -5144,11 +7622,38 @@ independent source, and an unconstrained denormalised column is the opposite.
 
 ### 16.1 Currency
 
-**Single currency per tenant.** `fin_tenant_settings.currency char(3) NOT NULL DEFAULT 'PKR'`,
-`CHECK (currency = upper(currency) AND char_length(currency) = 3)`. `fin_payments.currency` and
-`fin_invoices.currency` are **copies pinned at creation** by trigger — a settlement from a historic
-year must keep its original currency even if the school later changes the default (which is itself
-out of scope: changing `fin_tenant_settings.currency` is blocked once any invoice exists).
+**Single currency per tenant**, and the *tenant* column is the only one with a CHECK. The three
+currency columns are **not** the same shape, and this section previously described them as if they
+were — it wrote `fin_tenant_settings.currency char(3) NOT NULL DEFAULT 'PKR'` with a
+`CHECK (currency = upper(currency) AND char_length(currency) = 3)` that **no statement in this
+document creates**. The actual shapes, asserted against the DDL rather than remembered:
+
+| Table | Column | Applied by | Type | CHECK |
+|---|---|---|---|---|
+| `fin_tenant_settings` | `currency` | **0021 (applied)** | `text NOT NULL DEFAULT 'PKR'` | `CHECK (currency IN ('PKR'))` |
+| `fin_payments` | `currency` | 0024 | `char(3) NOT NULL DEFAULT 'PKR'` | **none** |
+| `fin_invoices` | — | — | **no currency column at all** | — |
+
+Two consequences, and the second is the one an implementer must not miss. First, the tenant CHECK is
+an **allowlist of one value**, not a format check: it rejects `'pkr'` and `'PKR '` because they are
+not `'PKR'`, which is stronger than any `upper()`/`char_length` pair would be, and it also rejects
+every future currency until the CHECK is widened — that is the deliberate cost of the
+"new value, not a type change" property 0021's comment asks for. `fin_payments.currency` is
+deliberately **unconstrained**: it is a per-row *copy*, and a CHECK there would re-assert the tenant
+default at the wrong level. Second, **`fin_invoices` has no `currency` column**, so the claim that
+invoice amounts are currency-pinned rests on the tenant row alone, not on a per-invoice copy. That
+is a real weakening of the original intent and it is recorded here rather than papered over: a
+settlement from a historic year cannot keep its own currency because the invoice never stored one.
+Adding `fin_invoices.currency char(3)` is a one-column change to 0023 if the owner wants the
+stronger guarantee; it is **not** added unilaterally, because it would make every invoice column
+list in §16.5.1 and the `0028` grant block stale the moment it landed. The trigger that would pin
+it is likewise absent, and the absence is the documented state, not an oversight.
+
+**Changing the default is blocked once any invoice exists**, so a pinned copy is a belt-and-braces
+property rather than the mechanism: `fin_tenant_settings.currency` is a single row per tenant and
+0021 gives it no update guard, which means the block is a **stated policy with no enforcement
+point**. If the owner wants it enforced, the constraint belongs in 0028 as a trigger on
+`fin_tenant_settings`, and that is an open decision rather than a done one.
 
 **No FX.** No exchange rates, no multi-currency invoices, no rounding of converted amounts. The
 `currency` column exists so that a future FX layer is additive, exactly as `FINANCE_DESIGN.md:90`
@@ -5223,13 +7728,38 @@ cache is stored, it is trigger-maintained from the authoritative rows and reconc
 
 Cached (trigger-maintained, never client-written):
 
-| Table | Cached columns | Authoritative source |
-|---|---|---|
-| `fin_invoices` | `subtotal`, `total`, `amount_paid`, `amount_refunded`, `amount_credited`, `balance` | `fin_invoice_items` + `fin_invoice_adjustments` + `fin_payment_allocations` |
-| `fin_invoices` | `status`, `paid_at` | derived from `balance` |
-| `fin_challans` | `status` | owning invoice's `status` and derived `balance` (§10.2, including `void`) |
-| `fin_reconciliation_matches` | `is_final` | batch status |
-| `fin_refunds` | `applied_allocations` | the reversal rows carrying `refund_id` (§13.2) |
+| Table | Cached columns | Authoritative source | Writer | Migration |
+|---|---|---|---|---|
+| `fin_invoices` | `subtotal`, `total` | `fin_invoice_items` + **APPROVED** `fin_invoice_adjustments` | `trg_fin_invoice_item_total` (§9.6.2) | 0023 |
+| `fin_invoices` | `balance` | items + **APPROVED** adjustments + tax − `fin_payment_allocations` | `fin_invoice_reapply_derived_state` (§12.4.1) | **0024** |
+| `fin_invoices` | `status` (the payment states), `paid_at` | derived from `balance` **and `total`** | `fin_invoice_reapply_derived_state` (§12.4.1) | **0024** |
+| `fin_invoice_items` | `amount` | `quantity * unit_amount`, §16.3 rounding | `trg_fin_invoice_item_amount` (§9.6.2) | 0023 |
+| `fin_invoice_items` | `frozen_at` | the moment the parent left `draft` | `trg_fin_invoice_freeze_lines` (§9.6.0.1) | 0023 |
+| `fin_invoices` | `invoice_no`, `issued_at` | `fin_document_counters` | `trg_fin_invoice_number` (§9.6.1) | 0023 |
+| `fin_invoices` | `due_date` (when not caller-supplied) | `fin_installment_plans.due_on`, else `fin_fee_structures.effective_from` | `trg_fin_invoice_header_guard` (§9.6.0) | 0023 |
+| `fin_invoices` | `voided_at` | the voiding transaction | `trg_fin_invoice_void` (§9.3.1) | **0024** |
+| `fin_challans` | `status` | owning invoice's `status` and derived `balance` (§10.2, including `void`) | `trg_fin_challan_status` (§10.2) derives it on the challan's own write; **`trg_fin_challan_refresh` (§10.2.1, row 8a) is what makes it current**, and the two are **one writer of the value and one writer of the opportunity** — row 8 is the only code that assigns the column, and row 8a is the only thing that causes row 8 to run after issue | **0024** |
+| `fin_reconciliation_matches` | `is_final` | batch status | §14.2 | 0027 |
+| `fin_refunds` | `applied_allocations` | the reversal rows carrying `refund_id` (§13.2) | §13.3.1 | 0025 |
+
+**Three things this table now says that the previous revision's did not**, each of which is a row that
+had a cached value and no writer:
+
+1. **A writer and a migration for every entry.** The previous revision listed cached columns and
+   authoritative sources and left the implementation unnamed, which is what C-9 found: `paid_at`
+   appeared in §16.5 as a cache with no column in §9.1's DDL and no function writing it anywhere in
+   the document. Adding a *Writer* and a *Migration* column makes that class of omission visible at
+   review time, because a cell that cannot be filled is a gap rather than an omission.
+2. **The 0023/0024 split is visible in one place.** Five of these writers are 0024, and the reason is
+   the same for all five: they need `fin_payment_allocations` or `fin_v_invoice_balance`, which 0024
+   creates (C-1, C-2). A reader checking "what does 0023 actually do" now reads this table instead of
+   inferring it from seven function bodies.
+3. **`amount` on a line is listed as a cache, which it is.** §9.1 declares it
+   `numeric(19,4) NOT NULL` with no default, and §9.6.2's `trg_fin_invoice_item_amount` computes it in
+   a BEFORE trigger. Under §16.4's derived-before-stored rule it is not a caller input at all, and
+   listing it here rather than in §16.4's "always derived, never stored" discussion is deliberate: it
+   *is* stored, and the question this table answers is who may write it (§16.5.1: nobody but the
+   trigger).
 
 **`fin_payments.status = 'reversed'` is removed from this table (P1-01).** The row asserted a cached
 column that §11.1 explicitly forbids: `fin_payments.status` is
@@ -5258,7 +7788,17 @@ Integrity strategy — three layers, all mandatory:
 1. **Trigger recomputation.** Every mutation of an authoritative row recomputes the affected caches
    in the same transaction. No cache is ever written from a supplied value.
 2. **Nightly `fin_recompute`.** Recomputes all caches from authoritative rows and writes
-   `fee.reconciliation.drift` audit rows on mismatch. Also cross-checks FI-009 (§15.3).
+   `fee.reconciliation.drift` audit rows on mismatch. Also cross-checks FI-009 (§15.3). **It does
+   not repair a drifted cache by `UPDATE`ing the header directly**, and this revision states why
+   where it used to leave it implicit: §9.6.0 clause (2) refuses a directly-issued header `UPDATE`
+   of a server-owned column at `pg_trigger_depth() = 1` for *every* role, `school_migrator`
+   included, so a reconciler that wrote `subtotal`/`balance` itself would fail 55000. It repairs by
+   **re-firing the bound maintenance path through the authoritative rows** — touching the line,
+   adjustment or allocation whose derivation is wrong — which is both the only route the design
+   permits and the better engineering answer, because the reconciler then exercises the same code
+   the application does instead of a second, independently editable copy of the arithmetic. The
+   drift row is still written from its own comparison, so a reconciler that cannot find an
+   authoritative row to touch still reports rather than silently doing nothing.
 3. **Gated property test.** A randomised 10,000-operation test (§28, and the roadmap's own Phase 7
    acceptance criterion) asserts, after every operation, that every cache equals its derivation.
 
@@ -5266,21 +7806,265 @@ Integrity strategy — three layers, all mandatory:
 the direct answer to the brief's "do not create mutable duplicate counters without a documented
 integrity strategy."
 
+#### 16.5.1 The column-level grant list (C-SEC) — the part that makes the table above true
+
+**The hole C-SEC closes.** In the previous revision, `school_app_rw` held table-level `UPDATE` on
+`fin_invoices`, `fin_invoice_items` and `fin_invoice_adjustments` (§35.4). Table-level UPDATE grants
+**every** column, so the runtime role could write `subtotal`, `total` and `balance` directly, and the
+triggers that maintain them were decoration. `trg_fin_invoice_item_total` computes `total` in an AFTER
+trigger and the caller has already supplied a wrong one by then; nothing compares the two. The
+integrity strategy above is a three-layer defence against a *bug*, and none of the three layers is a
+defence against a caller who simply supplies the answer. This is the hole, and the fix is to grant
+columns, not tables.
+
+**The rule.** `school_app_rw` holds **no table-level `INSERT`/`UPDATE`/`DELETE` on any table with a
+cached column.** It holds `SELECT` at table level (RLS scopes it, §19.2) and `INSERT`/`UPDATE`/
+`DELETE` **by explicit column list** on exactly the columns it owns. Anything not in a list is not
+writable by the application, by a bug, or by a compromised route handler. `school_app_rw` holds
+**no `DELETE`** on any of these three tables at all, so the delete rows below are stated for
+completeness rather than granted.
+
+**`INSERT` and `UPDATE` are separate grants, and they must be issued separately.** PostgreSQL's
+grammar accepts `GRANT SELECT, INSERT, UPDATE (a, b) ON t TO r` and applies the column list *only
+to `UPDATE`* — `INSERT` and `SELECT` remain table-level. The previous revision wrote exactly that
+form for all three tables, so the column list looked like it protected `amount`, `subtotal` and
+`total` on insert while in fact granting the runtime role every column on every insert. A column-level
+`INSERT` is the only thing that prevents a caller from *supplying* a cached value at creation, which
+is the case that matters most: `INSERT INTO fin_invoices (total) VALUES (0)` on a fresh invoice is
+the exact hole C-SEC describes, and it is not closed by any `UPDATE` list. Each table below therefore
+states three separate statements.
+
+`fin_invoices` — columns are `tenant_id, student_id, academic_year_id, enrollment_id, structure_id,
+invoice_no, status, issued_at, due_date, subtotal, total, balance, paid_at, voided_at, void_reason,
+created_by, created_at, updated_at`:
+
+| Operation | Columns granted to `school_app_rw` | Not granted, and why |
+|---|---|---|
+| `SELECT` | all (RLS-scoped) | — |
+| `INSERT` | `tenant_id, student_id, academic_year_id, enrollment_id, structure_id, due_date, void_reason, created_by` | `subtotal`, `total`, `balance` — caches (§16.5); `invoice_no`, `issued_at`, `paid_at`, `voided_at` — trigger-maintained; `status` — `DEFAULT 'draft'`, and granting it would let a caller *insert* an already-issued invoice and skip the issue route entirely; `id`, `created_at`, `updated_at` — column `DEFAULT`s |
+| `UPDATE` | `status`, `due_date` (draft only, per §9.6.0), `void_reason` | `subtotal`, `total`, `balance` — caches; `invoice_no`, `issued_at`, `paid_at`, `voided_at` — stamps; `tenant_id`, `student_id`, `academic_year_id`, `enrollment_id`, `structure_id`, `created_by` — identity, immutable (§9.4.1) |
+
+**The exact exception to "not granted", because a grant list without one is read as absolute.** The
+seven columns in that right-hand cell are ungranted to `school_app_rw` **and refused on direct
+`UPDATE` by every role**, and the phase still writes five of them. The complete set of routes that
+may move a server-owned `fin_invoices` column is this table, with no others:
+
+| Column(s) | The only writer | Maintenance scope it requires | Depth | Written in |
+|---|---|---|---|---|
+| `subtotal`, `total` | `trg_fin_invoice_item_total` (§9.6.2) | `'invoice_line_totals'` | ≥ 2 | 0023 |
+| `balance`, `paid_at` | `fin_invoice_reapply_derived_state` (§12.4.1) | `'invoice_balance_state'` | ≥ 2 | **0024** |
+| `invoice_no`, `issued_at` | `trg_fin_invoice_number` (§9.6.1) — **assigns `NEW`**, issues no statement | *none — no maintenance scope can reach these* | n/a | 0023 |
+| `voided_at` | `trg_fin_invoice_void` (§9.3.1) — **assigns `NEW`**, issues no statement | *none — no maintenance scope can reach these* | n/a | **0024** |
+
+The last two rows are the reason §9.6.0 clause (2) refuses the identity triple in *every* branch
+rather than in a fourth scope: those columns are only ever assigned to `NEW` inside a `BEFORE`
+trigger, so no legitimate maintenance write exists that would need to name them, and adding a scope
+that could would be adding a route to a number that must be unique and sequential. `due_date` is
+absent from this table because it is not server-owned in the sense this table means — it is
+caller-supplied on `INSERT` (§9.6.0), derived when omitted, and immutable once the invoice leaves
+draft (§9.6.0 clause (3)).
+
+Two consequences worth stating because a reader will otherwise ask:
+
+* **No cache is writable by `INSERT`.** The header guard's `INSERT` branch (§9.6.0 clause (1))
+  overwrites `subtotal`/`total`/`balance`/`paid_at` from the record rather than trusting the
+  caller's values or the column `DEFAULT`, so even a route that listed them in its column list would
+  have its values discarded. The `DEFAULT`s are a safety net for direct SQL, not an authorization.
+* **`status` is granted on `UPDATE` but is still the service's business.** It is the transition the
+  application drives (§9.2, §9.3, §35.6) and it is granted so the route can drive it; what makes it
+  safe is not the grant but the guards that constrain the *destination* — §9.6.0 clause (3) on
+  `due_date`, `trg_fin_invoice_number` for `draft ⟺ no number`, `trg_fin_invoice_void` for
+  `paid → void` (0024), and `fin_invoice_reapply_derived_state`'s rule that a draft is never settled
+  by a balance recompute (§12.4.1). 0024's helper does write `status`, under
+  `'invoice_balance_state'` and only for the payment states, which is why §9.6.0 clause (2) governs
+  `balance`/`paid_at` on the 0024 path and leaves `status` outside its own guard entirely.
+
+`fin_invoice_items` — columns are `tenant_id, invoice_id, structure_id, installment_no, fee_head_id,
+description, quantity, unit_amount, amount, tax_amount, frozen_at, created_at`:
+
+| Operation | Columns granted | Not granted |
+|---|---|---|
+| `SELECT` | all | — |
+| `INSERT` | `tenant_id, invoice_id, structure_id, installment_no, fee_head_id, quantity, unit_amount, tax_amount, description` | `amount` — derived by `trg_fin_invoice_item_amount` in a `BEFORE` trigger (§9.6.2), which is why it needs no definership and no privilege: a column the role cannot insert cannot be supplied wrong; `frozen_at` — stamped at issue; `id`, `created_at` — `DEFAULT` |
+| `UPDATE` | `description` only | everything else; §9.4.1 freezes the row and the freeze also refuses a direct `amount` write |
+| `DELETE` | none | §35.5 records no delete route; `frozen_at IS NOT NULL` after issue |
+
+**`installment_no` is granted, and granting it is safe, because the FK is the check.** A caller may
+name an installment, but `fin_invoice_items_plan_fk` refuses any value that is not a real plan row of
+that structure, and `NULL` is accepted only for a plan-less structure — which is precisely the
+generator's own two-branch rule (§9.5). The alternative, refusing the column, would break the
+multi-installment case C-7 exists to support.
+
+`fin_invoice_adjustments` — columns are `tenant_id, invoice_id, adjustment_type, amount, reason,
+requested_by, reverses_adjustment_id, status, approved_by, approved_at, rejected_reason, created_at`:
+
+| Operation | Columns granted | Not granted |
+|---|---|---|
+| `SELECT` | all | — |
+| `INSERT` | `tenant_id, invoice_id, adjustment_type, amount, reason, requested_by, reverses_adjustment_id` | `status` — `DEFAULT 'pending'`; `approved_by`, `approved_at`, `rejected_reason` — the approval transition, which only `trg_fin_invoice_adjustment_approval` performs (§9.6.2); `id`, `created_at` — `DEFAULT` |
+| `UPDATE` | `status, approved_by, approved_at, rejected_reason` — **and nothing else** | the eight columns above |
+| `DELETE` | none | §9.4.1; a rejected adjustment is a permanent record (§9.5.1) |
+
+**`amount` is granted on `fin_invoice_adjustments`, unlike its namesake on `fin_invoice_items`, and
+the asymmetry is deliberate.** An adjustment's amount *is* the request — a concession is defined by
+what it gives away — and it is signed by `fin_invoice_adjustments_sign_ck`, which fixes the allowed
+sign per type. An invoice line's `amount` is the opposite case: it is derived from `quantity ×
+unit_amount` and granting it would let a route send a total that disagrees with its own factors.
+"Amount is cached" and "amount is input" are different properties, and the grant list is where the
+difference becomes visible.
+
+This is the narrowest UPDATE that makes §9.6.2's approval trigger reachable: the route calls `UPDATE
+fin_invoice_adjustments SET status = 'approved', approved_by = $1 WHERE id = $2`, holds privilege on
+those four columns, and the trigger forbids every other field from having changed. The grant is the
+boundary; the trigger is the reason the boundary is not an accident.
+
+#### 16.5.2 Why four functions, and not one table-level grant (C-SEC)
+
+The question C-SEC raises is: if cached columns are not granted, does every trigger that writes one
+have to be `SECURITY DEFINER`? **No**, and the distinction is the single most important thing to get
+right here, because the previous revision asserted the opposite in one comment (`-- C-SEC: SECURITY
+DEFINER, one of exactly three trigger functions`) while writing `SECURITY INVOKER` in the adjacent
+body — and then was right about `trg_fin_invoice_void` for the wrong reason.
+
+**The rule, stated as one sentence: a function needs `SECURITY DEFINER` if and only if it issues a
+statement of its own that the caller could not have issued — because it writes a column the caller
+cannot write, reads a table whose RLS scoping would return an empty set for an under-privileged
+reader, or takes a row lock on a table for which the caller holds no `UPDATE` privilege. Assigning to
+`NEW` does not count, and neither does delegating to a callee that itself holds no privilege: the
+elevation belongs on the bound function and the unbound callee inherits it.**
+
+**The inheritance clause has a boundary, and the boundary is a third case rather than a fourth
+reading of the same one.** Where the bound caller **is** a definer, an unbound callee inherits its
+context and stays `SECURITY INVOKER` — row 4 below, whose `PERFORM`ed helper
+`fin_invoice_reapply_derived_state` (§12.4.1) does exactly that. Where the bound caller is
+`SECURITY INVOKER` **and** holds no `UPDATE` privilege on the table the callee must lock, there is no
+elevation to inherit, and the elevation must sit on the unbound callee itself. That is the
+`fin_lock_payment_amount` case (§13.1.1, D2C): its two callers
+`trg_fin_allocation_bounds` and `trg_fin_on_account_return_bounds` are both `SECURITY INVOKER`, so a
+`SELECT … FOR UPDATE` on `fin_payments` delegated to them would fail for lack of privilege rather
+than succeed quietly — which is why the support function is a definer while the strict §35.3.1
+helpers are not. The two categories are named separately in §19.7.2 for exactly this reason: a
+caller's context is inherited only when the caller has one to give.
+
+* A trigger that only assigns `NEW` runs under the invoking role, and the invoking role already holds
+  privilege on the columns **its own statement named**. `trg_fin_invoice_void` sets
+  `NEW.voided_at`; the caller's statement named `status` and `void_reason`, which it holds. The
+  assignment needs no further privilege.
+* A trigger that issues its **own** `UPDATE` is a writer in its own right, checked against the
+  *function's* effective role. `UPDATE fin_invoices SET total = …` inside `trg_fin_invoice_item_total`
+  is a statement the caller did not write, and `total` is not granted — so it must be a definer.
+
+**Timing is a red herring, and this is where the previous revision went wrong in both directions.** It
+is tempting to say "AFTER needs definership, BEFORE does not", and that rule gives the right answer for
+`trg_fin_invoice_void` and `trg_fin_invoice_item_total` — but for the wrong reason. `AFTER UPDATE` on
+`fin_invoice_items` that merely *recomputed* a `NEW` column would still need nothing; and a `BEFORE`
+trigger that issued its own `UPDATE` would need definership even though it is a `BEFORE`. Row 4a is
+exactly that case, and it is why the rule is stated about statements rather than about timing.
+
+So exactly **five** functions need `SECURITY DEFINER`, **all five of them bound**, and §19.7.2's F5d
+row says five and names them. **The count is checkpoint-scoped and the table below carries the
+migration column for that reason**: three of the five belong to `0023`, so `0023` asserts **3**
+(C-SEC-M4a) and `0024` asserts **5** (C-SEC-M4b) — §35.3.2 re-derives both. An unscoped "exactly five"
+in a `0023` test would be asserting a row that does not exist yet:
+
+| # | Function | Bound? | Migration | Why it needs definer |
+|---|---|---|---|---|
+| 1 | `trg_fin_invoice_number` (row 4) | yes | 0023 | its own `UPDATE fin_document_counters`; §35.4 revokes UPDATE on the counters |
+| 2 | `trg_fin_invoice_freeze_lines` (row 4d) | yes | 0023 | its own `UPDATE fin_invoice_items SET frozen_at` — the header guard's former clause (6), moved (§9.6.0.1) |
+| 3 | `trg_fin_invoice_item_total` (row 6) | yes | 0023 | its own `UPDATE fin_invoices SET subtotal, total` |
+| 4 | `trg_fin_invoice_balance_recompute` (row 13) | yes | 0024 | its `PERFORM`ed callee runs in **its** context, so it supplies the elevation |
+| 5 | `trg_fin_challan_refresh` (row 8a) | yes | 0024 | its own `UPDATE fin_challans SET status`; §35.4 grants nobody UPDATE on `fin_challans` (§10.2.1, P0-07) |
+
+**The rule did not change, and that is the point of showing it.** Row 2 used to be
+`trg_fin_invoice_header_guard`, and it was a definer for exactly one clause. Moving that clause into
+its own function did not require amending this rule, re-deriving a new one, or arguing about timing:
+§16.5.2's rule said "issues a statement of its own" → the guard stopped issuing one → INVOKER; the
+stamp kept issuing one → DEFINER. **The whole-phase count stayed at four through that move** and only
+the membership changed — while `0023`'s own share stays at three throughout — and P0-07's
+`trg_fin_challan_refresh` (row 8a) later made it five. A rule
+that has to be re-litigated every time a function moves is not a rule, and the fact that this one
+was not re-litigated is the evidence that it is the right rule.
+
+**Row 4 is the one that is easy to get backwards, and row 2 is the one that is easy to get backwards
+in the other direction.**
+
+Row 13 issues no `UPDATE` itself — it only decides which invoices to reapply — so a reader applying
+the "own statement" rule mechanically would classify it `SECURITY INVOKER`. It is a definer anyway,
+because its callee `fin_invoice_reapply_derived_state` is `SECURITY INVOKER` and therefore executes
+as **row 13's** role; were row 13 an invoker, the callee's `UPDATE fin_invoices SET balance, status,
+paid_at` would run as `school_app_rw` and fail 42501 on the first allocation. The elevation lives at
+the boundary, on the bound function, and the unbound helper inherits it. The previous revision marked
+*both* a definer, which also works and is one elevation too many for a function whose uuid signature
+is directly callable from SQL.
+
+Row 2 is the mirror image: a `BEFORE` trigger that only assigned `NEW` would be an invoker, and
+`trg_fin_invoice_void` is exactly that. Row 4d issues its own `UPDATE fin_invoice_items SET
+frozen_at` on a column §16.5.1 does not grant — so it is a definer, and "BEFORE triggers are
+invokers" is the wrong rule to carry in one's head.
+
+**Row 4a is now an invoker, and the reason is worth more than the row.**
+`trg_fin_invoice_header_guard` used to be F5d's second member *solely* because of clause (6). With
+clause (6) moved to row 4d it assigns only `NEW` — the cache zeroing, the `due_date` derivation and
+the two refusals — so §16.5.2's rule makes it INVOKER and it has moved down into F5.
+
+That is not a tidiness change, and the reason matters more than the count staying unchanged.
+Definership would set `current_user` to `school_migrator` for **every** caller, and §9.6.0 clause (2)'s
+whole job is to distinguish the runtime role's own `UPDATE` from a maintenance writer's nested one. A
+definer guard cannot tell them apart, because `SECURITY DEFINER` changes the effective role of the
+*body* and does not stop the trigger from running for the caller's statement — the refusal would be
+evaluated identically for both. C-SEC-M4a (§28.3.1) asserts the guard is `SECURITY INVOKER` in
+`pg_proc.prosecdef`, so a later edit that helpfully "restores" definership fails the suite rather
+than silently collapsing the distinction.
+
+**The count is five and not two**, which is the answer to the obvious objection that this is a lot of
+elevated code for a cache. The alternative is a table-level `GRANT UPDATE`, and that hands every
+future column to the runtime role by default — including any column added later without anyone
+reconsidering it. Five narrow definer functions, each of which a static test pins by name, is the
+smaller surface.
+
+Every other Phase 7 trigger function is `SECURITY INVOKER`, including `trg_fin_invoice_void`,
+`trg_fin_invoice_item_amount`, `trg_fin_invoice_items_freeze`,
+`trg_fin_invoice_adjustment_approval`, `trg_fin_challan_status` and all six payment/refund/receipt
+functions. Each needs `EXECUTE` — a trigger function needs it to fire — and none needs an elevated
+privilege, because each either assigns only to `NEW` or issues no statement of its own.
+`trg_fin_invoice_freeze_lines` is the one that did not use to be an invoker under a different name,
+and the table above says why.
+
+**Each definer function is owned by `school_migrator`, has `search_path = pg_catalog, public,
+pg_temp`, has `ALL` revoked from `PUBLIC`, and has `EXECUTE` granted only to `school_app_rw`.** §19.7.2
+carries the row-by-row contract; §35.4 carries the `GRANT`s. The reason a definer is needed at all for
+the counters is worth stating, because it is the case that is not obvious: §35.4 revokes `UPDATE` on
+`fin_document_counters` *deliberately*, so that the only way to advance a counter is through
+`trg_fin_invoice_number`. Under `SECURITY INVOKER` that function would inherit the caller's
+privileges and its own `UPDATE` would fail 42501 on the first invoice issued. The revoke is the
+control; the definer is what makes the control reachable.
+
 ### 16.6 Sign and negative-value discipline
 
 | Value | Sign rule |
 |---|---|
-| `fin_invoice_items.amount` | `>= 0` (a line is a charge) |
-| `fin_invoice_adjustments` | **signed**; the row stores `amount` plus `direction`, so a credit is a positive magnitude with `direction='credit'` and the sign is derived — never a negative stored amount |
+| `fin_invoice_items.amount` | **`> 0`** (a line is a charge). C-10 tightened this from `>= 0`: zero is a mistake or a placeholder, and a `DELETE` of the line expresses both better than a zero row. DDL: `fin_invoice_items_amount_ck CHECK (amount > 0 AND amount = round(amount, 2))` |
+| `fin_invoice_adjustments.amount` | **signed, one column.** There is **no `direction` column** (C-5): a credit is a **negative** `amount`. The previous version of this row described an `amount`/`direction` pair that no statement in this document creates |
 | `fin_payment_allocations.amount` | signed; positive = applied, negative = reversed (CHECK-enforced by `effect`) |
 | `fin_payments.amount` | `> 0` (a payment is an inflow) |
 | `fin_refunds.amount` | `> 0` (an outflow magnitude) |
 | `fin_ledger_entries.amount` | `> 0` with explicit `direction` |
 | **balances** | `>= 0` (FI-015) — except `invoice_balance` on a fully-credited invoice, which may be **negative** (credit in excess of charge); that is a legitimate over-credit state and is reported as such, not clamped |
 
-Adjustments store a direction rather than a negative amount because a bare `amount < 0` in a column
-also declared `CHECK (amount >= 0)` is a contradiction the brief's §9 originally created. Direction is
-explicit; sign is derived exactly once, in the balance formula.
+**This section previously contradicted the DDL, and the DDL is right.** The earlier text claimed
+adjustments store a positive magnitude plus a `direction` column. Applied 0021 created neither, and
+the 0023 DDL creates neither: `fin_invoice_adjustments` has **no `direction` column**, and its CHECK
+enforces the *sign* directly. The original instinct behind a `direction` column — that a column
+cannot be both `CHECK (amount >= 0)` and hold negative values — is real, but the fix is to pick
+**one**: this design dropped the `>= 0` CHECK on adjustments and lets `amount` carry the sign, so the
+contradiction is resolved by removal rather than by a second column. `trg_fin_invoice_item_total`'s
+`total = v_sub + v_adj + v_tax` is a bare `SUM` over `amount`, and it is correct **only** because the
+sign is already in the column (C-5).
+
+**`fin_ledger_entries` is the opposite case and keeps its `direction`.** That table genuinely has
+both `amount > 0` and `direction IN ('debit','credit')`, because `post_fin_ledger_group` balances
+debits against credits and the pair is the accounting primitive. The two tables are deliberately
+unlike, and conflating them is what produced the earlier error.
 
 ### 16.7 The authoritative money-field register
 
@@ -5297,7 +8081,7 @@ from `stored-authoritative` rows by the named formula), `derived-view` (never st
 | # | Field | Kind | Authoritative source / formula | Sign | Who writes it | Who reverses it | Ledger leg | Used in reporting | Immutable? |
 |---|---|---|---|---|---|---|---|---|---|
 | 1 | `fin_invoice_items.amount` | stored-authoritative | itself | `≥ 0` | `fees.invoices.create`, at issue | never reversed — a line is removed only by voiding the whole invoice | via `invoices.total` | fee-head revenue, invoice detail | yes once issued (FI-010) |
-| 2 | `fin_invoice_adjustments.amount` | stored-authoritative | itself, with `direction` | `> 0` magnitude; **sign is `direction`-derived** | `fees.adjustments.create` / `.approve` | a reversal is a **new opposite-direction row** with `reverses_adjustment_id`; never an `UPDATE` | via `invoices.total` | concession/fine reporting, net-fee reports | append-only |
+| 2 | `fin_invoice_adjustments.amount` | stored-authoritative | **itself, signed**; no `direction` column (C-5) | **signed**; a credit is negative. DDL: `CHECK (amount <> 0)` | `fees.adjustments.create` / `.approve` | a reversal is a **new opposite-direction row** with `reverses_adjustment_id`; never an `UPDATE` | via `invoices.total` | concession/fine reporting, net-fee reports | append-only |
 | 3 | `fin_invoices.subtotal` | cached-derived | `Σ fin_invoice_items.amount` | `≥ 0` | trigger only | recompute | no direct leg | invoice detail | recomputable, not a fact |
 | 4 | `fin_invoices.total` | cached-derived | `subtotal` + signed `Σ adjustments` (FI-001) | `≥ 0` unless over-credit | trigger only | recompute | **yes** — the receivable | AR aging, AR reports, revenue | **the** invoice money fact once issued; frozen at issue |
 | 5 | `fin_invoices.balance` | cached-derived | `total − Σ allocations.amount` for the invoice (FI-002) | `≥ 0` except over-credit | trigger only | recompute | no direct leg | **every** balance-bearing report and the portal | recomputable |
@@ -5316,7 +8100,7 @@ from `stored-authoritative` rows by the named formula), `derived-view` (never st
 | 18 | `fin_fee_installment_plans.due_on` | not money, but paired | — | — | `fees.structures.manage` | new version | no | due-date calendars | immutable after publish |
 | 19 | `fin_reconciliation_batches.variance_amount` | cached-derived | `statement_total − matched_total` at completion | signed (either direction) | trigger at completion | never; a batch is immutable once completed (FI-018) | no | reconciliation summary | sealed at completion |
 | 20 | `fin_billing_run_items.amount` | stored-authoritative (a **trace**, not a fact) | the amount the run resolved, copied so a run is replayable | `≥ 0` | billing run only | never | no | billing-run audit, dispute resolution | **immutable** — it is the record of what was decided, not of what is owed |
-| 21 | `fin_tenant_settings.currency` | stored-authoritative | itself | n/a | `school_owner` | never | n/a | every report header | blocked from changing once any invoice exists (§16.1) |
+| 21 | `fin_tenant_settings.currency` | stored-authoritative | itself | `text`, `CHECK (currency IN ('PKR'))` | `school_owner` | **never in policy, unenforced in SQL** | n/a | every report header | intended to be blocked from changing once any invoice exists (§16.1), but 0021 gives this row no update guard and 0028 creates none — an `UPDATE` would succeed, so this cell is a **policy**, not a control, until a trigger enforces it |
 
 **Four properties this table exists to establish, stated as findings:**
 
@@ -5367,16 +8151,33 @@ unique index; `view` = a published view; `—` = not enforceable in the database
 | FI-017 | no double refund |
 | FI-018 | no double reconciliation |
 | FI-019 | receipt integrity (issued once, immutable, provably against its payment) |
+| FI-020 | cache-writer exclusivity (a server-owned column is writable only from inside a trigger, and only by the writer that owns it) |
+| FI-021 | **the on-account residual is non-negative and is the residual** — `payment_unallocated` is a function of `p.amount`, the signed allocation sums and the two `<= 0` return terms, never a row sum, and never negative |
+| FI-022 | **step-up consumption and the refund outbox event are paired** — every `auth.step_up.consumed` row for `action='refund.approve'` has exactly one `fee.refund.approved` outbox event carrying the same `refund_id`, and there is no orphan in either direction |
+
+**FI-021 and FI-022 were cited before they existed, and this table is the fix.** Both were named in
+the body — FI-021 at §12.3 as "the regression test" for the P0-07 on-account formula, FI-022 at
+§19.8.4 and again in §19.6's split between textual and behavioural RLS assertions — while this
+catalogue stopped at FI-020 and §28's coverage row claimed `FI-001…FI-020`. **A citation with no
+target is the same defect class as §8.7.2's dangling subsection reference and §35.3's stale count,
+and it is worse here**, because these two are not incidental: FI-021 is the regression test for a
+P0-class money bug and FI-022 is the only thing asserting that a step-up MFA challenge cannot be
+spent without the corresponding financial event landing in the outbox. An unenforced invariant with a
+number attached reads as enforced. **The rows now exist; §28's coverage claim is extended to
+`FI-001…FI-022`; and `R29′` below is the check that would have caught this**, because §36.1 had a
+contiguity check for `T-FIN-n` ids and **none for `FI-n` ids**, which is precisely the hole a
+catalogue-row check would close.
 
 ---
 
 **FI-001 — Invoice total**
 
-*Formal:* `invoice_total(i) = Σ fin_invoice_items.amount − Σ credit_adjustments + Σ debit_adjustments`,
-where a credit adjustment has `direction='credit'` and a debit adjustment `direction='debit'`.
+*Formal:* `invoice_total(i) = Σ fin_invoice_items.amount + Σ fin_invoice_adjustments.amount` — a
+bare sum, because the adjustment's **sign is in `amount`** and there is no `direction` column (C-5).
+A concession is `amount < 0` and needs no separate subtraction term.
 
-- **DB:** `constraint` — `invoice_items.amount >= 0`; `adjustments.amount > 0` with
-  `direction ∈ ('debit','credit')`; a `BEFORE INSERT OR UPDATE` trigger recomputes
+- **DB:** `constraint` — `invoice_items.amount > 0`; `adjustments.amount <> 0` (signed, no
+  `direction` column); a `BEFORE INSERT OR UPDATE` trigger recomputes
   `invoices.subtotal`/`total` from the line and adjustment rows. Client-supplied totals are ignored
   by the trigger, not merely discouraged. **`trg_fin_invoice_item_total` is bound to BOTH
   `fin_invoice_items` and `fin_invoice_adjustments`**, because the function reads both tables and a
@@ -5400,10 +8201,14 @@ where a credit adjustment has `direction='credit'` and a debit adjustment `direc
 
 - **DB:** `view` — `fin_v_invoice_balance` publishes exactly this (§12.4.1); `trigger` —
   `trg_fin_invoice_balance_recompute` maintains the cached `invoices.balance` via the
-  `RETURNS void` helper `trg_fin_invoice_recalc_balance(uuid, uuid)`, and is bound to **all three
+  `RETURNS void` helper **`fin_invoice_reapply_derived_state(uuid, uuid)`**, and is bound to **all three
   tables that feed the value**: `fin_invoice_items`, `fin_invoice_adjustments`, and
-  `fin_payment_allocations`. Two of those bindings are in 0023 and the third in 0024, because the
-  block is ordered by the migration that creates each trigger's target table. A cache correct for
+  `fin_payment_allocations`. **All three bindings are `0024`, not two in `0023` plus one in `0024`**
+  (C-1): the function's body names `fin_payment_allocations`, which `0024` creates, so §30.3.1 forbids
+  creating the function in `0023` at all — the ordering is by what the *body reads*, not by what the
+  trigger is bound to. The helper is a separate, unbound, `SECURITY INVOKER` function (`F5h`), not a
+  second trigger function: it takes its arguments by name, is `PERFORM`ed rather than bound, and is
+  granted to nobody, which is why it is not a row of §35.3. A cache correct for
   only one of its three inputs is worse than no cache, because it is trusted. **Both sides of an
   allocation move are recomputed** — an `UPDATE` that changes `invoice_id` would otherwise leave the
   origin invoice's balance stale with no later event to correct it.
@@ -5414,10 +8219,28 @@ where a credit adjustment has `direction='credit'` and a debit adjustment `direc
   `finance-property.test.ts` is what keeps them from drifting.
 - **Transaction:** recompute is in the same transaction as the allocation; no read-committed window
   exposes a stale balance.
-- **Test:** `finance-002` — property test across 10,000 random allocation/refund operations asserting
+- **Test:** `finance-002` — the §28.4 property suite, 10,000 random operations asserting
   `balance == total − net_applied` after every operation, where the random operations include line
-  edits, adjustment inserts, allocation moves **and deletes**, not only allocations. A generator that
+  edits, adjustment inserts and allocation **moves**, not only allocation inserts. A generator that
   only ever inserts allocations passes against a trigger bound to one table.
+  **The generator does not and cannot include an allocation `DELETE`,** and this row previously said
+  it did. It cannot: `fin_payment_allocations` is **append-only** at the database boundary (§12.1,
+  D1/A19 — `trg_fin_pa_delete_guard` raises `55000` on every `DELETE`, verified against the applied
+  `0024` catalog), so an allocation delete is not an operation the design permits at *any* checkpoint,
+  and a generator that issued one would be asserting the database does something it is specified never
+  to do. The `AFTER DELETE` branch of row 13 is therefore **defence-in-depth against a direct owner
+  write**, never a live path — the same classification §28.4 gives the revoked `UPDATE` branches — and
+  it is covered from the other side by §28.3's mandatory negative (`DELETE` → `55000`) and by
+  §28.3.2's C-ALLOC-DEL-3 through -7, which assert that balance state is unchanged after a rejected
+  `DELETE`. Naming a forbidden operation as a test input is the §28.4 failure mode in miniature: a
+  property test that cannot express the real case is not evidence for it.
+  **The suite is `0027`-owned** (its `refund` operation needs `0028`'s F11/F12 — the approver and the
+  disburser — and its
+  `reconcile`/`openThenMatchBatch` need `0027`'s tables — §28.4), so it is a Phase-level requirement
+  and not part of any single migration's proof list. **Note that `refund`'s owning migration moved from
+  `0025` to `0028` in this pass**, because §30.1 previously listed `postRefundApproval` as a `0025`
+  object; see §36.2 row 49. The `0027` ownership of the *suite* is unaffected, since its last-blocking
+  operation is still `reconcile`.
 
 ---
 
@@ -5573,8 +8396,11 @@ append-only (§11.1). "Fully reversed" is a predicate in `fin_v_payment_position
 
 - **DB:** `constraint` (`fin_leg_groups_balanced_ck`) + `trigger` (deferred statement-end check
   across groups, §15.1) + `trigger` (reject legs into a sealed group).
-- **App:** a single `postLedgerGroup()` helper is the only writer; application-level balancing is a
-  convenience, not the control.
+- **App:** a single `post_fin_ledger_group()` helper (**F4**, §19.7.2) is the only writer;
+  application-level balancing is a
+  convenience, not the control. **Not** an app-side `postLedgerGroup()`: no such function exists, and
+  §36.2 row 22 records that an earlier revision's prose used that name in two places, which is the
+  collision row 22 was raised for.
 - **Transaction:** the group is opened, legs inserted, totals updated, `sealed_at` set — all inside
   the business transaction, so a business failure rolls the ledger back with it.
 - **Test:** `finance-008` — raw SQL inserts an unbalanced group and asserts `55000`; a `0001.00` vs
@@ -5833,6 +8659,64 @@ set, leaving every prior version retrievable.
   `amount` for receipts created via the API, the worker, and the webhook handler; (d) a corrected
   receipt is `version = 2`, `supersedes_id` = v1, and v1 is still readable and printable.
 
+**FI-020 — Cache-writer exclusivity**
+
+*Formal:* let `S = {subtotal, total, balance, paid_at, invoice_no, issued_at, voided_at}` be the
+server-owned header columns of `fin_invoices`, and let `w` be any statement. Then
+
+- **(a) No direct write.** Every `UPDATE fin_invoices` issued by a role is refused for any column in
+  `S` unless the statement executes at `pg_trigger_depth() >= 2`.
+- **(b) Two scopes, four columns.** A nested write is permitted only if
+  `current_setting('fin.invoice_maintenance_scope', true)` is `'invoice_line_totals'` and the only
+  changed columns are in `{subtotal, total}`, or `'invoice_balance_state'` and the only changed columns
+  are in `{balance, paid_at}`. The identity triple `invoice_no`/`issued_at`/`voided_at` is in **no**
+  scope and is therefore always refused by the guard.
+- **(c) The context is transaction-local and closed.** Producers set the GUC with `set_config(…, true)`
+  and reset it to `''` on the same path; no scope value exists outside `{invoice_line_totals,
+  invoice_balance_state}`; and `invoice_no`/`issued_at` are never covered.
+- **(d) Absence is refusal.** An unset scope is refused, not treated as a default. "No authorization,
+  no write."
+
+- **DB:** `trigger` `trg_fin_invoice_header_guard` (`BEFORE INSERT OR UPDATE`, `SECURITY INVOKER`,
+  assigns only `NEW` and issues no statement — A13 — and `prosecdef = false`, which is C-SEC-M4a); the
+  **`0023` scope producer** row 6 (`trg_fin_invoice_item_total`, which is the *only* function in `0023`
+  that calls `set_config`, at exactly two call sites — one per binding); the other two `0023`
+  `SECURITY DEFINER` functions (rows 4a and 4d) are definers for a different reason — they must write
+  columns the runtime role cannot write at all, and **neither sets a scope**, so neither is a scope
+  producer; and the `0024` producer is row 13 (`trg_fin_invoice_balance_recompute`), which carries its own
+  half, C-SEC-M3b; the column-level `GRANT`s of §16.5.1, which are the **first** line of defence and the reason
+  the GUC is not treated as the boundary; `pg_trigger_depth() >= 2`, which is the second.
+- **App:** no route writes a header cache column; the reconciliation worker's repair path goes through
+  the authoritative children (`fin_invoice_items`, `fin_invoice_adjustments`,
+  `fin_payment_allocations`) and re-derives, never through `UPDATE fin_invoices` (§16.5).
+- **Transaction:** the scope is set and cleared inside one function body, so the window is a single
+  nested statement. A pooled connection cannot inherit it because `set_config` is transaction-local.
+- **Test:** `finance-cache-maintenance.test.ts` — C-SEC-M1…M7 (§28.3.1), as **10** checkpoint-scoped
+  assertions over 7 controls (M3, M4 and M6 are each two halves). (a) and (c) are the
+  positive tests: without them a design that refuses everything would pass every negative test in
+  §28.3. (d) is asserted by an unset-GUC write. **All three** controls — `ctl_csec_a`, `ctl_csec_b` and
+  `ctl_csec_c` — prove the fix's halves are load-bearing rather than incidentally present, and the third
+  exists because a one-value scope vocabulary is otherwise discoverable only at `0024`.
+
+**Why FI-020 exists as an invariant and not only as trigger prose.** FI-001 and FI-002 say what the
+caches must equal. They are silent on **who may write them**, and the previous revision discovered that
+silence is not neutral: a guard with no declared writer refused the phase's own cache writers, so every
+`INSERT` of an invoice line failed with `55000` — and twenty negative tests in §28.3 still passed,
+because a rule that refuses too much satisfies every test that only asserts refusals. FI-020 states the
+writer explicitly so that the failure mode has a name and a test.
+
+**FI-021 — The on-account residual**
+
+The statement is `payment_unallocated(p) = p.amount − payment_applied(p) + payment_on_account_returned(p) + payment_credit_reversed(p) >= 0`, with the two return terms `<= 0` (§12.2). Three things are asserted, and the third is the one that is easy to lose:
+
+1. The value is a **residual**, not a row sum. The unallocated remainder of a partially-allocated payment has no allocation row (§12.1), so no `Σ` over `fin_payment_allocations` can produce it.
+2. It is **non-negative**. Every route to a negative figure is a partition bug — a term that should be `<= 0` being added with the wrong sign, or a row kind that falls between two `FILTER` clauses. FI-021's regression case is the worked P3 example: 100,000 received, 40,000 returned on account, nothing billed → `unallocated = 60,000`. The previous formula reported **140,000**.
+3. **Every negative-capable allocation row is claimed by exactly one term.** `apply`/`invoice_id NOT NULL` → `payment_applied`; `reverse` with a `refund_id` → `payment_refunded`; `reverse` without one and with `invoice_id IS NULL` → `payment_credit_reversed`; `on_account_return` → `payment_on_account_returned`; `apply` with `invoice_id IS NULL` → the family-level `family_on_account` term, **not** any payment's own cash. The bug this revision found (37-C) was a fifth row kind — a credit correction — that no clause claimed.
+
+**FI-022 — Step-up / outbox pairing**
+
+`auth.step_up.consumed` and `fee.refund.approved` are written in the **same transaction** (§19.8.4). The invariant is a bijection restricted to `action='refund.approve'`: each consumed challenge has exactly one approved event with the same `refund_id`, and each approved event has exactly one consumed challenge. It exists because MFA-stepped approval is a security control while the outbox event is the financial record, and a design that guarantees only one of them has a gap that is invisible in review: either a refund can be approved with no audit event, or an event can be emitted for an approval nobody actually stepped up through. Asserted as row counts in both directions — the same pairing assertion §19.6 requires of the RLS suite, and for the same reason: **a count that is only checked in one direction does not establish a bijection.**
+
 ---
 
 ## 18. State machines — consolidated
@@ -5866,9 +8750,10 @@ fin_challans  (derived mirror of fin_invoices; every §35.6 edge appears here)
   issued      --due_on passed AND balance > 0-->    expired
   partially_paid --balance 0-->                     paid
   partially_paid --due_on passed AND balance > 0--> expired
-  partially_paid --refund-->                        partially_paid
-  paid        --refund-->                           partially_paid
-  expired     --payment-->                          partially_paid | paid
+  partially_paid --refund-->                        expired (if due_on passed) | partially_paid
+  paid        --refund-->                           expired (if due_on passed) | partially_paid
+  expired     --payment-->                          paid (only when balance reaches 0; a partial
+                                                     payment leaves it expired)
   any         --owning invoice is void-->           void  (inherits the invoice's
                                                        date and reason)
   void        --any-->                              FORBIDDEN (terminal)
@@ -5903,6 +8788,23 @@ fin_refunds
   approval is the instant the reversal allocations and the ledger group exist, so a
   later "reject" would have to un-post money rather than decline a request. Undoing
   an approved refund is a fresh refund request, not a back edge.
+
+  EXECUTABILITY, per edge — this is the annotation the previous revision of this
+  diagram lacked, and its absence is what let `postRefundApproval` be scheduled into
+  a migration that cannot run it (§36.2 row 49). `school_app_rw` holds no `UPDATE`
+  on `fin_refunds` (§35.4), so every edge except `request` requires a `SECURITY
+  DEFINER` writer, and the definers are `0028`'s F11/F12:
+
+    request  — reachable at 0025. A plain INSERT; ACL grants it, RLS's INSERT
+               branch checks `fees.refunds.request`.
+    approve  — 0028. F11 `postRefundApproval`. Needs F8 (step-up) and F4 (ledger).
+    reject   — 0028. F12 `postRefundProcess(p_action='reject')`. No step-up.
+    process  — 0028. F12 `postRefundProcess(p_action='process')`. Needs F8 and F4.
+
+  So at the `0025` checkpoint `fin_refunds` holds `requested` rows and nothing
+  else, and no actor can move them. That is fail-closed by ACL rather than by a
+  state trigger, and it is the correct behaviour for a table whose remaining edges
+  are owned by a later migration (§13.2.1).
 
 fin_reconciliation_batches
   open      --start-->  matching        (CLAIMS is_final on every match; derives the totals)
@@ -6087,7 +8989,7 @@ produce and only for a user with a real, **active membership** in that tenant (`
 - To obtain any finance row at all, the caller must hold an active membership in that tenant.
 - Within that tenant, they see only students they are actually the guardian of, or their own
   student record.
-- `sg.deleted_at IS NULL` is present, which **fixes the defect in `attendance.ts:136-158`** rather
+- `sg.deleted_at IS NULL` is present, which **fixes the defect in `apps/api/src/routes/school/attendance.ts:136-158`** rather
   than inheriting it.
 
 ### 19.4 The policies
@@ -6357,14 +9259,20 @@ and no ownership of any `fin_*` table.
 | F1 | `app_finance_actor_class()` | `SECURITY DEFINER` `STABLE` | `school_migrator` | `pg_catalog, public, pg_temp` | **revoked** | `school_app_rw` | `0021` |
 | F2 | `app_finance_linked_students()` | `SECURITY DEFINER` `STABLE` | `school_migrator` | `pg_catalog, public, pg_temp` | **revoked** | `school_app_rw` | `0021` |
 | F3 | `app_finance_seeds_ledger_accounts(p_tenant_id uuid)` | `SECURITY DEFINER` `VOLATILE` | `school_migrator` | `pg_catalog, public, pg_temp` | **revoked** | `school_migrator` only | `0021` |
-| F4 | `post_fin_ledger_group(tenant, source_type, source_id, lines)` | `SECURITY DEFINER` `VOLATILE` | `school_migrator` | `pg_catalog, public, pg_temp` | revoked | `school_app_rw` | `0026` |
-| F5 | **28 bound functions**, one per row of §35.3: **27 named `trg_*`** (rows 1–14, 16–25, 3a–3c) plus **`fn_fin_refund_ceiling`** (row 15, a deferred constraint trigger) | `SECURITY INVOKER` `VOLATILE` | `school_migrator` | `pg_catalog, public, pg_temp` | revoked | n/a — trigger-only, `PERFORM`ed or bound, never called by the API | `0021`–`0029` |
-| F5h | **2 declared-but-unbound helpers**: `trg_fin_reversal_shape_check` and `trg_fin_invoice_recalc_balance(uuid,uuid)` | `SECURITY INVOKER` | `school_migrator` | `pg_catalog, public, pg_temp` | revoked | n/a | none — no `CREATE TRIGGER` names either |
+| F4 | `post_fin_ledger_group(tenant, event_type, source_id, lines, reversal_of_group uuid DEFAULT NULL)` — arg 2 is the **event type**, and `source_type` is *not* an argument at all: it is derived from it by `fin_ledger_event_types`. The trailing `reversal_of_group` is defaulted, which is what keeps immutable `0025`'s four-argument F11/F12 calls valid while still making reversal linkage explicit | `SECURITY DEFINER` `VOLATILE` | `school_migrator` | `pg_catalog, public, pg_temp` | revoked | `school_app_rw` | `0026` |
+| F5 | **35 total bound trigger functions** in the whole-phase scope, of which **34 are defined in this document's closed inventory**: **33 named `trg_*`** (rows 1–14, 16–25, 3a–3c, 4a–4d, 8a, 10a, 12a) plus **`fn_fin_refund_ceiling`** (row 15, a deferred constraint trigger). The 35th is **row 3a `trg_fin_assignment_validate`**, an **applied `0022`** function that has no `CREATE FUNCTION` in this document because its body is immutable (§8.6) and is therefore accounted for **separately**. **Scope rule for this document:** "document-bound" always means **34**; "total bound" always means **35**. The two figures describe different populations and are never to be interchanged — see §35.3.2 | `SECURITY INVOKER` `VOLATILE` — **except rows 4, 4d, 6, 13 and 8a, which are F5d** | `school_migrator` | `pg_catalog, public, pg_temp` | revoked | n/a — trigger-only, `PERFORM`ed or bound, never called by the API | `0021`–`0029` |
+| **F5d** | **THE FIVE CACHE-WRITER FUNCTIONS, ALL `SECURITY DEFINER` AND ALL BOUND** (C-SEC): `trg_fin_invoice_number` (0023, row 4), `trg_fin_invoice_freeze_lines` (0023, row 4d), `trg_fin_invoice_item_total` (0023, row 6), `trg_fin_invoice_balance_recompute` (0024, row 13), and `trg_fin_challan_refresh` (0024, row 8a, P0-07). Each issues, or supplies the context for, an `UPDATE` on a column §16.5.1 does not grant. **`trg_fin_invoice_header_guard` (row 4a) is no longer one of them** — it assigns only `NEW` and is `SECURITY INVOKER` in F5, which is what lets §9.6.0 clause (2) tell a caller's direct `UPDATE` from a maintenance writer's nested one (§16.5.2) | `SECURITY DEFINER` `VOLATILE` | `school_migrator` | `pg_catalog, public, pg_temp` | **revoked** | **`school_app_rw`** | 0023, 0024 |
+| F5h | **2 declared-but-unbound helpers**, neither named by any `CREATE TRIGGER`: `trg_fin_reversal_shape_check(uuid, uuid, uuid, uuid, numeric)` — `PERFORM`ed by two trigger functions (§13.1); and `fin_invoice_reapply_derived_state(uuid, uuid)` — `PERFORM`ed by `trg_fin_invoice_balance_recompute` (§12.4.1). **This count is two and stays two** (§35.3.1): the category is defined by `RETURNS void` + `PERFORM`ed-for-effect + unbound, and nothing here widens it | `SECURITY INVOKER` — the second inherits its caller's definership; see §19.7.4 | `school_migrator` | `pg_catalog, public, pg_temp` | revoked | **granted to nobody** | none — neither is reachable except through its caller |
+| **F5s** | **1 unbound `SECURITY DEFINER` support function**, introduced by the `0025` forward remediation: `fin_lock_payment_amount(p_tenant_id uuid, p_payment_id uuid) RETURNS numeric(19,4)` — takes the privileged `SELECT … FOR UPDATE` on the single identified `fin_payments` row. **Named by no `CREATE TRIGGER` and not a trigger function.** It is deliberately **not** counted in F5h: it returns `numeric` rather than `void` and is called as an expression, so it does not satisfy the §35.3.1 helper definition, which was **not** weakened to admit it (§13.1.1, D2C) | **`SECURITY DEFINER`** `VOLATILE` — elevation sits **here** rather than being inherited, because both callers are `SECURITY INVOKER` and hold no `UPDATE` privilege on `fin_payments` (§16.5.2's inheritance clause and its boundary) | `school_migrator` | `pg_catalog, public, pg_temp` | **revoked** | **granted to nobody** — not an application-facing function; reachable only through its two `SECURITY INVOKER` callers `trg_fin_allocation_bounds` and `trg_fin_on_account_return_bounds` (`0024`) | `0025` forward remediation |
 | F6 | `app_finance_current_guardian_ids()` | `SECURITY DEFINER` `STABLE` | `school_migrator` | `pg_catalog, public, pg_temp` | **revoked** | `school_app_rw` | `0021` |
 | F7 | `app_verify_mfa_code(user, code, at)` | `SECURITY DEFINER` `STABLE` | `school_migrator` | `pg_catalog, public, pg_temp` | **revoked** | `school_app_rw` | `0028` |
 | F8 | `app_consume_step_up(session, action, resource_type, resource, amount, code)` | `SECURITY DEFINER` `VOLATILE` | `school_migrator` | `pg_catalog, public, pg_temp` | **revoked** | `school_app_rw` | `0028` |
 | F9 | `app_mint_step_up_challenge(session, resource_type, resource_id, resource_amount, action)` — 5 args, `p_session_id` first, exactly as the DDL at the F9 block declares; the table previously showed 3, dropping the session id | `SECURITY DEFINER` `VOLATILE` | `school_migrator` | `pg_catalog, public, pg_temp` | **revoked** | `school_app_rw` | `0028` |
 | F10 | `app_confirm_mfa_factor(factor, code)` | `SECURITY DEFINER` `VOLATILE` | `school_migrator` | `pg_catalog, public, pg_temp` | **revoked** | `school_app_rw` | `0028` |
+| **F11** | `postRefundApproval(p_refund_id uuid, p_action text)` — 2 args. **The refund state machine's only `approved` writer.** `SECURITY DEFINER` `VOLATILE`. **PENDING `0028` SIGNATURE CHANGE (not yet in existence):** the canonical target is `postRefundApproval(p_session_id uuid, p_refund_id uuid, p_action text)` — 3 args, `p_session_id` first — forwarding to `app_consume_step_up(p_session_id, …)`. The 2-arg form above is the **current documented signature** and is what any implementer must not silently assume is final; the 3-arg form is a **forward target**, not a description of an existing object | `SECURITY DEFINER` `VOLATILE` | `school_migrator` | `pg_catalog, public, pg_temp` | **revoked** | `school_app_rw` | **`0028`** |
+| **F12** | `postRefundProcess(p_refund_id uuid, p_action text, p_reason text DEFAULT NULL, p_disbursement_reference text DEFAULT NULL)` — 4 args. The **only** writer of `processed` and of `rejected`. `SECURITY DEFINER` `VOLATILE`. **PENDING `0028` SIGNATURE CHANGE (not yet in existence):** the canonical target is `postRefundProcess(p_session_id uuid, p_refund_id uuid, p_action text, p_reason text DEFAULT NULL, p_disbursement_reference text DEFAULT NULL)` — 5 args, `p_session_id` first — forwarding to `app_consume_step_up(p_session_id, …)`. As with F11, the 4-arg form is current and the 5-arg form is a **forward target only** | `SECURITY DEFINER` `VOLATILE` | `school_migrator` | `pg_catalog, public, pg_temp` | **revoked** | `school_app_rw` | **`0028`** |
+| **F13** | `app_finance_actor_has_permission(p_permission text)` — F11/F12's in-body permission check, resolving a **named** permission through `0001`'s real `memberships → membership_roles → roles → role_permissions` chain rather than through the coarse actor class F1 returns. Takes one argument, so a caller cannot name a *user*; it names only the capability being asked about. **Lives in `0026`, not `0028`** — see the placement note below | `SECURITY DEFINER` `STABLE` | `school_migrator` | `pg_catalog, public, pg_temp` | **revoked** | `school_app_rw` (F11/F12 reach it as the owner) | **`0026`** |
+| **F14** | `app_finance_emit_event(p_event_type text, p_tenant_id uuid, p_aggregate_type text, p_aggregate_id uuid, p_payload jsonb)` — the transactional-outbox write, into `0001`'s `outbox_events`. `aggregate_id` is `text` in that table, so the uuid is cast; `correlation_id` is left `NULL` for the same reason F4 leaves it `NULL` | `SECURITY DEFINER` `VOLATILE` | `school_migrator` | `pg_catalog, public, pg_temp` | **revoked** | `school_app_rw` | **`0028`** |
 | V1 | `fin_v_invoice_balance` (§12.4.1), `fin_v_payment_position` (§12.4), `fin_v_ledger_account_balance` (§12.4.2) | **view**, `security_invoker = on` | `school_migrator` | n/a — a view has no `search_path` setting | **revoked** | `school_app_rw` (SELECT) | `0024` (invoice balance, payment position), `0026` (ledger) |
 | V2 | `fin_v_ar_aging`, `fin_v_collections_summary`, `fin_v_fee_head_revenue`, `fin_v_on_account_summary`; full bodies in §15.2.2 | **view**, owner-scoped (**no** `security_invoker`) | `school_migrator` | n/a | **revoked** | `school_app_rw` (SELECT) | `0026` |
 
@@ -6404,9 +9312,10 @@ test written against it could only fail or assert nothing. The two real controls
 revoked. Detail: §15.2.1. Inventory rows: §35.3.
 
 F3 is the only function that is *not* reachable by the runtime role, and it is the only one that
-takes a `tenant_id` argument, because seeding is a per-tenant migration act. F5's functions are all
-invoker: a trigger function that ran elevated could read across tenants, and the trigger already
-runs inside a transaction that the caller's RLS governs. F1, F2, F6, F7, F8, and F9 need definership,
+takes a `tenant_id` argument, because seeding is a per-tenant migration act. **F5's functions are
+invoker with exactly one set of exceptions, F5d** — and the exceptions exist for a specific, narrow
+reason: they issue, or cause, an **`UPDATE` on a column §16.5.1 does not grant**, and a BEFORE
+trigger writing `NEW` does not need definership at all. F1, F2, F6, F7, F8, and F9 need definership,
 and only because they must read `roles`/`membership_roles`/`student_guardians`/`auth_mfa_factors`/
 `auth_step_up_challenges`, which are themselves RLS-scoped and would otherwise return an empty set —
 a false "no guardian" or a false "no code" to a legitimate actor. F6 is the receipt path's
@@ -6418,6 +9327,49 @@ refuse to execute a data-modifying statement inside a `STABLE` function, so the 
 could not run at all — a second instance of the same class of defect as F4, and a reminder that
 every row in this table is checked against what PostgreSQL actually permits rather than against
 what reads as intuitive.
+
+**F11 and F12 are `SECURITY DEFINER` because the refund state machine has no other writer, and they
+are `0028` because their callees are.** Three separate reasons, each of which independently would have
+forced definership or the migration:
+
+1. **Definers, not invokers — forced by the ACL, not chosen.** §35.4 revokes `UPDATE` on
+   `fin_refunds` table-wide from `school_app_rw`, because all eight of `status`, `decided_by`,
+   `decided_at`, `processed_by`, `processed_at`, `rejection_reason`, `disbursement_reference` and
+   `applied_allocations` are server-owned (§16.4). Every transition in §13.2's diagram is an `UPDATE`
+   of `status`. Under
+   `SECURITY INVOKER`, F11's step 8 and F12's writes would raise **`42501`** and the state machine
+   would be unreachable — the same unexecutable-by-invocation defect as F4 (P1-07) and F8
+   (`STABLE`-but-writing), reached from the opposite direction: those two were **invokers** that had to
+   be definers, and these two would have been definers left as invokers.
+   **The ACL is the control and definership is what makes it expressible.** This is the document's
+   recurring shape: a revoke that is correct, and a definer that is the only lawful way to honour it.
+2. **`0028`, because F11 calls F8.** The approve path verifies a step-up challenge, so it calls
+   `app_consume_step_up()` — F8, `0028`. §30.3.1 forbids a migration naming a later migration's
+   object as though it existed, and plpgsql resolves a function call at *plan* time, so a `0025`
+   F11 would have been created cleanly and then raised `42883 undefined_function` on every call.
+3. **`0028`, because F11 also calls F4.** Step 7 posts `Dr 1200 / Cr 2200` through
+   `post_fin_ledger_group()` — F4, `0026`. `0026` would have been early enough for *this* call, but not
+   for the MFA call above, so `0028` is the earliest migration at which **both** dependencies exist,
+   and that is the migration they are owned by.
+
+**`postRefundApproval` was previously listed as a `0025` deliverable in §30.1 with no `CREATE FUNCTION`
+body anywhere in the document, and it was attributed to F5** — which is defined as the 35 bound
+`trg_fin_*` trigger functions and which is `SECURITY INVOKER`. So it was simultaneously absent from
+§19.7.2's closed set ("a function that is not in this table does not exist"), absent from §35.3's
+inventory, absent from §35.1's "Creates (complete)" column, and mis-filed as an invoker. That is §36.2
+row 49. **F11 and F12 exist to close it**, and F12 exists because a diagram with four edges and two
+owners still has two ownerless edges — leaving `processed` and `rejected` with no writer would have
+reproduced the identical defect one step down.
+
+**Why the refund machine is two functions and not one.** `p_action` is a `text` parameter on both, and
+a single function with four actions would be shorter. It would also be wrong: `approve` posts a ledger
+group and consumes a step-up challenge, while `reject` does neither, and `process` posts a *different*
+ledger group. Folding them means every call pays the widest privilege set — the reject path would
+inherit the ability to post to the ledger and to consume MFA challenges, and the approver's definer
+rights would become reachable from a route that has no business disbursing money. **The split is the
+least-privilege boundary**, and it is the same reason §20.3's permission matrix has three refund
+permissions rather than one. `p_action` is nonetheless constrained per function, so a caller cannot
+reach the other machine's behaviour through the wrong entry point.
 
 #### 19.7.3 The per-function contract
 
@@ -6465,7 +9417,7 @@ For each function, every clause below is normative.
   branches are gated on `app_current_tenant_id()` matching rows whose `tenant_id` equals that claim.
 - **RLS interaction:** owner-run, so a soft-deleted guardian link is evaluated by the function's own
   `sg.deleted_at IS NULL` / `g.deleted_at IS NULL` predicates rather than by the caller's policy.
-  This is deliberate and is the regression fix for the `attendance.ts:136-158` defect: the predicate
+  This is deliberate and is the regression fix for the `apps/api/src/routes/school/attendance.ts:136-158` defect: the predicate
   is **in the query**, not inherited from whatever policy happens to apply.
 - **Grants:** `REVOKE ALL … FROM PUBLIC`, then `GRANT EXECUTE … TO school_app_rw`.
 - **Transaction:** none (`STABLE`).
@@ -6514,8 +9466,27 @@ DECLARE
 BEGIN
     -- Re-checked in the body, not trusted from the caller. 55000 is object_not_in_prerequisite_state:
     -- the write is refused rather than performed for a tenant the caller has no right to seed.
-    IF p_tenant_id IS DISTINCT FROM app_current_tenant_id() AND NOT app_privileged() THEN
-        RAISE EXCEPTION 'seeds_ledger_accounts: tenant % is not the current tenant and caller is not privileged',
+    --
+    -- `session_user`, NOT `app_privileged()`. This body is SECURITY DEFINER, so
+    -- `current_user` here is `school_migrator`, and 0002's `app_privileged()` is
+    -- `SELECT current_user IN ('school_migrator')` running SECURITY INVOKER -- so it
+    -- inherits the definer's identity and returns TRUE for whoever called. The
+    -- previous revision's `NOT app_privileged()` branch was therefore dead code:
+    -- the whole predicate collapsed to "is the argument the session tenant", and
+    -- F3 would seed any tenant the caller named. F3 is owner-retained and grants
+    -- nothing to `school_app_rw`, so no runtime role can reach it today and the
+    -- defect is latent rather than live -- but a function that seeds a chart of
+    -- accounts is exactly the wrong place to leave a check that cannot fail, and
+    -- the next migration to add a grant would turn it exploitable without any
+    -- visible change to this function.
+    IF app_current_tenant_id() IS NULL THEN
+        IF session_user <> 'school_migrator' THEN
+            RAISE EXCEPTION 'seeds_ledger_accounts: tenant % is not the current tenant and caller is not privileged',
+                p_tenant_id
+                USING ERRCODE = '42501';
+        END IF;
+    ELSIF p_tenant_id IS DISTINCT FROM app_current_tenant_id() THEN
+        RAISE EXCEPTION 'seeds_ledger_accounts: tenant % is not the current tenant',
             p_tenant_id
             USING ERRCODE = '55000';
     END IF;
@@ -6570,15 +9541,49 @@ exactly nine rows for the tenant, and asserting it here makes a drifted chart fa
 would otherwise have carried it silently into every financial report. It is also the check that would
 have caught the `4100` `CHECK` violation of §36.2 row 34 at seed time rather than at report time.
 
-**F4 — `post_fin_ledger_group(p_tenant_id, p_source_type, p_source_id, p_lines jsonb)`**
+**F4 — `post_fin_ledger_group(p_tenant_id, p_event_type, p_source_id, p_lines jsonb, p_reversal_of_group uuid DEFAULT NULL)`**
 
 - **Purpose:** the single posting entry point. Validates that the legs balance, writes the group
   header and the legs, and stamps the group sealed. Every financial event posts through it, so a
   second posting path is a bug by construction.
-- **Arguments:** `p_tenant_id uuid`, `p_source_type text`, `p_source_id uuid`, `p_lines jsonb`
-  (`[{account_code, direction, amount, student_id, invoice_id, …}]`).
+- **Arguments:** `p_tenant_id uuid`, `p_event_type text`, `p_source_id uuid`, `p_lines jsonb`
+  (`[{account_code, direction, amount, student_id, invoice_id, …}]`), `p_reversal_of_group uuid`
+  defaulting to `NULL`.
+- **The caller supplies the event, not the provenance.** `p_source_type` was an argument in the
+  previous revision and **is not one now**, and this is the correction of a real bypass rather than a
+  tidying. The previous signature took a free-form `source_type text` and wrote it into *both*
+  `event_type` and `source_type`, so the origin key — had it existed — would have been
+  `(tenant_id, event_type, source_type, source_id)`. A direct `school_app_rw` caller holding
+  `EXECUTE` could then post the same invoice twice by calling F4 a second time with
+  `p_source_type => 'PAYMENT'` instead of `'payment'`: two different strings, two different keys,
+  two origin groups, one invoice, and no error anywhere. Untrusted text in a uniqueness key is the
+  defect. Now `p_event_type` is the only token the caller states, it must be a row in
+  `fin_ledger_event_types`, and `source_type` is read from that row — so for a given
+  `p_event_type` there is exactly one possible `source_type`, and
+  `fin_leg_groups_origin_uq (tenant_id, event_type, source_id)` cannot be walked around.
+- **Why `reversal_of_group` is defaulted rather than a second overload.** It has to be *optional*:
+  immutable `0025` already calls this function with four positional arguments —
+  `PERFORM post_fin_ledger_group(v_tenant, 'fee.refund.approved', v_refund.id, v_leg)` in F11
+  (`0025_refunds.sql`) and the `'fee.refund.processed'` equivalent in F12 — and `0025` is frozen
+  (§2.2), so its call sites cannot be edited to match a new signature. A defaulted fifth parameter
+  lets those four-argument calls resolve to this one function unchanged, while an explicit
+  fifth argument is still required for a reversal. A second four-argument *overload* would also
+  preserve them and would additionally create two `GRANT`/`REVOKE` signatures to keep in step, plus
+  an ambiguity a reader must resolve to learn which one a bare four-argument call reaches; the
+  default is one function with one ACL entry. Note what this forces: **a four-argument call can
+  never be a reversal**, because `reversal_of_group` then defaults to `NULL` and the body rejects a
+  reversal event with no target. The safe call is the *only* call.
+- **`event_type` and `source_type` are no longer redundant** (this closes **OD-16**). `event_type` is
+  caller-stated and load-bearing — it is the key half of the idempotency constraint.
+  `source_type` is catalogue-derived and exists so a report can group by source table without
+  string-parsing `event_type`. The column is not dropped and the signature does not grow a sixth
+  argument, because the previous revision's third option — a fifth argument carrying both — was the
+  wrong shape: it would have re-admitted exactly the caller-controlled provenance this section
+  removes.
 - **Tenant derivation:** the argument, cross-checked against `app_current_tenant_id()`; a mismatch
-  raises `55000` before any row is written.
+  raises `55000` before any row is written. A **NULL** session tenant is a different case and is
+  refused for every runtime caller — see the tenant rule below, which is the single most important
+  line in the body.
 - **Returns:** `uuid` — the new `fin_ledger_entry_groups.id`.
 - **Caller context:** tenant-scoped for the API, and an empty ticket (`school_migrator`) for worker
   handlers. In the API case the caller's RLS is the tenant policy; in the worker case the caller is
@@ -6637,10 +9642,11 @@ properties claimed above, and its shape is forced by two triggers that already e
 ```sql
 -- ── F4: the single posting entry point. Validates, then writes, then seals ────
 CREATE OR REPLACE FUNCTION post_fin_ledger_group(
-    p_tenant_id     uuid,
-    p_source_type   text,
-    p_source_id     uuid,
-    p_lines         jsonb
+    p_tenant_id         uuid,
+    p_event_type        text,
+    p_source_id         uuid,
+    p_lines             jsonb,
+    p_reversal_of_group uuid DEFAULT NULL
 ) RETURNS uuid
     LANGUAGE plpgsql
     SECURITY DEFINER
@@ -6657,12 +9663,96 @@ DECLARE
     v_amt    numeric(19,4);
     v_stu    uuid;
     v_inv    uuid;
+    v_src_type text;
+    v_is_reversal boolean;
 BEGIN
-    -- 1. Tenant cross-check. The worker runs with an empty ticket, so the
-    --    session tenant may be NULL; when it is not, it must equal the argument.
+    -- 0. TENANT GATE. Two distinct failures, two distinct tests, in this order.
+    --
+    --    0a. A runtime caller with NO tenant in session. The previous revision
+    --        wrote `IF v_tenant IS NULL AND NOT app_privileged() THEN RAISE`,
+    --        and that guard has **never been able to fire**: F4 is
+    --        SECURITY DEFINER, so inside this body `current_user` is the owner
+    --        `school_migrator`, and `app_privileged()` is defined in 0002 as
+    --        `SELECT current_user IN ('school_migrator')` running SECURITY
+    --        INVOKER -- so it inherits the definer's `current_user` and returns
+    --        TRUE for *every* caller of F4, including `school_app_rw`. A
+    --        session with no tenant therefore sailed past the check, and since
+    --        the mismatch test below is guarded by `v_tenant IS NOT NULL` the
+    --        whole cross-check was skipped: any role with EXECUTE could post a
+    --        balanced group into an arbitrary tenant's ledger. The predicate has
+    --        to name the *login*, not the effective user.
+    IF v_tenant IS NULL AND session_user <> 'school_migrator' THEN
+        RAISE EXCEPTION 'ledger posting requires a tenant-scoped session'
+            USING ERRCODE = '42501';
+    END IF;
+
+    -- 0b. A tenant in session that disagrees with the argument.
     IF v_tenant IS NOT NULL AND v_tenant IS DISTINCT FROM p_tenant_id THEN
         RAISE EXCEPTION 'ledger tenant % does not match the session tenant %',
             p_tenant_id, v_tenant USING ERRCODE = '55000';
+    END IF;
+
+    -- 1. Provenance (F-02). The caller names the EVENT; the catalogue names the
+    --    SOURCE. A missing event_type is refused outright -- there is no
+    --    fallback to "whatever the caller felt like typing", which is what made
+    --    the old free-form source_type relabellable.
+    SELECT e.source_type, e.is_reversal
+      INTO v_src_type, v_is_reversal
+      FROM fin_ledger_event_types e
+     WHERE e.event_type = p_event_type;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'event_type % is not in the ledger event catalogue',
+            p_event_type USING ERRCODE = '55000';
+    END IF;
+
+    -- 1a. Reversal linkage is a property of the EVENT, not of the argument.
+    --     A reversal event with no target, or an origin event that names one,
+    --     are both refused. A four-argument call can never reach the first
+    --     branch, because p_reversal_of_group defaults to NULL.
+    IF v_is_reversal AND p_reversal_of_group IS NULL THEN
+        RAISE EXCEPTION 'event % is a reversal and requires reversal_of_group',
+            p_event_type USING ERRCODE = '55000';
+    END IF;
+    IF NOT v_is_reversal AND p_reversal_of_group IS NOT NULL THEN
+        RAISE EXCEPTION 'event % is not a reversal and must not name a target group',
+            p_event_type USING ERRCODE = '55000';
+    END IF;
+
+    -- 1b. The source row must exist, in THIS tenant. The catalogue's
+    --     source_table is a bare identifier, so the lookup is built as text and
+    --     is therefore safe: no caller-controlled SQL is ever formed (F-07's
+    --     data-not-SQL rule still holds -- this reads a catalogue value, not an
+    --     argument). 0026 seeds only events whose table already exists, and
+    --     0027/0028 append their own rows when they create theirs.
+    IF EXISTS (SELECT 1 FROM fin_ledger_event_types e
+                WHERE e.event_type = p_event_type AND e.source_exists) THEN
+        EXECUTE format('SELECT 1 FROM %I WHERE tenant_id = $1 AND id = $2',
+                       v_src_table)
+           INTO v_stu USING p_tenant_id, p_source_id;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'source % % does not exist in tenant %',
+                v_src_type, p_source_id, p_tenant_id USING ERRCODE = '55000';
+        END IF;
+    END IF;
+
+    -- 1c. The reversal target must be sealed, in this tenant, and not already
+    --     reversed. The tenant equality is already carried by
+    --     fin_leg_groups_reversal_fk, so the composite FK raises 23503 for a
+    --     cross-tenant target even if this check were skipped -- the check is
+    --     for the two conditions the FK cannot express.
+    IF p_reversal_of_group IS NOT NULL THEN
+        PERFORM 1 FROM fin_ledger_entry_groups g
+         WHERE g.tenant_id = p_tenant_id
+           AND g.id = p_reversal_of_group
+           AND g.sealed_at IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM fin_ledger_entry_groups r
+                            WHERE r.reversal_of_group = g.id)
+           FOR UPDATE OF g;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'reversal target % is absent, unsealed, or already reversed',
+                p_reversal_of_group USING ERRCODE = '55000';
+        END IF;
     END IF;
 
     -- 2. Shape: a non-empty array of at least two legs.
@@ -6732,13 +9822,38 @@ BEGIN
             v_debit, v_credit USING ERRCODE = '55000';
     END IF;
 
+    -- 4a. A reversal must mirror its target exactly. Without this, a caller
+    --     could reverse an invoice issue with one account pair and re-reverse
+    --     with another, and the net of the two groups would be a balanced but
+    --     meaningless set of legs.
+    IF p_reversal_of_group IS NOT NULL THEN
+        IF NOT EXISTS (
+            SELECT 1
+              FROM (SELECT account_code, direction, amount, student_id, invoice_id
+                      FROM fin_ledger_entries WHERE tenant_id = p_tenant_id
+                       AND entry_group_id = p_reversal_of_group) AS t
+              FULL JOIN (SELECT account_code, direction, amount, student_id, invoice_id
+                           FROM jsonb_to_recordset(p_lines) AS x(
+                             account_code text, direction text, amount numeric(19,4),
+                             student_id uuid, invoice_id uuid)) AS n
+                ON t.account_code = n.account_code AND t.direction = n.direction
+               AND t.amount = n.amount AND t.student_id IS NOT DISTINCT FROM n.student_id
+               AND t.invoice_id IS NOT DISTINCT FROM n.invoice_id
+             WHERE t.account_code IS NULL OR n.account_code IS NULL)
+        THEN
+            RAISE EXCEPTION 'reversal legs do not mirror target group %',
+                p_reversal_of_group USING ERRCODE = '55000';
+        END IF;
+    END IF;
+
     -- 5. Header, UNSEALED. sealed_at stays NULL so the balanced CHECK is not yet
     --    in force and the legs below are not rejected by sealed_group_reject.
+    --    source_type comes from the catalogue (step 1), never from an argument.
     INSERT INTO fin_ledger_entry_groups (
-        id, tenant_id, event_type, source_type, source_id,
+        id, tenant_id, event_type, source_type, source_id, reversal_of_group,
         total_debit, total_credit, entry_count, created_by)
     VALUES (
-        v_group, p_tenant_id, p_source_type, p_source_type, p_source_id,
+        v_group, p_tenant_id, p_event_type, v_src_type, p_source_id, p_reversal_of_group,
         v_debit, v_credit, jsonb_array_length(p_lines), app_current_user_id());
 
     -- 6. Legs.
@@ -6761,15 +9876,29 @@ BEGIN
 
     RETURN v_group;
 END $$;
-REVOKE ALL ON FUNCTION post_fin_ledger_group(uuid, text, uuid, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION post_fin_ledger_group(uuid, text, uuid, jsonb, uuid) FROM PUBLIC;
 ```
+
+**Duplicate posting raises `23505`, it does not silently double-post.** A second F4 call with the
+same `(p_tenant_id, p_event_type, p_source_id)` violates `fin_leg_groups_origin_uq` and the
+transaction aborts with `unique_violation`. That is the correct shape for a caller-driven posting
+path: the business writers (`postInvoiceIssue`, `postPaymentSettle`, …) each wrap their F4 call and
+the surrounding state write in one transaction, so an `INSERT … ON CONFLICT DO NOTHING` retry
+converges on the existing group and the caller's `RETURNING` yields the original `id`. Two
+concurrent retries race to the same index entry; the loser blocks on the winner's speculative
+insertion and then receives `23505`. The document records that number because the API maps a
+duplicate invoice issue to `409`, and a caller that sees `23505` from a posting path needs to know it
+means "already posted" rather than "something is broken".
 
 **Three honest limits of this body, stated rather than implied.**
 
-- `event_type` is set to `p_source_type`, because the signature has no `event_type` argument and the
-  column is `NOT NULL`. The two columns are therefore redundant as written, and nothing in the
-  document reads `event_type`. This is a real modelling wart, not a decision: either the column is
-  dropped or the signature gains an argument, and it is recorded as **OD-16**.
+- **`event_type` and `source_type` are both populated, and they are not the same column.** `event_type`
+  is the caller's `p_event_type`, cross-checked against `fin_ledger_event_types`; `source_type` is
+  that catalogue row's `source_type`. The previous revision set `event_type := p_source_type` and
+  left the column unread, which was recorded as **OD-16**. That is resolved: `event_type` is now the
+  key half of `fin_leg_groups_origin_uq`, so it is load-bearing rather than decorative, and
+  `source_type` is the grouping a report needs. Neither column can be supplied independently of the
+  catalogue any more.
 - `correlation_id` is left `NULL`. There is no `app_current_correlation_id()` in `0002`, so there is no
   honest source for it inside a `SECURITY DEFINER` body that cannot see the request. The group remains
   correlatable through `(source_type, source_id)`.
@@ -6781,19 +9910,31 @@ REVOKE ALL ON FUNCTION post_fin_ledger_group(uuid, text, uuid, jsonb) FROM PUBLI
 
 **F5 — the `trg_fin_*` trigger functions**
 
-- **Purpose:** freeze, recompute, bound, seal, and pin. **Twenty-four** bound `trg_fin_*` functions plus
-  `fn_fin_refund_ceiling` across `0021`–`0029` — 28 bound functions, one per §35.3 row — plus **two**
-  `RETURNS void` helpers that have no
-  trigger of their own — `trg_fin_reversal_shape_check` (§13.1, called by two trigger functions) and
-  `trg_fin_invoice_recalc_balance(uuid, uuid)` (§12.4.1, `PERFORM`ed by
-  `trg_fin_invoice_balance_recompute` to hold the balance arithmetic so that trigger contains only the
-  decision about *which* invoice to recompute). §35.3 gives the full binding table and §35.3.1 states
-  the counting rule. This line has now been wrong **three** times: "sixteen functions … plus two
+- **Purpose:** freeze, recompute, bound, seal, and pin. **Thirty-three** bound `trg_fin_*` functions plus
+  `fn_fin_refund_ceiling` across `0021`–`0029` — **35 bound functions** in all, one per §35.3 row
+  (the thirty-fourth named `trg_*` being `trg_auth_step_up_immutable`, bound in §19.8.1). **Plus two**
+  `RETURNS void` helpers with no trigger of their own — `trg_fin_reversal_shape_check` (§13.1, called by
+  two trigger functions) and `fin_invoice_reapply_derived_state(uuid, uuid)` (§12.4.1, `PERFORM`ed by
+  `trg_fin_invoice_balance_recompute`) — and the five functions whose membership is split out into **F5d**
+  because they are `SECURITY DEFINER`: `trg_fin_invoice_number` (0023), `trg_fin_invoice_freeze_lines`
+  (0023), `trg_fin_invoice_item_total` (0023), `trg_fin_invoice_balance_recompute` (0024) and
+  `trg_fin_challan_refresh` (0024). A sixth function might look like it belongs on that `SECURITY DEFINER`
+  list and is deliberately kept off it:
+  `fin_invoice_reapply_derived_state(uuid, uuid)` (0024) writes `balance`/`status`/`paid_at` but is
+  `SECURITY INVOKER`, because the bound `trg_fin_invoice_balance_recompute` that `PERFORM`s it supplies
+  the elevation — it holds the balance arithmetic **and** the `status`/`paid_at` decision, so that the
+  bound trigger contains only the decision about *which* invoice to reapply.
+  §35.3 gives the full binding table and §35.3.1 states the counting rule. This line has now been wrong
+  **five** times: "sixteen functions … plus two
   helpers" (omitting five functions the prose elsewhere required, and miscounting
   `trg_fin_artifact_document_valid` as a helper when it is bound directly), then "**twenty-two**
-  `trg_fin_*` functions" (which matched no revision of the DDL), and the reconciliation split in
-  §14.1.1 made it stale a third time. The count is now **taken from §35.3 by R2** rather than restated
-  here, so this narrative cannot drift from the inventory without R2 failing.
+  `trg_fin_*` functions" (which matched no revision of the DDL), then the reconciliation split in
+  §14.1.1 made it stale a third time, then **C-SEC made it stale a fourth by requiring four of these
+  functions to become `SECURITY DEFINER`**, and **P0-07 made it stale a fifth when `trg_fin_challan_refresh`
+  (row 8a) joined them and this pass added rows 10a and 12a**. `F5d` now exists as a separate row
+  rather than members being quietly reclassified inside F5's blanket "all invoker" claim. The count is
+  **taken from §35.3 by R2** rather than restated here, so this narrative cannot drift from the
+  inventory without R2 failing.
 - **Row-record access:** a trigger function that is bound to more than one operation reads the fired-on
   row by branching on `TG_OP`, **never** by `COALESCE(NEW.<col>, OLD.<col>)`. In PL/pgSQL a row
   trigger assigns only `NEW` on INSERT and only `OLD` on DELETE; `COALESCE` evaluates every argument,
@@ -6812,13 +9953,24 @@ REVOKE ALL ON FUNCTION post_fin_ledger_group(uuid, text, uuid, jsonb) FROM PUBLI
 - **Caller context:** whatever the writing session is — API, worker, or migration. There is no
   context in which a `trg_fin_*` function may branch on the caller's role, because that would make
   the integrity rule role-dependent, and a role-dependent money rule is not a money rule.
-- **RLS interaction:** **`SECURITY INVOKER`.** A trigger function that ran as owner would read
+- **RLS interaction:** **`SECURITY INVOKER`, except the five in F5d.** A trigger function that ran as
+  owner would read
   `fin_*` tables unfiltered, and since several of them aggregate across rows (the allocation bounds
   trigger sums a payment's allocations), an elevated read would silently let a cross-tenant sum
-  influence a same-tenant decision.
-- **Grants:** `REVOKE ALL … FROM PUBLIC` on each. No `GRANT` to any runtime role — a trigger
+  influence a same-tenant decision. F5d's five are the exception because they issue **their own**
+  `UPDATE` on columns §16.5.1 does not grant; they are read-elevated too, and that is accepted and
+  bounded rather than wished away: each is a trigger function with no arguments a caller controls, each
+  reads only the single invoice named by the fired-on row's `tenant_id`, and each is `VOLATILE` and
+  `search_path`-pinned. A caller cannot invoke F5d's logic against a row it cannot already write, because
+  the functions are trigger-only and their `EXECUTE` is a formality rather than an entry point.
+- **Grants:** `REVOKE ALL … FROM PUBLIC` on each. No `GRANT` to any runtime role **for F5** — a trigger
   function is only ever invoked by its trigger, and a stray `GRANT` would let a caller fire the logic
-  against a table they cannot otherwise write.
+  against a table they cannot otherwise write. **F5d's five are granted `EXECUTE` to `school_app_rw`**,
+  because a trigger function needs `EXECUTE` on its function to fire at all, and because the previous
+  revision's blanket "revoked, no grant" is why its cached-column hole was invisible: with no
+  `EXECUTE` grant stated anywhere for the functions that write `total`, the reader had no way to notice
+  the writes were unreachable, or to notice that the *table-level* grant made them reachable without
+  the trigger at all.
 - **Transaction:** the writing transaction, always. Every trigger is `BEFORE` or `AFTER` row level
   unless stated; the ledger balance check is a `CONSTRAINT TRIGGER … DEFERRABLE INITIALLY DEFERRED`
   (§15.1) precisely so it can see the whole group.
@@ -6838,8 +9990,14 @@ the grant stated, or with a `search_path` that does not end in `, pg_temp`. A st
 `0021`–`0029` and fails the build on any function whose `prosecdef`, `proconfig`, or `proacl` does
 not match this table — so the contract is mechanically enforced, not merely documented.
 
-**F5a — `trg_fin_invoice_recalc_balance(tenant, invoice)`, a declared helper**
+**F5a — `fin_invoice_reapply_derived_state(tenant, invoice)`, a declared helper (F5h's second member)**
 
+- **Naming note, because this heading was wrong in the previous revision:** it read
+  `trg_fin_invoice_balance_recompute(tenant, invoice)`, which names the *trigger* with the
+  *helper's* signature — two different functions, one of them not trigger-shaped at all. The helper is
+  `fin_invoice_reapply_derived_state`; the trigger is `trg_fin_invoice_balance_recompute()`. The two are
+  documented here and in §19.7.4 and listed once each in §19.7.2's table (row 13, and F5h), and the
+  inventory never counted this helper in either direction.
 - **Purpose:** hold the single copy of the `total − net_applied` expression that maintains
   `fin_invoices.balance`. It is a helper rather than a trigger function so that
   `trg_fin_invoice_balance_recompute` contains only the *decision* about which invoice to recompute —
@@ -6918,6 +10076,41 @@ not match this table — so the contract is mechanically enforced, not merely do
 - **Failure mode:** `23505` from the partial unique index when a second batch tries to claim a payment
   a live batch already holds. Cancelling releases by `UPDATE` and never by `DELETE`, so the match, its
   amounts, and the `cancelled` batch that voided them all remain as the audit record.
+
+**F5s — `fin_lock_payment_amount(tenant, payment)`, the unbound `SECURITY DEFINER` support function**
+
+- **Purpose:** perform the one privileged statement the two payment-bound triggers cannot perform for
+  themselves — `SELECT amount FROM fin_payments WHERE tenant_id = … AND id = … FOR UPDATE` — and
+  return that amount to the caller. It exists so the lock is taken in exactly one place, by exactly one
+  function, rather than being duplicated inline in both callers.
+- **Category, stated first because it is the part most easily got wrong:** this is an **unbound
+  `SECURITY DEFINER` support function**. It is **not** an F5h helper. It returns `numeric`, it is
+  called as an expression rather than `PERFORM`ed for effect, and it fails two of the three
+  §35.3.1 helper criteria; that definition was **not** widened to admit it, and the strict helper
+  count stays **2** (§13.1.1 D2C, §35.3.1, §19.7.2).
+- **Arguments:** `p_tenant_id uuid`, `p_payment_id uuid` — **both mandatory**. The tenant predicate
+  is not optional and not derivable from session state: omitting it would let a caller lock a payment
+  row in another tenant, so the function requires the pair rather than trusting a `current_setting`.
+- **Tenant derivation:** the `p_tenant_id` argument, full stop. There is no implicit tenant source.
+- **Returns:** `numeric(19,4)`, the payment's amount; `NULL` when no row matches.
+- **Caller context:** the only intended callers are **`trg_fin_allocation_bounds`** and
+  **`trg_fin_on_account_return_bounds`** (`0024`), both **`SECURITY INVOKER`**, both bound to
+  `fin_payment_allocations`, both delegating their payment-row lock here and neither taking a
+  `FOR UPDATE` on `fin_payments` itself.
+- **RLS interaction:** runs as owner, so the `fin_payments` read is **not** filtered by the caller's
+  RLS. That is deliberate and is the reason it must be a definer: the callers are `SECURITY INVOKER`
+  and hold no `UPDATE` privilege on `fin_payments`, so an invoker-run `FOR UPDATE` would **fail for
+  lack of privilege** rather than quietly succeed. Unlike F1/F2 there is no signed-ticket input to
+  bound the widening — safety comes instead from the **mandatory tenant predicate**, the **hardened
+  `search_path`**, and the fact that the function returns an amount rather than a row.
+- **Grants:** `REVOKE ALL … FROM PUBLIC`; **no grant to `school_app_rw`**. It is **not** an
+  application-facing function and has no runtime `EXECUTE` path — reachable only through its two
+  definers.
+- **Transaction:** the writing transaction; it takes a row lock and is therefore `VOLATILE`.
+- **Audit/outbox:** none. It is a lock, not an event.
+- **Failure mode:** a missing row returns `NULL` rather than raising, so a caller that requires the
+  row must check it — the callers do. The lock serialises concurrent writers on the same
+  `(tenant_id, payment_id)`, which is what closes the TOCTOU window the callers would otherwise open.
 
 **F6 — `app_finance_current_guardian_ids()`**
 
@@ -7070,8 +10263,817 @@ not match this table — so the contract is mechanically enforced, not merely do
   unconditional and is the *same* predicate as the self-only policy (§35.4). The definer rights turn
   any missing check into a cross-tenant write, which is why the check is inside the function and not
   left to the caller's route.
-- **Ordering:** `0028`, after `auth_mfa_factors` exists and before any `/mfa/confirm` route is live. It
-  is the last of the four MFA functions, so the post-condition assertions check all four.
+- **Ordering:** `0028`, after `auth_mfa_factors` exists and before any `/mfa/confirm` route is live. It is
+  the last of the four MFA functions, so the post-condition assertions check all four.
+
+**F11 — `postRefundApproval(p_refund_id uuid, p_action text)`**
+
+- **Purpose:** perform the whole `requested → approved` transaction atomically, and nothing else.
+  §13.2.2's nine steps are this function's body; the sequence is normative and this is its only
+  executable form.
+- **Arguments:** `p_refund_id uuid` — the refund to approve. `p_action text`, `CHECK`-equivalent
+  constrained by the first statement to `'approve'`; the parameter exists so the route can pass
+  `req.body.action` through without the function silently ignoring it, and a value other than
+  `'approve'` raises `55000` rather than falling through. **Neither argument is a tenant id, and
+  neither is a payment id, and neither is an amount** — the tenant comes from
+  `app_current_tenant_id()` and the amount, the payment and the proposed split are all read from the
+  locked `fin_refunds` row. A function that accepted `p_tenant_id` would be the privilege-escalation
+  primitive F1 and F2 are deliberately shaped to avoid.
+- **Tenant derivation:** implicit, from `app_current_tenant_id()`. The refund is located by
+  `(tenant_id, id)`, so a caller naming another tenant's refund id gets zero rows and then
+  `55000 refund_not_found` — **not** a cross-tenant read, because the predicate is tenant-prefixed
+  before anything is locked.
+- **Returns:** `void`. The caller re-reads the row; returning the new status would invite a caller to
+  trust a return value instead of the row, and the row is the authority.
+- **Caller context:** `school_app_rw` under a tenant ticket, holding `fees.refunds.approve`
+  (§20.3). The permission is checked **inside** the function, by **F13
+  `app_finance_actor_has_permission()`** — which is itself F1's actor classification joined to F2's
+  membership read — and not left to the route: definership bypasses the ACL, so the ACL's intent has
+  to be re-asserted in the body or it is not enforced at all.
+- **RLS interaction:** runs as `school_migrator`, so it bypasses `fin_refunds`' policy entirely. This
+  is the load-bearing consequence of definership and it is why steps 3 and 4 below are **not**
+  optional: the policy's `fees.refunds.approve` branch would never be evaluated for this call.
+- **Grants:** `REVOKE ALL … FROM PUBLIC`, then `GRANT EXECUTE … TO school_app_rw`.
+- **Transaction:** the caller's. There is no internal `BEGIN`/`COMMIT` and there must not be one —
+  steps 6, 7 and 8 are three separate writes that have to roll back together with the caller's
+  business transaction, which is what makes §13.2.2's step 9 guarantee ("a refund is never approved
+  without its ledger entry") real rather than aspirational.
+- **Audit/outbox:** emits **`fee.refund.approved`** (§23.1), carrying `refund_id`, `amount`,
+  `payment_id` and the actor. FI-022 asserts the count of `auth.step_up.consumed` events equals the
+  count of `fee.refund.approved` events for the refund, so the MFA consumption and the approval are
+  independently witnessed rather than one being inferred from the other.
+- **Failure mode:** every refusal is `55000` with a distinct message, mapped by `mapDomainError` to a
+  documented status: `refund_not_found` `404`; `refund_not_requested` `409`; `self_approval_forbidden`
+  `403`; `missing_fees_refunds_approve` `403`; `step_up_required` / `step_up_invalid` `403`;
+  `nothing_applied_to_refund` / `refund_exceeds_payment` `422`; `refund_ceiling_violation` `409`
+  (raised by the deferred trigger at `COMMIT`, not by this body). **No path returns a partial success**,
+  because the only `RETURN` is the one at the end.
+
+```sql
+-- ── 0028 fin_mfa_and_rbac.sql ─────────────────────────────────────────────────
+-- postRefundApproval is created HERE, in 0028, not in 0025. Two callees fix the
+-- migration: F8 app_consume_step_up() and F4 post_fin_ledger_group() are both
+-- 0028/0026 objects, and §30.3.1 forbids naming a later migration's object as
+-- though it existed. See §13.2.1 and §19.7.2.
+CREATE OR REPLACE FUNCTION postRefundApproval(p_refund_id uuid, p_action text)
+    RETURNS void
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+    v_tenant    uuid := app_current_tenant_id();
+    v_refund    fin_refunds;
+    v_refundable numeric(19,4);
+    v_approved  numeric(19,4);
+    v_leg       jsonb;
+    v_applied   jsonb := '[]'::jsonb;
+    v_elem      jsonb;
+    v_alloc_id  uuid;
+    v_alloc_amt numeric(19,4);
+    v_target    fin_payment_allocations;
+BEGIN
+    ------------------------------------------------------------------ step 0
+    IF p_action IS DISTINCT FROM 'approve' THEN
+        RAISE EXCEPTION 'postRefundApproval handles only the approve action, not %',
+            coalesce(p_action, 'null')
+            USING ERRCODE = '55000';
+    END IF;
+
+    ------------------------------------------------------------------ step 1
+    -- Tenant-prefixed BEFORE any lock, so a foreign id resolves to zero rows
+    -- rather than to a locked row in another tenant.
+    SELECT * INTO v_refund
+      FROM fin_refunds
+     WHERE tenant_id = v_tenant AND id = p_refund_id
+     FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'refund % not found in this tenant', p_refund_id
+            USING ERRCODE = '55000';
+    END IF;
+
+    -- Idempotency: the loser of a concurrent approve reads 'approved' and returns
+    -- without re-posting. This is the ONLY early return in the function, and it
+    -- returns before any write, so a replay cannot double-post the ledger group.
+    IF v_refund.status <> 'requested' THEN
+        IF v_refund.status = 'approved' THEN
+            RETURN;
+        END IF;
+        RAISE EXCEPTION 'refund % is %, not requested', p_refund_id, v_refund.status
+            USING ERRCODE = '55000';
+    END IF;
+
+    ------------------------------------------------------------------ step 2
+    -- F8. Consumes the challenge: decrements attempts_left and stamps
+    -- consumed_at. If any later step raises, the caller's transaction rolls back
+    -- and the consumption is un-done with it (§13.2.2 step 2, and §19.7.2's
+    -- "Transaction" clause on F11).
+    PERFORM app_consume_step_up(
+        app_ctx_session_id(), 'refund.approve', 'fin_refunds',
+        p_refund_id, v_refund.amount, NULL);
+
+    ------------------------------------------------------------------ step 3
+    IF v_refund.requested_by = app_current_user_id() THEN
+        RAISE EXCEPTION 'a refund may not be approved by the actor who requested it'
+            USING ERRCODE = '55000';
+    END IF;
+    IF NOT app_finance_actor_has_permission('fees.refunds.approve') THEN
+        RAISE EXCEPTION 'actor lacks fees.refunds.approve'
+            USING ERRCODE = '55000';
+    END IF;
+
+    ------------------------------------------------------------------ step 4
+    -- Lock the payment, THEN recompute. §12.6's protocol, in this order: a
+    -- refundable figure read before the payment lock is a stale figure.
+    PERFORM 1 FROM fin_payments
+     WHERE tenant_id = v_tenant AND id = v_refund.payment_id FOR UPDATE;
+
+    SELECT payment_applied(v_refund.payment_id)
+         - COALESCE((SELECT -SUM(a.amount)
+                       FROM fin_payment_allocations a
+                      WHERE a.tenant_id = v_tenant
+                        AND a.payment_id = v_refund.payment_id
+                        AND a.refund_id IS NOT NULL), 0)
+      INTO v_refundable;
+
+    ------------------------------------------------------------------ step 5
+    IF v_refundable <= 0 THEN
+        RAISE EXCEPTION 'nothing_applied_to_refund: payment % has no applied cash left to refund',
+            v_refund.payment_id
+            USING ERRCODE = '55000';
+    END IF;
+    IF v_refundable < v_refund.amount THEN
+        RAISE EXCEPTION 'refund_exceeds_payment: % refundable against a request for %',
+            v_refundable, v_refund.amount
+            USING ERRCODE = '55000';
+    END IF;
+
+    ------------------------------------------------------------------ step 6
+    -- The APPLIED split, walked from the PROPOSED split. jsonb_array_elements
+    -- preserves array order, and the per-element checks below are what make
+    -- step 9's completeness assertion reachable rather than pre-satisfied:
+    -- every element is resolved to a real `apply` row on this payment before a
+    -- single reversal row is written.
+    FOR v_elem IN
+        SELECT e FROM jsonb_array_elements(v_refund.proposed_allocations) AS e
+    LOOP
+        v_alloc_id := (v_elem ->> 'allocation_id')::uuid;
+        v_alloc_amt := (v_elem ->> 'amount')::numeric(19,4);
+
+        IF v_alloc_amt IS NULL OR v_alloc_amt <= 0 THEN
+            RAISE EXCEPTION 'proposed allocation for % carries a non-positive amount', v_alloc_id
+                USING ERRCODE = '55000';
+        END IF;
+
+        SELECT * INTO v_target
+          FROM fin_payment_allocations
+         WHERE tenant_id = v_tenant AND id = v_alloc_id;
+
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'proposed allocation % does not exist in this tenant', v_alloc_id
+                USING ERRCODE = '55000';
+        END IF;
+        IF v_target.payment_id IS DISTINCT FROM v_refund.payment_id
+           OR v_target.effect <> 'apply' THEN
+            RAISE EXCEPTION 'proposed allocation % is not an applied allocation on payment %',
+                v_alloc_id, v_refund.payment_id
+                USING ERRCODE = '55000';
+        END IF;
+        IF v_target.amount < v_alloc_amt THEN
+            RAISE EXCEPTION 'proposed reversal of % exceeds the applied allocation % of %',
+                v_alloc_amt, v_alloc_id, v_target.amount
+                USING ERRCODE = '55000';
+        END IF;
+
+        -- amount < 0 is the outflow sign; reversal_of_allocation_id and refund_id
+        -- are what trg_fin_refund_provenance and trg_fin_reversal_shape read.
+        INSERT INTO fin_payment_allocations (
+            tenant_id, payment_id, invoice_id, effect, amount,
+            reversal_of_allocation_id, refund_id, memo)
+        VALUES (
+            v_tenant, v_refund.payment_id, v_target.invoice_id, 'reverse', -v_alloc_amt,
+            v_alloc_id, v_refund.id,
+            format('refund %s', v_refund.refund_no));
+
+        v_applied := v_applied || jsonb_build_object(
+            'allocation_id', v_alloc_id,
+            'reversal_allocation_id',
+                (SELECT a.id FROM fin_payment_allocations a
+                  WHERE a.tenant_id = v_tenant AND a.refund_id = v_refund.id
+                    AND a.reversal_of_allocation_id = v_alloc_id
+                  ORDER BY a.id LIMIT 1),
+            'amount', v_alloc_amt);
+    END LOOP;
+
+    IF jsonb_array_length(v_applied) = 0 THEN
+        RAISE EXCEPTION 'refund % proposed no allocations; nothing to approve', p_refund_id
+            USING ERRCODE = '55000';
+    END IF;
+
+    ------------------------------------------------------------------ step 7
+    -- F4. The two-step refund, approve leg (§15.1 `REFUND — two-step`,
+    -- §35.7 row 2): relieve the receivable, recognise the payable. NO cash leg --
+    -- cash has not left. F4 validates and balances the group before inserting it.
+    v_leg := jsonb_build_array(
+        jsonb_build_object('account_code', '1200', 'direction', 'debit',
+                           'amount', v_refund.amount),
+        jsonb_build_object('account_code', '2200', 'direction', 'credit',
+                           'amount', v_refund.amount));
+
+    PERFORM post_fin_ledger_group(
+        v_tenant, 'fee.refund.approved', v_refund.id, v_leg);
+
+    -- The outbox row, in the SAME transaction as F8's consumption above. That
+    -- co-location is what FI-022 asserts a bijection over: every consumed
+    -- challenge has exactly one approved event and vice versa. Writing it here
+    -- rather than in the route is what makes the pairing structural.
+    PERFORM app_finance_emit_event('fee.refund.approved', v_tenant, 'fin_refunds',
+        v_refund.id, jsonb_build_object(
+            'amount',     v_refund.amount,
+            'payment_id', v_refund.payment_id));
+
+    ------------------------------------------------------------------ step 8
+    -- The one UPDATE on fin_refunds in Phase 7, and the reason F11 is a definer.
+    -- fin_refunds_decision_ck enforces the coherence of these four together.
+    UPDATE fin_refunds
+       SET status              = 'approved',
+           decided_by          = app_current_user_id(),
+           decided_at          = now(),
+           applied_allocations = v_applied
+     WHERE tenant_id = v_tenant AND id = p_refund_id;
+
+    -- step 9 is not a statement: fn_fin_refund_ceiling is a DEFERRABLE INITIALLY
+    -- DEFERRED constraint trigger and runs after this function returns, at COMMIT,
+    -- with every reversal row from step 6 visible. See §13.3.1.
+
+    RETURN;
+END $$;
+REVOKE ALL ON FUNCTION postRefundApproval(uuid, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION postRefundApproval(uuid, text) TO school_app_rw;
+```
+
+**F12 — `postRefundProcess(p_refund_id uuid, p_action text, p_reason text DEFAULT NULL,
+p_disbursement_reference text DEFAULT NULL)`**
+
+- **Purpose:** the two remaining transitions, `requested → rejected` and `approved → processed`. It is
+  a separate function from F11 for the least-privilege reason given above, and it is one function
+  rather than two because `reject` posts nothing and needs no ledger capability, so a single function
+  with a constrained `p_action` carries strictly less privilege surface than F11.
+- **Arguments:** `p_refund_id`; `p_action` constrained to `'process'` or `'reject'`; `p_reason`, which
+  is **`NOT NULL` in effect for `reject`** — the function raises `55000 rejection_reason_required` when
+  `p_action = 'reject'` and the reason is blank, matching §35.7 row 3's "reason required" guard; and
+  `p_disbursement_reference`, which is **`NOT NULL` in effect for `process`** — `55000
+  disbursement_reference_required` when blank, matching §35.7 row 4's "disbursement reference present"
+  guard. The two are deliberately independent arguments rather than one overloaded `text`: a caller that
+  supplied a reason for a disbursement, or a bank reference for a rejection, would be storing one
+  fact's value in the other's column. Each is required by exactly one action and ignored by the other.
+- **Tenant derivation, returns, grants, volatility:** identical to F11, for identical reasons. It is
+  `SECURITY DEFINER` for the same reason — each branch's only write is an `UPDATE` of `fin_refunds`.
+- **Caller context:** `school_app_rw` holding `fees.refunds.process` for `p_action = 'process'`, or
+  `fees.refunds.approve` for `p_action = 'reject'` — **two different permissions on one function**, which
+  is the three-step separation of §20.3 expressed at the function boundary. The check is per-action.
+- **RLS interaction:** as F11 — bypassed, so both permission checks are inside the body.
+- **Audit/outbox:** `process` emits **`fee.refund.processed`**; `reject` emits **`fee.refund.rejected`**
+  with the reason. Neither is emitted on a replay.
+- **Failure mode:** `refund_not_found` `404`; `refund_not_approved` `409` (process on a non-`approved`
+  row); `refund_already_decided` `409` (reject on a non-`requested` row — including `approved`, which is
+  why row 7 of §35.7 exists); `rejection_reason_required` `422`;
+  `disbursement_reference_required` `422`; `step_up_required` / `step_up_invalid` `403` (process only —
+  **reject does not require step-up**, per §35.7 row 3's guard and §13.2's transition table);
+  `self_approval_forbidden` `403`; `refund_ceiling_violation` `409` from the deferred trigger at
+  `COMMIT`.
+- **Terminality is enforced here, not by a trigger, and the reason is worth stating.** A
+  `trg_fin_refund_state` on `fin_refunds` was considered and rejected: a `BEFORE UPDATE` trigger runs
+  *before* the row is stored, so it cannot distinguish "this `UPDATE` came from F11/F12" from "this
+  `UPDATE` came from `school_migrator`", and the one caller that must be able to perform a
+  maintenance write would have to be special-cased by name. Because `UPDATE` is **revoked** from
+  `school_app_rw` (§35.4), there is exactly one non-owner writer and it is F11/F12, so the state graph
+  is enforced by *the absence of any other writer* rather than by a predicate. This is the same
+  reasoning as `fin_payment_allocations`'s append-only boundary, and §12.1/D1 states it there.
+
+```sql
+-- ── 0028 fin_mfa_and_rbac.sql (continued) ───────────────────────────────────
+CREATE OR REPLACE FUNCTION postRefundProcess(
+    p_refund_id uuid, p_action text, p_reason text DEFAULT NULL,
+    p_disbursement_reference text DEFAULT NULL)
+    RETURNS void
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+    v_tenant uuid := app_current_tenant_id();
+    v_refund fin_refunds;
+    v_leg    jsonb;
+BEGIN
+    IF p_action IS DISTINCT FROM 'process' AND p_action IS DISTINCT FROM 'reject' THEN
+        RAISE EXCEPTION 'postRefundProcess handles process or reject, not %',
+            coalesce(p_action, 'null')
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT * INTO v_refund
+      FROM fin_refunds
+     WHERE tenant_id = v_tenant AND id = p_refund_id
+     FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'refund % not found in this tenant', p_refund_id
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF p_action = 'reject' THEN
+        ---------------------------------------------------------- reject branch
+        IF v_refund.status <> 'requested' THEN
+            IF v_refund.status = 'rejected' THEN
+                RETURN;                              -- idempotent replay
+            END IF;
+            RAISE EXCEPTION 'refund_already_decided: refund % is % and cannot be rejected',
+                p_refund_id, v_refund.status
+                USING ERRCODE = '55000';
+        END IF;
+        IF v_refund.requested_by = app_current_user_id() THEN
+            RAISE EXCEPTION 'a refund may not be rejected by the actor who requested it'
+                USING ERRCODE = '55000';
+        END IF;
+        IF NOT app_finance_actor_has_permission('fees.refunds.approve') THEN
+            RAISE EXCEPTION 'actor lacks fees.refunds.approve'
+                USING ERRCODE = '55000';
+        END IF;
+        IF p_reason IS NULL OR btrim(p_reason) = '' THEN
+            RAISE EXCEPTION 'rejection_reason_required: a rejected refund must record why'
+                USING ERRCODE = '55000';
+        END IF;
+
+        -- No allocation rows exist (that is what staging means), so nothing to
+        -- reverse and nothing to post. The deferred ceiling still runs at COMMIT
+        -- and finds no reversal rows for this refund, which is the correct
+        -- outcome for a rejected request: FI-006 does not apply to it.
+        UPDATE fin_refunds
+           SET status           = 'rejected',
+               decided_by       = app_current_user_id(),
+               decided_at       = now(),
+               rejection_reason = btrim(p_reason)
+         WHERE tenant_id = v_tenant AND id = p_refund_id;
+
+        PERFORM app_finance_emit_event('fee.refund.rejected', v_tenant, 'fin_refunds',
+            p_refund_id, jsonb_build_object('reason', btrim(p_reason)));
+        RETURN;
+    END IF;
+
+    ------------------------------------------------------------- process branch
+    IF v_refund.status <> 'approved' THEN
+        IF v_refund.status = 'processed' THEN
+            RETURN;                                  -- idempotent replay
+        END IF;
+        RAISE EXCEPTION 'refund_not_approved: refund % is %, not approved',
+            p_refund_id, v_refund.status
+            USING ERRCODE = '55000';
+    END IF;
+    IF NOT app_finance_actor_has_permission('fees.refunds.process') THEN
+        RAISE EXCEPTION 'actor lacks fees.refunds.process'
+            USING ERRCODE = '55000';
+    END IF;
+    -- §35.7 row 4's guard, enforced here rather than asserted in a comment. This
+    -- is the transition where cash leaves the school, so the payout is required to
+    -- be reconcilable against a bank statement before it is posted. The CHECK
+    -- would also refuse the UPDATE below without it; this makes the failure a
+    -- named 55000 at the call site instead of a 23514 from the table.
+    IF p_disbursement_reference IS NULL OR btrim(p_disbursement_reference) = '' THEN
+        RAISE EXCEPTION 'disbursement_reference_required: a processed refund must record the payout reference'
+            USING ERRCODE = '55000';
+    END IF;
+
+    -- F8 again, bound to the OTHER action. The challenge table's CHECK is
+    -- action IN ('refund.approve','refund.process') precisely so a challenge
+    -- minted for approval cannot be spent on disbursement.
+    PERFORM app_consume_step_up(
+        app_ctx_session_id(), 'refund.process', 'fin_refunds',
+        p_refund_id, v_refund.amount, NULL);
+
+    -- The process leg (§15.1 `REFUND — two-step`, §35.7 row 4): extinguish the
+    -- payable against cash or bank. THIS is where cash leaves.
+    v_leg := jsonb_build_array(
+        jsonb_build_object('account_code', '2200', 'direction', 'debit',
+                           'amount', v_refund.amount),
+        jsonb_build_object('account_code', '1000', 'direction', 'credit',
+                           'amount', v_refund.amount));
+
+    PERFORM post_fin_ledger_group(
+        v_tenant, 'fee.refund.processed', v_refund.id, v_leg);
+
+    UPDATE fin_refunds
+       SET status       = 'processed',
+           processed_by = app_current_user_id(),
+           processed_at = now(),
+           disbursement_reference = btrim(p_disbursement_reference)
+     WHERE tenant_id = v_tenant AND id = p_refund_id;
+
+    PERFORM app_finance_emit_event('fee.refund.processed', v_tenant, 'fin_refunds',
+        p_refund_id, jsonb_build_object(
+            'amount', v_refund.amount,
+            'disbursement_reference', btrim(p_disbursement_reference)));
+END $$;
+REVOKE ALL ON FUNCTION postRefundProcess(uuid, text, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION postRefundProcess(uuid, text, text, text) TO school_app_rw;
+```
+
+**F13 and F14 exist because F11 and F12 cannot be executable without them, and the two earlier ways of
+handling that were both wrong.** The first revision called them placeholders and tracked the gap as
+**OD-17**, which is a real defect of exactly row 26's class — a body that calls a name the document
+never defines — and the second revision's alternative of inlining them was worse, for a reason worth
+stating because it is the whole justification for these two rows:
+
+- **F13 could not be replaced by F1.** `app_finance_actor_class()` returns one of six literals derived
+  from a **role code** (`school_owner`/`accountant`/`cashier`). It cannot answer "does this actor hold
+  `fees.refunds.process`", which is what §35.7 rows 2, 3 and 4 are written in terms of. Substituting the
+  class for the permission would silently widen the boundary: every `finance_staff` actor holds
+  `fees.refunds.request` and would thereby also gain approve and process — **the exact three-step
+  separation of §20.3 collapses to one step**, and no assertion in the document would notice, because
+  F11/F12 would still be reading *a* function.
+- **F14 could not be inlined either, not for privilege reasons but for tenancy ones.** `outbox_events`
+  is `ENABLE`/`FORCE` RLS and its `INSERT` policy (`0001:352-356`) admits a row only when
+  `tenant_id = app_current_tenant_id()`. F11 is a definer, so it runs as `school_migrator`, but
+  `FORCE` means the policy is evaluated for the owner too, and `app_current_tenant_id()` reads the
+  session ticket rather than the definer — so the row is admitted exactly when the caller holds a
+  matching tenant ticket. Writing that check once, in one place, with the assertion that the argument
+  tenant equals the session tenant, is what makes it an invariant instead of an accident of call order.
+
+Both are `SECURITY DEFINER` for the same reason F1 is, and it is a reason about *reads*, not about
+writes: `roles`, `membership_roles` and `role_permissions` are RLS-scoped, so an under-privileged read
+returns an empty set, an empty set is `false`, and `false` on a permission check reads as "no
+permission" — a silent denial of a legitimate finance officer, with no error to trace.
+
+**F13 — `app_finance_actor_has_permission(p_permission text)`**
+
+- **Purpose:** answer whether the current actor holds one named permission in the current tenant. F11
+  asks it for `fees.refunds.approve`; F12 asks for `fees.refunds.approve` (reject) and
+  `fees.refunds.process` (process).
+- **Arguments:** the permission string, and nothing else. **A caller can name a capability but not a
+  person**: the actor is `app_ctx_user()` and the tenant is `app_current_tenant_id()`, both read from
+  the signed ticket. There is no `(user_id, permission)` form, because that would be the
+  privilege-escalation primitive F1 and F2 are shaped to avoid — a function that answers "does user X
+  hold Y" is an oracle over the whole RBAC graph.
+- **Returns:** `boolean`, never `NULL`. An actor with no active membership is `false`, not an error:
+  every calling policy in the repository treats a missing relationship as "deny".
+- **Body shape:** `app_privileged()` short-circuits to `true` — the migrator and the outbox worker need
+  no permission row — then an `EXISTS` over `memberships m JOIN membership_roles mr ON mr.membership_id
+  = m.id JOIN roles r ON r.id = mr.role_id JOIN role_permissions rp ON rp.role_id = r.id`, filtered on
+  `m.tenant_id = app_current_tenant_id()`, `m.user_id = app_ctx_user()`, `m.status = 'active'`,
+  `r.tenant_id = m.tenant_id` and `rp.permission = p_permission`. The `r.tenant_id = m.tenant_id`
+  conjunct is the one that is easy to omit and expensive to omit: `roles` permits `tenant_id IS NULL`
+  for platform-scope roles, so without it a platform role would satisfy a tenant permission check.
+- **Volatility:** `STABLE`. It reads only, it is called from `VOLATILE` definers, and `STABLE` is what
+  lets PostgreSQL fold two calls in one statement into one read.
+- **Grants:** `REVOKE ALL … FROM PUBLIC`, then `GRANT EXECUTE … TO school_app_rw`. Granting it is
+  correct and not a widening: an actor who holds the permission learns only that they hold it.
+
+**F14 — `app_finance_emit_event(p_event_type text, p_tenant_id uuid, p_aggregate_type text,
+p_aggregate_id uuid, p_payload jsonb)`**
+
+- **Purpose:** write one `outbox_events` row in the caller's transaction, so that a refund's state
+  change and the event that announces it are co-located. FI-022's bijection between a consumed step-up
+  challenge and a `fee.refund.approved` event is only meaningful because both are written by the same
+  transaction that cannot partially commit.
+- **Arguments:** the event type, the tenant, the aggregate type and id, and the payload. The tenant is
+  an argument rather than derived so the assertion can compare it against the session tenant — the
+  check is `p_tenant_id = app_current_tenant_id()`, raising `55000` otherwise. A helper that silently
+  substituted the session tenant would let a caller stamp an event against a tenant it cannot see.
+- **Returns:** `void`. It performs an `INSERT`; the id is not returned because no caller needs it and
+  returning it invites a caller to correlate on a value it did not have to begin with.
+- **Volatility:** `VOLATILE`, necessarily — a function that writes cannot be `STABLE`, and this is F8's
+  lesson applied in advance rather than after a failed `CREATE`.
+- **Payload discipline:** the payload carries **ids and amounts only**. No PAN, no IBAN, no name — the
+  redaction contract in §1/§25 is not bypassed by writing the row from inside the database rather than
+  from the route, because the row is persisted verbatim in `outbox_events.payload` either way.
+- **Grants:** `REVOKE ALL … FROM PUBLIC`, then `GRANT EXECUTE … TO school_app_rw`.
+
+```sql
+-- ── 0028 fin_mfa_and_rbac.sql (continued) ───────────────────────────────────
+-- F13: one named permission for the current actor. The actor and the tenant are
+-- read from the signed ticket; the only argument is the capability being asked
+-- about, so there is no (user, permission) oracle to expose.
+CREATE OR REPLACE FUNCTION app_finance_actor_has_permission(p_permission text)
+    RETURNS boolean
+    LANGUAGE sql
+    STABLE
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+    SELECT p_permission IS NOT NULL
+       AND (
+        app_privileged()
+        OR EXISTS (
+            SELECT 1
+              FROM memberships m
+              JOIN membership_roles mr ON mr.membership_id = m.id
+              JOIN roles            r  ON r.id = mr.role_id
+              JOIN role_permissions rp ON rp.role_id = r.id
+             WHERE m.tenant_id = app_current_tenant_id()
+               AND m.user_id   = app_ctx_user()
+               AND m.status    = 'active'
+               AND r.tenant_id = m.tenant_id      -- NOT NULL-able: platform roles
+               AND rp.permission = p_permission    -- must not satisfy a tenant check
+        )
+       );
+$$;
+REVOKE ALL ON FUNCTION app_finance_actor_has_permission(text) FROM PUBLIC;
+-- No GRANT to school_app_rw, and the previous revision's grant is withdrawn.
+-- F11 and F12 are SECURITY DEFINER owned by school_migrator, so they reach this
+-- function as the owner and need no grant. A direct grant gave the runtime role a
+-- standing oracle for "does the current actor hold permission X" -- harmless per
+-- query, but it is exactly the capability-not-directly-callable posture F-06 asks
+-- for everywhere else, and a permission oracle is the one such function whose
+-- value is not confined to its own caller's data.
+
+**F13 is created by `0026`, not `0028`, and that is a corrected ordering defect rather than a
+preference.** `0025` is immutable and its `postRefundProcess` body calls
+`app_finance_actor_has_permission` twice. PL/pgSQL resolves a function call at execution time, so
+`CREATE FUNCTION postRefundProcess` succeeds with F13 absent and the failure surfaces later as
+`42883 undefined_function` — on the *first refund approval*, in whichever role runs it, at whatever
+hour that happens. Placing F13 in `0028` would therefore ship a migration sequence in which refunds
+are structurally approved and structurally unapprovable, with the break straddling two releases. `0026`
+runs before `0025`, so F13 is in place when `0025` loads. Its own dependencies are `0001`
+(`memberships`, `membership_roles`, `roles`, `role_permissions`, `app_ctx_user`) and F1, both of which
+exist by `0026`, and it references no `0027`/`0028` object. F14 (`app_finance_emit_event`) moves for
+the same reason: `0025` calls it in both F11 and F12.
+
+-- F14: the transactional outbox write, in the caller's transaction. `aggregate_id`
+-- is text in 0001:167-180, so the uuid is cast rather than left to fail a
+-- polymorphic INSERT; correlation_id stays NULL because no app_current_
+-- correlation_id() exists (F4's second honest limit, §19.7.3).
+CREATE OR REPLACE FUNCTION app_finance_emit_event(
+    p_event_type     text,
+    p_tenant_id      uuid,
+    p_aggregate_type text,
+    p_aggregate_id   uuid,
+    p_payload        jsonb
+) RETURNS void
+    LANGUAGE plpgsql
+    VOLATILE
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+    v_session_tenant uuid := app_current_tenant_id();
+BEGIN
+    -- outbox_events_insert (0001:352-356) admits a row only for the session
+    -- tenant, and FORCE ROW LEVEL SECURITY means that policy is evaluated for
+    -- this owner too. Asserting the agreement here turns a silently dropped
+    -- event into a 55000 that rolls back the state change that produced it.
+    -- An EMPTY ticket is the worker case and is legitimate, but only for the
+    -- migrator login: the previous revision's
+    -- `p_tenant_id IS DISTINCT FROM app_current_tenant_id()` had no such
+    -- branch, so a worker posting a genuine tenant's event was forced to pass a
+    -- NULL tenant to match the NULL session -- and then wrote the outbox row
+    -- with a NULL tenant_id, which is the one value the policy and every
+    -- downstream consumer assume means "platform". The guard has to distinguish
+    -- "no session tenant because this is the migrator" from "no session tenant
+    -- because the caller has none".
+    IF v_session_tenant IS NULL THEN
+        IF session_user <> 'school_migrator' THEN
+            RAISE EXCEPTION 'outbox write requires a tenant-scoped session'
+                USING ERRCODE = '42501';
+        END IF;
+    ELSIF p_tenant_id IS DISTINCT FROM v_session_tenant THEN
+        RAISE EXCEPTION 'outbox tenant % does not match the session tenant %',
+            p_tenant_id, v_session_tenant
+            USING ERRCODE = '55000';
+    END IF;
+    IF p_payload IS NULL THEN
+        RAISE EXCEPTION 'outbox payload must not be null'
+            USING ERRCODE = '55000';
+    END IF;
+
+    INSERT INTO outbox_events (
+        tenant_id, event_type, aggregate_type, aggregate_id, payload
+    ) VALUES (
+        p_tenant_id, p_event_type, p_aggregate_type,
+        p_aggregate_id::text, p_payload
+    );
+END $$;
+REVOKE ALL ON FUNCTION app_finance_emit_event(text, uuid, text, uuid, jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app_finance_emit_event(text, uuid, text, uuid, jsonb) TO school_app_rw;
+```
+
+**Neither name is now undefined, and `OD-17` is withdrawn.** It was raised to record the choice between
+defining these two and inlining them; the bodies above are the definition, and the reasoning above is
+why the inlining alternative was rejected rather than merely declined. The only undefined name left in
+either F11 or F12 body is **`app_ctx_session_id()`**, which is the pre-existing **P2-10 / OD-14** and is
+not specific to the refund machine — F8 and F9 take the session id the same way.
+
+#### 19.7.4 F5d — the five cache writers, in full (C-SEC)
+
+These are the only Phase 7 functions that write a cached column on their own behalf, and they are the
+whole of the defence that makes §16.5.1's column-level grants safe. Each contract is stated in the same
+form as F1–F10's, because "it is a trigger, so it is fine" is the assumption C-SEC found to be false.
+
+**`trg_fin_invoice_number()` — 0023, bound as row 4**
+
+- **Purpose:** allocate the next invoice number from `fin_document_counters` and stamp `issued_at`, or
+  clear both on a return to `draft`. §9.1's `fin_invoices_number_ck` states the rule; this is what makes
+  it true.
+- **Why it must be a definer:** §35.4 revokes `UPDATE` on `fin_document_counters` from
+  `school_app_rw`. That revoke is the control — it is what makes `trg_fin_invoice_number` the only
+  possible writer of a counter. Under `SECURITY INVOKER` the function inherits the caller's
+  privileges, its own `UPDATE` fails `42501`, and **no invoice can ever be issued**.
+- **Boundedness:** the only `UPDATE` is `WHERE tenant_id = NEW.tenant_id AND academic_year_id =
+  NEW.academic_year_id AND kind = 'invoice'`, and `NEW.tenant_id` is RLS- and FK-constrained to the
+  caller's tenant before the trigger runs. The function cannot be steered to a counter row for another
+  tenant, because it never accepts one.
+- **Not caller-steerable:** trigger-only, `RETURNS trigger`, no arguments a caller supplies.
+- **`VOLATILE`**, `search_path = pg_catalog, public, pg_temp`, `REVOKE ALL … FROM PUBLIC`,
+  `GRANT EXECUTE TO school_app_rw`.
+
+**`trg_fin_invoice_header_guard()` — 0023, bound as row 4a — `SECURITY INVOKER`, and F5a not F5d**
+
+- **Purpose:** normalise the caches on INSERT, refuse an `UPDATE` of any server-owned header column
+  outside a declared maintenance context (§9.6.0 clause (2)), and derive `due_date` (C-8). **It no longer
+  stamps `frozen_at`; that moved to row 4d.** Every statement in the function body is an assignment to
+  `NEW`.
+- **Why it is an invoker, which the previous revision got wrong:** it used to be a definer because its
+  clause (6) issued `UPDATE fin_invoice_items SET frozen_at = now()`. Definership was therefore not
+  describing the function, it was **compensating for a clause that should not have been there** — and it
+  was actively harmful, because §35.4 revokes table-level `UPDATE` on `fin_invoices` from
+  `school_app_rw`, so a definer guard ran with `school_migrator` rights and its *own* clause (2)
+  could not tell a caller's `UPDATE` from a maintenance writer's. Making it an invoker means the
+  privilege context in which clause (2) evaluates is the caller's, which is the only context in which
+  "caller" means anything. The rule in §16.5.2 is about *statements*, and this is now the function that
+  demonstrates it: **it stopped being a definer by losing its `UPDATE`, not by being relabelled.**
+- **Boundedness:** not applicable in the definership sense — it holds no privilege the caller lacks. It
+  reads the one `fin_*` rows named by the fired-on row's own `tenant_id`/`id`, and writes nothing but
+  `NEW`.
+- **Considered and rejected:** keeping the definer and adding a role check inside clause (2). Rejected
+  because the role a nested statement *effectively* runs as is the definer's, not the caller's, so the
+  check would have to ask a question the trigger cannot answer; and because the structural fix (§9.6.0.1)
+  removes the only clause that needed the privilege at all.
+- **`VOLATILE`**, pinned `search_path`, revoked from `PUBLIC`, `EXECUTE` granted to `school_app_rw`.
+
+**`trg_fin_invoice_freeze_lines()` — 0023, bound as row 4d**
+
+- **Purpose:** stamp `frozen_at` on every line of an invoice leaving `draft`. It exists because the
+  stamp had to move out of the guard (§9.6.0.1) and needed somewhere to go.
+- **Why it must be a definer:** its own `UPDATE fin_invoice_items SET frozen_at = now()`, and §16.5.1
+  grants no `UPDATE` on that column to anyone. As an invoker the stamp would fail `42501` the first
+  time an invoice was issued — the identical failure to the one this revision is fixing, moved one
+  function to the right.
+- **`AFTER`, not `BEFORE`, and this is the design decision rather than a detail:** from a `BEFORE`
+  trigger the nested `UPDATE` reaches the header guard's clause (2) at depth 2 — refused, or, once
+  that is widened, **clobbered by the outer statement**, which stores its own pre-image and overwrites
+  the header guard's cache write with the value it computed *before* the lines were stamped. `AFTER`
+  makes both impossible: the header row is already stored when the stamp runs, and the nested write
+  lands last. See §9.6.0.1 for the full argument and control `ctl_csec_b` for the evidence.
+- **Boundedness:** the `UPDATE` is `WHERE tenant_id = NEW.tenant_id AND invoice_id = NEW.id`, both read
+  from the fired-on row. Reachable only on a `draft → non-draft` transition on **this** invoice, which
+  is exactly the transition that makes its lines immutable (§9.4.1).
+- **`WHEN`, and why it excludes `void`:** `WHEN (OLD.status = 'draft' AND NEW.status <> 'draft' AND NEW.status <> 'void')`.
+  Voiding moves an invoice *out of* `issued`, not out of `draft`, so the clause would already exclude it;
+  the term is written out so that a draft invoice cannot be voided straight to issued by the helper and
+  accidentally settled — a live invariant, not decoration.
+- **`VOLATILE`**, pinned `search_path`, revoked from `PUBLIC`, `EXECUTE` granted to `school_app_rw`.
+
+**`trg_fin_invoice_item_total()` — 0023, bound as row 6**
+
+- **Purpose:** recompute `fin_invoices.subtotal` and `.total` from the two children, summing
+  **approved** adjustments only (C-6).
+- **Why it must be a definer:** its own `UPDATE fin_invoices SET subtotal, total`, and §16.5.1 grants
+  neither column to `school_app_rw`. Under `SECURITY INVOKER` the first line inserted on an invoice
+  fails `42501` and the invoice can never be built.
+- **Boundedness:** the `UPDATE` is `WHERE tenant_id = v_tenant AND id = v_invoice`, and both locals are
+  taken from the fired-on row's own `tenant_id`/`invoice_id` — never from a caller argument. A
+  cross-tenant write would require the fired-on row to already carry another tenant's id, which the
+  composite FKs and the RLS policy both refuse.
+- **`VOLATILE`**, pinned `search_path`, revoked from `PUBLIC`, `EXECUTE` granted to `school_app_rw`.
+
+**`trg_fin_invoice_balance_recompute()` — 0024, bound as row 13 (three tables)**
+
+- **Purpose:** decide *which* invoices to reapply, and reapply both sides of a moved allocation. It
+  issues no `UPDATE` of its own; every write it causes is issued by the helper below.
+- **Why it must be a definer:** its callee's `UPDATE` runs in **its** context, not the callee's. A
+  callee cannot be privileged by a caller that is not itself privileged, so row 13 is the definer and
+  the helper is `SECURITY INVOKER`. Making the helper the definer instead would also work and would
+  leave row 13 an invoker — but it would give an unbound, directly-callable `uuid, uuid → void`
+  function an elevated role, which is why the elevation is put on the bound function instead. The
+  choice is recorded here so a reader does not "fix" one and not the other: the two must change
+  together, and only in this direction.
+- **Boundedness:** it takes no arguments a caller controls. The three table bindings mean it fires
+  once per affected child row, and each firing addresses exactly the one or two invoices named by that
+  row's own `invoice_id`.
+- **`VOLATILE`**, pinned `search_path`, revoked from `PUBLIC`, `EXECUTE` granted to `school_app_rw`.
+
+**`trg_fin_challan_refresh()` — 0024, bound as row 8a**
+
+- **Purpose:** re-derive `fin_challans.status` when the owning invoice's cache changes. Row 8's
+  `trg_fin_challan_status` derives the challan from the invoice, but it fires only when a *challan* row is
+  written; without this binding a change to the invoice leaves the challan's cached status stale — the
+  P0-07 defect (§10.2.1).
+- **Why it must be a definer:** its own `UPDATE fin_challans SET status`, and §35.4 grants nobody
+  `UPDATE` on `fin_challans`. Under `SECURITY INVOKER` the refresh would fail `42501` the first time an
+  invoice's status moved.
+- **Why the self-assignment `SET status = status` is not a no-op:** it is deliberate — it forces row 8's
+  `BEFORE UPDATE` deriver to re-run against the matched challan row and overwrite `status` from the
+  invoice. Assigning `NEW.status` would be circular; assigning the invoice's status directly would bypass
+  row 8's derivation.
+- **Boundedness:** the `UPDATE` is `WHERE tenant_id = NEW.tenant_id AND invoice_id = NEW.id`, both read
+  from the fired-on invoice. It cannot be steered to another tenant's challan because it never accepts a
+  tenant or invoice argument.
+- **Skip-draft guard:** `NEW.status = 'draft'` returns early; §10.2's entry condition is `balance > 0`, so
+  no challan is ever issued against a draft, and a draft's status is not payment state.
+- **`VOLATILE`**, pinned `search_path`, revoked from `PUBLIC`, `EXECUTE` granted to `school_app_rw`.
+
+**`fin_invoice_reapply_derived_state(uuid, uuid)` — 0024, unbound, `PERFORM`ed by row 13, F5h**
+
+- **Purpose:** compute `balance`, decide `status` from it and from `total`, and stamp or clear `paid_at`
+  (C-9.2). All three writes are the cache; all three are ungranted.
+- **Security classification: `SECURITY INVOKER`, and it is in F5h rather than F5d.** It writes the
+  same columns the definers write, but it needs no definership of its own: its only caller,
+  `trg_fin_invoice_balance_recompute`, is a definer, and a nested `SECURITY INVOKER` function executes
+  as its caller's role. Marking it a definer too — as an intermediate revision did — would have made
+  an ordinary callable function elevated for no gain.
+- **Boundedness:** both parameters come from the fired-on row, and it writes exactly one invoice,
+  addressed by `(tenant_id, id)`. Unlike the definers, whose signatures are trigger-only, this
+  one takes two `uuid`s and returns `void` — so it is **directly callable** by anyone holding `EXECUTE`.
+  `REVOKE ALL … FROM PUBLIC` is therefore the whole boundary and **no `GRANT` follows it**. An
+  earlier revision granted `EXECUTE` to `school_app_rw` here "for uniformity"; with two guessable
+  uuid arguments and an inherited elevated role, that grant would have been a write primitive for any
+  invoice in any tenant the caller could name, which is strictly worse than the cache hole C-SEC
+  closed. It needs no grant: a `PERFORM`ed function is executed as its caller's role, and its caller
+  is the owner.
+- **`VOLATILE`**, pinned `search_path`, revoked from `PUBLIC`, **`EXECUTE` granted to nobody** — which
+  is what F5h's row says. This is the one place in Phase 7 where a function is revoked *and* left
+  ungranted, and the asymmetry is the point: a trigger function needs `EXECUTE` to fire, and this one
+  does not fire.
+
+**`fin.invoice_maintenance_scope` — the maintenance context (C-SEC), which is not a function**
+
+The guard's clause (2) needs something to say "this statement is a cache writer". It is not a role and
+it is not a privilege, and §16.5.2's rule about definers does not cover it, so it is specified here
+rather than left to the individual functions.
+
+- **The GUC:** `fin.invoice_maintenance_scope`, a transaction-local custom GUC. Producers set it with
+  `PERFORM pg_catalog.set_config('fin.invoice_maintenance_scope', '<value>', true)` — the `true` is
+  **transaction-local**, not session, so the window is bounded by the statement that opened it and a
+  pooled connection cannot inherit a stale scope from an earlier transaction. Each producer sets it
+  immediately before its own `UPDATE` and resets it to `''` immediately after, so the context is
+  scoped to one statement inside one function body.
+- **The vocabulary is closed and exact — two values, four columns:**
+
+  | Value | Columns it authorises | Producer |
+  |---|---|---|
+  | `'invoice_line_totals'` | `subtotal`, `total` | `trg_fin_invoice_item_total` (row 6) |
+  | `'invoice_balance_state'` | `balance`, `paid_at` | `trg_fin_invoice_balance_recompute` (row 13) → `fin_invoice_reapply_derived_state` |
+
+  `invoice_no` and `issued_at` are in **no** scope, and neither is `updated_at` or `status`. Those four
+  are written only by `trg_fin_invoice_number` (row 4) and the status decision in
+  `fin_invoice_reapply_derived_state`, which is reached only through row 13's balance path.
+- **Both factors, always:** clause (2) requires `pg_trigger_depth() >= 2` **and** a scope that covers the
+  column being changed. Neither factor alone is sufficient, and the design says which is which:
+  - **The GUC is forgeable.** `SET` is a session-level capability that any role holding it has, and a
+    caller who reaches clause (2) with depth ≥ 2 — by issuing a nested write from a trigger of their own
+    — could name any scope. **This is why the GUC is not the boundary.**
+  - **`pg_trigger_depth()` is not forgeable from SQL.** It counts the trigger invocation stack, and
+    there is no expression a caller can write that raises it. A direct `UPDATE` runs at depth 0, so the
+    guard refuses it regardless of the GUC — which is precisely why **`school_migrator` is refused by
+    the guard even though the ACL permits that role**, and why C-SEC-M7 asserts it.
+  - **The real boundary is the column ACL** (§16.5.1, §35.4), and the guard is the *refuser of last
+    resort* for the owner. Stated that way the guard's job is not "authorise maintenance" but "refuse
+    everything a caller could reach", and the maintenance context is the narrow exception the phase's
+    own writers need.
+- **Why not a role check instead.** A role check inside clause (2) was considered and rejected. A nested
+  statement inside a `SECURITY DEFINER` function executes with the *definer's* role, not the caller's,
+  so `current_user` inside the guard cannot distinguish "school_app_rw's direct UPDATE" from
+  "school_app_rw's UPDATE issued from inside the invoice-number writer" — it reads `school_migrator` in
+  both cases. The check would have to ask a question the trigger cannot answer. Depth plus a closed
+  vocabulary answers a question the trigger *can* answer, and the ACL answers the rest.
+- **What is asserted:** C-SEC-M4a (static `prosecdef` values **restricted to the functions the applied
+  migrations own** — 13 and 3 definers at the `0023` checkpoint — plus both error codes for a forged GUC),
+  C-SEC-M5 (the column map, tested at depth ≥ 2 so it isolates the vocabulary from the depth factor),
+  C-SEC-M6b (the `0024` balance path never settles a draft, so the `WHEN` clause in row 4d never fires on
+  it), C-SEC-M7 (the owner is refused at depth 1). §28.3.1 states all seven controls in full, in
+  **10** checkpoint-scoped assertions. **A count of definers is a whole-phase claim**: the figure
+  at `0023` is **three**, because rows 13 and 8a are `0024`'s, so an unscoped assertion in either
+  direction is wrong and the scoping is the assertion (R25′, R27′).
+
+**What is asserted about F5d, and by what.** The five properties below are the ones that make the
+column-level grant real rather than aspirational, and each names the test that would catch its absence:
+
+| Property | Asserted by | Failure it prevents |
+|---|---|---|
+| exactly **five** Phase 7 functions are `SECURITY DEFINER` beyond F1–F4/F6–F10/V1–V2, all bound, and F5d names them — **the whole-phase figure; 3 at the `0023` checkpoint and 5 from `0024`** | a static test over the DDL, cross-read with this table **and scoped by owning migration** | a sixth silent elevation added by a later migration, or an unscoped count that fails against `0023` for asserting `0024`'s row |
+| `trg_fin_invoice_header_guard` is **`prosecdef = false`**, and every F5d member **owned by the applied set** is **true** | the same static test, and C-SEC-M4a / M4b | the header guard being silently re-elevated, which would reinstate the exact C-SEC ambiguity |
+| `school_app_rw` holds **no table-level** `UPDATE` on `fin_invoices`, `fin_invoice_items`, `fin_invoice_adjustments` | `pg_attribute`/`information_schema.role_table_grants` assertion in `finance-002` | the original hole: a caller writing `total` directly |
+| column-level `GRANT UPDATE (col, …)` **and** `GRANT INSERT (col, …)` on exactly §16.5.1's lists, as separate statements | the same assertion, **comparing the column names verbatim on both privileges** | a grant drift that re-opens one cache column, including `UPDATE (total)` — or a combined `GRANT SELECT, INSERT, UPDATE (cols)`, whose shape is correct and whose `INSERT` is table-level |
+| each F5d function is `VOLATILE`, `search_path`-pinned, `prosecdef = true`, owned by `school_migrator`, `proacl` containing no `PUBLIC` | `finance-trigger-inventory.test.ts`, extended | an unpinned or publicly-executable elevation |
+
+**The residual risk, stated rather than dismissed.** F5d's five read `fin_*` rows as
+`school_migrator`, so they bypass RLS. That is unavoidable for a function that must write a row the
+caller cannot, and it is bounded by the fact that none of the five accepts a tenant or invoice
+identifier from a caller — every identifier they use is read from the row whose write caused the
+trigger to fire, and that row is already RLS-scoped to the caller's tenant. The residual is therefore
+a trigger that aggregates across rows *within one tenant* on behalf of a row in that tenant, which is
+the intent. It is recorded here because a reader should be able to see that the elevation is
+tenant-blind rather than tenant-scoped, and to disagree.
 
 ### 19.8 Step-up MFA — the substrate the previous revision assumed and did not build (P0-06)
 
@@ -7649,7 +11651,7 @@ payload) with these actions, distinct from the money action they authorise:
 | `auth.step_up.consumed` | a challenge is successfully spent | **yes** — the `fee.refund.approved` / `fee.refund.processed` outbox event is written in the same transaction |
 
 No new outbox event types are added for step-up: the audit trail is the record, and adding events
-would change the 18-new-event arithmetic of §24.1 (111 = 22 HANDLED / 89 NOOP) for a control-flow
+would change the new-event arithmetic of §24.1 (19 new; `112 = 22 HANDLED / 90 NOOP`) for a control-flow
 fact that no consumer needs. FI-022 asserts the pairing — every `auth.step_up.consumed` row for
 `action='refund.approve'` has exactly one `fee.refund.approved` outbox event with the same
 `refund_id`, and no orphan either way.
@@ -7869,7 +11871,14 @@ it is not a Phase 7 crypto helper but a missing piece of `0002`'s signed context
 separately as **P2-10** with an owner decision (**OD-14**) because resolving it changes a ticket format
 that earlier phases already depend on. It is listed here only to make the total count of
 undefined-but-referenced symbols explicit: **five**, of which four are crypto helpers pending P2-09
-and one is a context claim pending P2-10.
+and one is a context claim pending P2-10. **That count is scoped to §19.8.3's MFA helper table, not to
+the whole document** — and the whole-document count is now also **five**. An earlier revision of this
+paragraph said **seven**, counting two names of a different kind: `app_finance_actor_has_permission(text)`
+and `app_finance_emit_event(text, uuid, text, uuid, jsonb)`, which F11/F12 referenced as OD-17
+placeholders. Both are now **defined in full** as **F13** and **F14** in §19.7.3, with bodies against
+`0001`'s real `role_permissions` and `outbox_events`, and OD-17 is withdrawn. `app_ctx_session_id()`
+is therefore the only undefined name left anywhere in the refund machine, and it is the pre-existing
+P2-10 rather than anything §19.7 introduced.
 
 **This is still `DESIGNED`, not `IMPLEMENTED`, and the distinction is load-bearing.** No migration,
 route, or test for any of this exists in the repository today (§19.8's evidence table). What this
@@ -7986,7 +11995,7 @@ across confidentiality levels:
 - `fees.reports.read` ≠ `fees.invoices.read` — aggregate vs document.
 - `fees.portal.read` ≠ `fees.invoices.read` — self-service vs staff, with RLS as the real boundary.
 - `fees.adjustments.create` ≠ `fees.adjustments.approve` — mirroring the repo's
-  `attendance.mark` / `attendance.approve_leave` split (`permissions.ts:105-107`).
+  `attendance.mark` / `attendance.approve_leave` split (`packages/permissions/src/permissions.ts:105-107`).
 - `fees.refunds.request` / `.approve` / `.process` — three-step separation, so the requester cannot
   self-approve and the approver need not disburse.
 
@@ -8056,7 +12065,7 @@ Because role templates are materialised **only at tenant creation** (§1.5), add
 
 | Role | Change | Migration action |
 |---|---|---|
-| `platform_admin` | **No change.** It receives only `platform.*` permissions (enforced by `assertCatalogConsistent`, `permissions.ts:353-355`). | none |
+| `platform_admin` | **No change.** It receives only `platform.*` permissions (enforced by `assertCatalogConsistent`, `packages/permissions/src/permissions.ts:353-355`). | none |
 | `school_owner` | **Gains all 25 `fees.*` permissions.** | `INSERT … ON CONFLICT DO NOTHING` into `role_permissions` |
 | `principal` | **Gains exactly `fees.reports.read`.** | insert that one row only |
 | `accountant` | **Gains 22 of 25** — all except `fees.structures.manage`, `fees.assignments.manage`, and `fees.portal.read`. Structure and assignment design is an administrative act, not a bookkeeping one, and the accountant has no portal surface. | insert those 22 rows |
@@ -8299,17 +12308,25 @@ gate the worker has:
 fee.invoice.issued          fee.payment.recorded         fee.refund.requested
 fee.invoice.voided          fee.payment.allocated        fee.refund.approved
 fee.invoice.adjusted        fee.payment.reversed         fee.refund.processed
-fee.challan.issued          fee.receipt.issued           fee.reconciliation.completed
-fee.fee_structure.published fee.finance_document.generated
+fee.challan.issued          fee.receipt.issued           fee.refund.rejected
+fee.fee_structure.published fee.reconciliation.completed
+fee.finance_document.generated
 fee.billing.run.completed   fee.invoice.overdue          fee.parent.notification.requested
 fee.reconciliation.drift
 ```
 
-**18 new events, not 19.** The previous revision listed `fee.reconciliation.exception` here as well as
-`fee.reconciliation.drift`, but §24.2's disposition table had rows for both, only one of them was ever
-emitted, and §16.5 had already ruled that the pair is one fact with one name. A second HANDLED row for
-an event nothing emits inflates the HANDLED count and creates a registry entry no publisher can
-satisfy. The phantom is deleted, and §24.1's arithmetic moves with it.
+**19 new events, not 18.** Two changes from the previous revision, and they are not the same kind of
+change. (1) `fee.refund.rejected` was **absent** even though `requested → rejected` is one of §35.7's
+four refund transitions and F12 writes one: a refund decision that rejects is a financial non-event
+nobody can ever audit, and §35.7's row 3 requires a reason precisely so the decision is reviewable.
+The previous 18-event list made a rejected refund the only refund transition with no event. (2) The
+`fee.reconciliation.exception` phantom stays deleted, and the paragraph below records why — that
+deletion is **retained history** and is not re-opened by the addition above.
+
+**The two edits point in opposite directions and the asymmetry is the point.** Adding a real event
+raises §24.1's arithmetic; deleting a phantom lowered it. A count that can only move one way is not
+tracking the catalogue, it is tracking a decision, and §36.2 row 39's lesson — "a count written beside
+a table is not a count" — applies to event totals exactly as it applies to FK counts.
 
 Payloads are **IDs and integers only** — never a name, an email, a phone, a bank account, or an IBAN.
 This follows the repository's own precedent comment (`packages/contracts/src/events.ts:39-41`:
@@ -8359,6 +12376,7 @@ event may never reach the `logEvent(type)` fallback.
 | `fee.refund.requested` | **HANDLED** | enqueue an approval-request notification stub | `finance-024` |
 | `fee.refund.approved` | **HANDLED** | enqueue a refund-advice PDF artifact | `finance-029` |
 | `fee.refund.processed` | **HANDLED** | enqueue a refund-advice PDF + a parent notification stub | `finance-029` |
+| `fee.refund.rejected` | **INTENTIONALLY_NOOP** | **new in this pass, and a NOOP rather than a HANDLED.** A rejection is a decision *not* to move money, so there is no document to produce and nobody to notify: the requester already holds the `fin_refunds` row with `rejection_reason` set, and §35.7's row 3 requires that reason for exactly this audience. HANDLED would mean enqueueing a "your refund was declined" artifact — a PDF that exists only to say there is no PDF. The registry gate still requires the row, which is the point: an event with **no** disposition would fall through to `logEvent`, and a silent log line is not a disposition | `finance-024` asserts the no-op and that `F12`'s reject branch emits the event |
 | `fee.finance_document.generated` | **INTENTIONALLY_NOOP** | terminal artifact event; the artifact exists | `finance-024` |
 | `fee.billing.run.completed` | **HANDLED** | emit a summary notification; no per-invoice work | `finance-024` |
 | `fee.reconciliation.completed` | **HANDLED** | enqueue a reconciliation-summary artifact; emit alert if variance > 0 | `finance-024` |
@@ -8370,27 +12388,37 @@ event may never reach the `logEvent(type)` fallback.
 ### 24.2 The registry gate, which must be updated, not bypassed
 
 `apps/worker/src/worker-event-registry.test.ts` pins the catalog at **93** and the split at
-**9 HANDLED / 84 NOOP**. The 18 new events are **13 HANDLED / 5 NOOP** (§24.1, counted from the
+**9 HANDLED / 84 NOOP**. The 19 new events are **13 HANDLED / 6 NOOP** (§24.1, counted from the
 disposition table, not estimated), so the new pins are:
 
 ```text
-catalog  93 + 18 = 111
+catalog  93 + 19 = 112
 HANDLED  9 + 13 =  22
-NOOP    84 +  5 =  89
-22 + 89 = 111
+NOOP    84 +  6 =  90
+22 + 90 = 112
 ```
 
-**These figures are one lower than the previous revision's, and the reason is a deleted event, not a
-recount.** That revision carried 19 new events because `fee.reconciliation.exception` had its own
-HANDLED row; §16.5 had already established that it and `fee.reconciliation.drift` are one fact under
-one name, so the extra row was a HANDLED entry no publisher could ever satisfy. Deleting it removes
-one new event and one HANDLED and leaves NOOP untouched, which is why 5 and 89 are unchanged across
-both revisions. The arithmetic is asserted from the disposition table row-by-row, so it cannot drift
-from the table again.
+**These figures have moved in both directions across three revisions, and the two moves had different
+causes, which is the reason the arithmetic is re-derived from the table row-by-row rather than
+adjusted.**
+
+| Revision | New events | New HANDLED | New NOOP | Catalog | Cause of the change |
+|---|---|---|---|---|---|
+| two revisions ago | 19 | 14 | 5 | 112 | carried a HANDLED row for `fee.reconciliation.exception`, which no publisher emits |
+| previous revision | 18 | 13 | 5 | 111 | **deleted** the phantom — one event and one HANDLED removed, NOOP untouched |
+| this pass | **19** | **13** | **6** | **112** | **added** `fee.refund.rejected`, which §35.7's `requested → rejected` edge requires F12 to emit — one event and one NOOP added, HANDLED untouched |
+
+**The catalog total is the same as two revisions ago while the composition is not**, and that is worth
+noticing rather than tidying away: the previous revision's deletion was correct on its own terms (the
+phantom was real) and this pass's addition is correct on its own terms (the omission was real), and the
+two happened to cancel in the total. A reader checking only `112` would conclude nothing changed. **The
+HANDLED count is the one to watch**, and it is unchanged at 22 across all three revisions — the
+signature of an arithmetic series that is being edited at the leaves and recomputed in the middle, which
+is the only way it stays correct.
 
 All three pins (`worker-event-registry.test.ts:75`, `:90-104`, and `outbox-integration.test.ts:428`)
 must be updated in the same commit as the enum change, and `finance-webhook-provider.test.ts`
-asserts the **disposition of every one of the 18 by name** rather than a count, so a miscount is a
+asserts the **disposition of every one of the 19 by name** rather than a count, so a miscount is a
 failing test rather than a silently wrong pin.
 
 Additionally, and this is the structural fix for F-7.3 rather than a patch: **the fallback arm
@@ -8849,8 +12877,11 @@ The brief rejects `^PK[0-9A-Z]{24}$`. **Normalisation then validation, in this o
    `PK` + 2 check digits + 3-digit bank code + 16-char BBAN = **24 total**. Length is checked
    explicitly, not by a quantifier alone, so an over-long Pakistani IBAN is rejected.
 3. **MOD-97 checksum** (ISO 13616) — move the first four characters to the end, convert letters to
-   numbers (`A`→`10` … `Z`→`35`) and concatenate, then require `mod 97 == 1`. A checksum-valid
-   PK IBAN uses `PK10` in the moved position; the algorithm handles the general case.
+   numbers (`A`→`10` … `Z`→`35`) and concatenate, then require `mod 97 == 1`. **The check digits
+   are not a fixed Pakistani prefix and must not be pattern-matched**: for one 16-digit account body the
+   valid check digits are `PK36` (SCBL), `PK13` (HABB), `PK40` (MEZN), `PK41` (CITF). A rule of the form
+   `^PK[0-9]{2}[A-Z]{4}` is correct; `^PK36` is not, and the earlier revision's claim that a valid IBAN
+   “uses `PK10` in the moved position” was false.
 4. **Bank code sanity** — the 3-digit `bankCode` at positions 5–7 must be in the bank's assigned
    range. **OPEN DECISION OD-03**: the exact bank-code list requires a National Bank of Pakistan
    reference that is not in this repository. Until it is supplied, the design validates
@@ -8861,18 +12892,35 @@ The brief rejects `^PK[0-9A-Z]{24}$`. **Normalisation then validation, in this o
 
 | Input | Result |
 |---|---|
-| `PK00SCBL0000001123456702` | rejected — MOD-97 ≠ 1 |
-| `PK36SCBL0000001123456702` | rejected — MOD-97 ≠ 1 (this exact string is a widely-cited *format* example; it is **not** checksum-valid, and that is the point) |
-| a 24-char PK IBAN passing MOD-97 | accepted |
-| `PK36 SCBL 0000 0011 2345 6702` | accepted — whitespace stripped, identical to the unspaced form |
-| `pk36scbl0000001123456702` | normalised to upper, then evaluated as above |
-| `PK00AAAA0000001123456703` | rejected — checksum invalid |
-| `PK36SCBL00000011234567` (23 chars) | rejected — length |
+| `PK00SCBL0000001123456702` | rejected — MOD-97 ≈ 62, not 1 |
+| `PK36SCBL0000001123456702` | **accepted** — MOD-97 = 1. This is the standard widely-cited **valid** Pakistani example |
+| `PK13HABB0000001123456702` | accepted — MOD-97 = 1; a different bank code, so acceptance is the checksum's doing, not the bank's |
+| `PK36 SCBL 0000 0011 2345 6702` | accepted — whitespace stripped; the result is **byte-identical to row 2**, so it is accepted for row 2's reason |
+| `pk36scbl0000001123456702` | accepted — uppercased to row 2 |
+| `PK00AAAA0000001123456703` | rejected — MOD-97 ≈ 40, not 1 |
+| `PK36SCBL00000011234567` (**22** chars) | rejected — length, before the checksum runs |
 | `PK36SCBL00000011234567021` (25 chars) | rejected — length |
+| `DE89370400440532013000` | rejected at step 2 — it is 22 chars and does not start with `PK`, though its own MOD-97 **is** 1 |
+
+**Every Result cell above is computed, and the previous revision's version of this table was false in
+three ways.** It listed `PK36SCBL0000001123456702` as *rejected — MOD-97 ≠ 1* while the very next accepted
+row was `PK36 SCBL 0000 0011 2345 6702`, described as “identical to the unspaced form” — **the same string,
+accepted and rejected in adjacent rows.** `PK36SCBL0000001123456702` is 24 characters with MOD-97 = 1: it
+is the canonical *valid* Pakistani IBAN, and the stated reason was not merely wrong but inverted.
+Because §26.3 immediately below pins “these exact cases” in a unit test, **that test could not have
+passed** — it was specified to assert both verdicts for one input. Two smaller errors sat beside it: the
+22-character row was labelled “23 chars”, and step 3 asserted a valid IBAN “uses `PK10` in the moved
+position”, which is false — the check digits vary per account (`36`, `13`, `40`, `41` over one account
+body). **Followed literally, the table would have rejected real Pakistani accounts**, including the one
+every bank uses as its documentation sample.
 
 A **unit test pins these exact cases** plus 10,000 generated valid/invalid pairs, and the
 normalisation is a single pure function shared by the API, the worker, and the database trigger, so
-all three agree by construction.
+all three agree by construction. **The nine rows above are generated rather than typed**, and `R30′`
+re-derives each Result cell from the algorithm in steps 1–3 instead of trusting this table — the same
+discipline `R21′` applies to the chart of accounts. A table of worked examples is executable test data,
+and the previous revision's was internally contradictory in a way that reading the surrounding prose
+would not have surfaced.
 
 There is **no `fin_bank_accounts` table in Phase 7**, so there is no `fin_bank_accounts.iban` column to
 normalise. The IBAN that is actually stored is `fin_provider_accounts.account_ref` (§27.1), and it is
@@ -9230,9 +13278,10 @@ doing so made the shared database race because `phase6-migration-regression.test
 
 | Suite | Location | Proves |
 |---|---|---|
-| `finance-invariant.test.ts` | `packages/db/src/security/` | **FI-001…FI-019** (incl. FI-004a), mostly as **raw SQL** under both roles. Also asserts §16.7's register is exhaustive against `information_schema` |
+| `finance-invariant.test.ts` | `packages/db/src/security/` | **FI-001…FI-022** (incl. FI-004a), mostly as **raw SQL** under both roles. **FI-021** is the P3 residual case (100,000 received / 40,000 returned / nothing billed → 60,000, and a negative result is a failure), and **FI-022** is the two-directional `auth.step_up.consumed` ↔ `fee.refund.approved` count. Also asserts §16.7's register is exhaustive against `information_schema` |
+| `finance-cache-maintenance.test.ts` | `packages/db/src/security/` | **C-SEC-M1…M7** (§28.3.1) — **mandatory and not optional coverage**, expressed as **10 executable assertions over 7 controls**: M1, M2, M3a, M4a, M5, M6a and M7 assertable at the `0023` checkpoint, M3b, M4b and M6b at `0024`. **0 skipped** — each half is gated on the applied-migration set it needs and a not-yet-applicable half is *counted and reported*, never silently passed. The positives are M1 (`0023`) and M3b (`0024`), one per producer; M4a/M4b and M6a/M6b are one query each, filtered twice, so a scoped count is never restated. FI-020's positive/negative halves have no other test |
 | `finance-rls.test.ts` | `packages/db/src/security/` | §19: the six negative cases + platform + forged-GUC + worker scoping |
-| `finance-state-machine.test.ts` | `packages/db/src/security/` | §18, every edge and every rejected edge |
+| `finance-state-machine.test.ts` | `packages/db/src/security/` | §18, every edge and every rejected edge. **The four refund edges are `0028`-owned, not `0025`** — `finance_staff` has no `UPDATE` on `fin_refunds`, so at the `0025` checkpoint the only edge a test can drive is the `INSERT` that creates `requested`, and every rejected edge must be driven *through* F11/F12 or asserted as `42501` on a direct `UPDATE` (§13.2.1) |
 | `finance-numbering.test.ts` | `packages/db/src/security/` | FI-011, N concurrent issues |
 | `finance-rbac.test.ts` | `packages/db/src/security/` | the matrix; `permissions.test.ts` block per the established per-phase pattern (`permissions.test.ts:297-320`) |
 | `finance-api-acceptance.test.ts` | `apps/api/src/security/` | every endpoint, authz contract, idempotency, error codes |
@@ -9242,11 +13291,45 @@ doing so made the shared database race because `phase6-migration-regression.test
 | `finance-money-register.test.ts` | `packages/db/src/security/` | §16.7: no money-bearing `fin_*` column exists that the register does not list |
 | `finance-aggregate-view.test.ts` | `packages/db/src/security/` | §15.2.1/§15.2.2: no aggregate view exposes a **person** id or name; a principal gets **zero rows** from every detail view; detail views are `security_invoker` and aggregate views are the only definers. Column set is checked against the **taxonomy allowlist** (`fee_head_id`/`_code`/`_name`, `collection_day`, `p.channel`, `aging_bucket`) rather than by regex alone, because the narrowed regex would otherwise admit a bare `name` column that is not on the list |
 | `finance-mfa-contract.test.ts` | `packages/db/src/security/` | §19.8.3: every symbol F7 calls is either defined in the migration text or listed in the contract table; every listed helper has a signature, a definer note, a `PUBLIC` revoke, and a tracked dependency; the count of undefined-but-referenced symbols is **reported** (5) rather than asserted zero |
-| `finance-trigger-inventory.test.ts` | `packages/db/src/security/` | §35.3: 28 inventory rows, 28 bound functions, 35 distinct `CREATE [CONSTRAINT] TRIGGER` statements (38 including the three restatements), every statement names an inventory function or a declared helper, every inventory function is bound at least once, and no `fin_*` function body contains `COALESCE(NEW.<col>, OLD.<col>)` or `RETURN COALESCE(NEW, OLD)` — the P0002 class of §7.4 |
-| `finance-property.test.ts` | `packages/db/src/security/` | **the roadmap's own acceptance criterion**: 10,000 randomised operations over issue/pay/allocate/refund/reverse/void, asserting after **every** operation that all FI invariants hold |
+| `finance-trigger-inventory.test.ts` | `packages/db/src/security/` | §35.3: 35 inventory rows, 35 bound functions, 42 distinct `CREATE [CONSTRAINT] TRIGGER` statements (46 including the four restatements), **exactly 5 of them `SECURITY DEFINER` and named by F5d whole-phase — 3 at `0023` and 5 at `0024`, asserted as C-SEC-M4a/M4b rather than as a single number**, plus the F5a assertion that `trg_fin_invoice_header_guard` is `prosecdef = false` **and** its body contains no `UPDATE`/`INSERT`/`DELETE` (A13), every statement names an inventory function or a declared helper, every inventory function is bound at least once, and no `fin_*` function body contains `COALESCE(NEW.<col>, OLD.<col>)` or `RETURN COALESCE(NEW, OLD)` — the P0002 class of §7.4 |
+| `finance-property.test.ts` | `packages/db/src/security/` | **the roadmap's own acceptance criterion**: 10,000 randomised operations over issue/pay/allocate/refund/reverse/void, asserting after **every** operation that all FI invariants hold. **Phase-level, and owned by the `0027` checkpoint** — not by any single migration, and specifically **not** by `0024`: its `refund` operation needs F11/F12 (`0028`), not merely `fin_refunds` (`0025`), and its `reconcile`/`openThenMatchBatch` operations need `fin_reconciliation_batches`/`_matches` (`0027`). See §28.4 |
 | `finance-webhook-provider.test.ts` | `apps/worker/src/` | event disposition table, registry gate, no-silent-ack |
 | `finance-artifact.test.ts` | `apps/worker/src/` | §25.3, storage-succeeds/DB-fails retry convergence |
 | `finance-money.test.ts` | unit | rounding, `numeric` agreement, IBAN (§26.3) |
+
+#### 28.2.1 Checkpoint tests must scope their catalog queries (AMENDED 2026-10-05)
+
+**A checkpoint suite that asserts a whole-prefix inventory must be scoped to the objects its own
+migration owns.** This is recorded as a **test-authoring requirement**; no test file is modified by
+this amendment, and the correction belongs to the implementation pass.
+
+The `0022` checkpoint suites are the worked example, and the requirement is stated here rather than
+left to each file because the failure mode is shared:
+
+- **Trigger inventory.** Every "nothing else exists" probe in the `0022` trigger-inventory suite must
+  filter on **`0022`'s own function set**, never on the bare prefix `trg_fin%`. That prefix is shared:
+  `0023` defines seven further functions under it and `0024`/`0025` more, so an unscoped query makes a
+  `0022` suite silently assert a *later* migration's graph while its expected values remain `0022`'s.
+  The one place the unscoped prefix is legitimate is a "no unexpected function" assertion, and **only**
+  when the expected set is the **union** of the migrations actually applied. The defect this rule
+  prevents is concrete: against a database that has advanced past `0022`, an unscoped query returns the
+  whole-phase binding and function sets, and every "exactly N" assertion in the file fails while the
+  catalog is in fact correct.
+- **Foreign keys.** A `0022` FK assertion must distinguish **all current finance FKs** from
+  **`0022`-owned FKs**, and assert the latter **by constraint name as a set**, not as a bare count.
+  `0023` legitimately adds `fin_bri_invoice_fk` to `fin_billing_run_items`, a `0022` table, so a bare
+  "exactly 23 FKs across the 7 `0022` tables" fails against a correct database, while dropping to 24
+  would stop noticing a rewrite of `0022` that had quietly dropped an edge of its own. Both properties
+  are kept by asserting the live total **and** the `0022`-owned subset separately.
+- **Table and FK-name inventories.** These are checkpoint-scoped for the same reason and must advance
+  with the checkpoint; a suite pinned to a stale table count will fail against a correct catalog.
+- **Checkpoint-scoped expectations are not defects.** A suite asserting the state of a migration that
+  has since been superseded is reporting a **stale expectation**, not a broken schema. Such an
+  expectation is corrected by re-scoping the assertion to the checkpoint it owns — never by weakening
+  the property it was written to prove.
+
+The general rule, consistent with §28.3.1's treatment of the C-SEC halves: **a scoped count is never
+restated as an unscoped one, and a count is only meaningful alongside the population it scopes.**
 
 ### 28.3 Mandatory negative tests (the brief's §18 list, verbatim coverage)
 
@@ -9269,6 +13352,186 @@ doing so made the shared database race because `phase6-migration-regression.test
 | **an item of a committed run cannot be re-pointed at another run** | `UPDATE fin_billing_run_items SET run_id = <an uncommitted run>` on a committed run's item → `55000`. **Both directions are asserted**, because a freeze that consults only the destination refuses the inbound move and permits the outbound one, which is the same defect with the sign flipped; and the *control* is a move between two uncommitted runs, which must succeed, or the case would also pass against a blanket denial. `run_id` is an ordinary column, so this is the only thing that makes the item freeze a freeze rather than a restriction on the columns that happen to be compared |
 | **a user who published a structure cannot be deleted** | `DELETE FROM users WHERE id = <a publisher>` → `23001`, and the publication stamp is unchanged. This is the assertion that distinguishes `ON DELETE RESTRICT` from `ON DELETE SET NULL`, and it is also the reason the action is RESTRICT: PostgreSQL implements `SET NULL` as a referential `UPDATE`, the write-once publication stamp (§7.3.1) refuses exactly that `UPDATE`, and a declared FK action that can never fire is worse than no FK. Deactivating the account (`users.status`) is the supported route and preserves the audit row |
 | **a structure may not be born published** | `INSERT INTO fin_fee_structures (…, status) VALUES (…, 'published')` → `55000`. A graph whose only source state is `draft` is not a graph if a row may start anywhere; the trigger is bound to `INSERT` for this reason, and on the INSERT path there is no `OLD` to compare, so the rule is a refusal of an illegal starting point rather than an edge check |
+
+#### 28.3.1 The maintenance-context tests (C-SEC-M1 – C-SEC-M7)
+
+**These seven exist because the previous revision shipped a design in which the phase's own cache
+writers were refused by the guard meant to protect them, and no test would have noticed: every test in
+§28.3 above asserts that a *caller* is refused, and a design where the caller is refused and the
+maintenance path is also refused satisfies all of them.** A negative-only suite cannot detect an
+over-restrictive rule, so the positive controls assert that the caches actually move: **M1** at the
+`0023` checkpoint and **M3** at the `0024` checkpoint, because they are positive controls against
+different producers — a suite of seven negatives plus one positive can still pass against a design that
+refuses half the phase's own writes. `finance-cache-maintenance.test.ts` is the file; it is
+**mandatory**, not a nice-to-have.
+
+**The migration-boundary defect this revision found: three of the seven controls named objects that
+their own migration may not create.** C-SEC-M3 inserts a `fin_payment_allocations` row, C-SEC-M4 reads
+`prosecdef` for all **35** bound functions, and C-SEC-M6 calls `fin_invoice_reapply_derived_state`
+outright. All three subjects are created by **`0024`** — rows 5, 8 and 13 of §35.3 and the unbound
+helper of §35.3.1 — while §30.3.1 forbids `0023` from naming a `0024` relation *in its body or in a
+`DECLARE` row type*, and §30.1 puts them in `0024` for exactly that reason. The previous revision
+therefore asserted a mandatory `0023` suite against a schema the `0023` suite could not be run
+against, and §28.3.1's own "seven mandatory tests" count was part of the contradiction rather than a
+statement of it.
+
+**Three ways out, and the one adopted.** **(A)** Move M3, M4 and M6 whole to `0024`, leaving a
+`0023` suite of four. Honest about the boundary, but it drops the checks that are the *most* valuable at
+`0023`: the guard's second scope value, its definership split, and the `WHEN` clause on row 4d are all
+fully expressible there, and losing them hands the `0023` migration a security boundary with no test at
+all. **(B)** Keep the prose and let the suite be non-executable at `0023` until `0024` lands — which is
+what the document previously did, and which makes `0023` un-signable-off. **(C), adopted:** give every
+control **exactly one owning migration** and **exactly one executable test boundary**, and where the
+control's subject spans migrations, **split it into halves, one per checkpoint, with each half named**.
+No half is ever reported as the whole control, and no control is deferred rather than scheduled.
+
+**One owner and one boundary per control.** The owning migration is the migration that creates the
+objects the control's *subject* is; the executable boundary is the owning migration's checkpoint.
+
+| Control | Owning migration | Objects the subject needs | Assertable at |
+|---|---|---|---|
+| **C-SEC-M1** | `0023` | row 6 `trg_fin_invoice_item_total`, the `'invoice_line_totals'` producer | `0023` |
+| **C-SEC-M2** | `0023` | row 4d `trg_fin_invoice_freeze_lines` | `0023` |
+| **C-SEC-M3** | **`0024`** | row 13 `trg_fin_invoice_balance_recompute`, the `'invoice_balance_state'` producer; `fin_payment_allocations` | `0023` (**M3a**) / `0024` (**M3b**) |
+| **C-SEC-M4** | **`0024`** | every bound function; row 13 and `fin_invoice_reapply_derived_state` | `0023` (**M4a**) / `0024` (**M4b**) |
+| **C-SEC-M5** | `0023` | row 4a's two-value vocabulary | `0023` |
+| **C-SEC-M6** | **`0024`** | `fin_invoice_reapply_derived_state`, the real `UPDATE` it causes | `0023` (**M6a**) / `0024` (**M6b**) |
+| **C-SEC-M7** | `0023` | the seven server-owned header columns | `0023` |
+
+**The counts, because "seven" was true of the controls and false of the assertions.** **7 controls ·
+10 executable assertions · 7 of the 10 assertable at the `0023` checkpoint · 3 more at `0024` · 0
+skipped.** Every one of the seven controls has a `0023`-executable assertion, so the `0023` migration
+is not left without coverage of its own guard, and the three `0024`-only assertions are **scheduled**,
+not dropped. Both numbers are asserted (**A18
+**), and the split is filtered on the applied-migration
+set by the same rule as §35.2.1 rather than by a date or a comment: a half whose objects are absent is
+**reported as not-yet-applicable** and counted, never silently passed.
+
+| Test | Setup → action | Assertion |
+|---|---|---|
+| **C-SEC-M1** | draft invoice with one line, as `school_migrator` → `INSERT INTO fin_invoice_items` | **No error**, and `fin_invoices.subtotal`/`.total` equal the line sum. This is the P0's exact reproduction: the previous design returned `55000` here |
+| **C-SEC-M2** | draft invoice with one line → `UPDATE fin_invoices SET status = 'issued'` as `school_app_rw` | **No error**; the line's `frozen_at` is set; **and `fin_invoices.total` still equals the line sum**. The second clause is the one that matters: it is the silent-clobber regression, and it is the failure a naive fix produces (see the control below) |
+| **C-SEC-M3a** | static, no data: read row 4a's body for the scope literals, then as `school_migrator` from a statement nested at `pg_trigger_depth() >= 2` with the scope pre-set to `'invoice_balance_state'`, `UPDATE fin_invoices SET subtotal = 1` | `55000`, **and** exactly two scope literals appear in the guard body, **and** `pg_proc` contains no `0023`-owned function whose body calls `set_config('fin.invoice_maintenance_scope', 'invoice_balance_state', true)`. This is the `0023`-expressible half, and it is the half that catches the real defect: a vocabulary narrowed to `invoice_line_totals` passes every negative test in the suite and then breaks `0024`'s own writer |
+| **C-SEC-M3b** | issued invoice + a payment allocation → the allocation `INSERT` | **No error**, and `fin_invoices.balance`/`status`/`paid_at` reflect the allocation. This is the positive half, and it is the only assertion that proves the `'invoice_balance_state'` scope is **accepted** rather than merely spelled |
+| **C-SEC-M4a** | static, no data: read `pg_proc.prosecdef` for the **bound functions owned by migrations in the applied set** — at the `0023` checkpoint that is **13** functions (`0022`'s **six** rows 1, 2, 3, 3a, 3b, 3c plus `0023`'s **seven** rows 4, 4a, 4b, 4c, 4d, 6, 7) and **3** definers (rows 4, 4d, 6) | `trg_fin_invoice_header_guard` is **false**; every F5d member owned by the applied set is **true** and every other bound function owned by it is **false**; `fin_invoice_reapply_derived_state` **does not exist** at this checkpoint. Then, dynamically: as `school_app_rw`, `SET fin.invoice_maintenance_scope = 'invoice_line_totals'` followed by `UPDATE fin_invoices SET subtotal = 1` → **`42501`** (the ACL, before the guard). The same as `school_migrator` → **`55000`** (Factor A, because the ACL permits that role). Both codes are asserted, because asserting only one would pass against a design where either control had been removed. **The definership count is checkpoint-scoped**, and the reason it must be is the bug this revision fixed: the guard, both scopes and all seven columns exist at `0023`, so a suite that asserted "the five F5d members" there was asserting rows 4, 4d and 6 — three — against a count of five |
+| **C-SEC-M4b** | the same query with the applied set extended by `0024`: **24** bound functions, **5** definers (rows 4, 4d, 6, 13, 8a) | row 13 is **true**; `fin_invoice_reapply_derived_state` **exists** and is **false**; the total definership count is 5. One statement, filtered twice — the shape that keeps a scoped count from being restated |
+| **C-SEC-M5** | as `school_migrator`, each from a statement **not** nested in a trigger, with the scope pre-set by hand | `invoice_line_totals` + `balance`/`paid_at` → `55000`; `invoice_balance_state` + `subtotal`/`total` → `55000`; **either** scope + `invoice_no`/`issued_at`/`voided_at` → `55000`. These run at depth 1, so they are refused by Factor A and would not isolate Factor B — therefore each is re-run **inside** a trigger body via a `DO` block issued from a temporary `AFTER` trigger, so that depth ≥ 2 holds and the failure can only be the column map |
+| **C-SEC-M6a** | static, no data: read `pg_trigger` for row 4d | It is `AFTER`, its `tgattr` is exactly `{status}`, and its `WHEN` clause is verbatim `OLD.status = 'draft' AND NEW.status <> 'draft' AND NEW.status <> 'void'`. **Structural, not behavioural**, and that is the point: this half is assertable at `0023` and fails the moment someone moves the stamp back to `BEFORE` — which is `ctl_csec_b`'s revert, so the control now has two independent witnesses instead of one |
+| **C-SEC-M6b** | draft invoice + one line, as `school_migrator` → the **line `INSERT`**, letting row 13 run; then a **second** statement on the same draft, `SET status = 'void', void_reason = <non-blank>` | Both statements succeed, and across **both** the line's `frozen_at` is **still NULL**, `fin_invoices.status` is `'draft'` then `'void'`, `balance` stays **0** and `total` stays the line sum. **The producer is a line write, and it has to be.** The previous revision of this row asked for "a real allocation row naming" a draft invoice, which **§12.5.1 (D9) forbids** — `trg_fin_allocation_target_state` refuses an `apply` naming a `draft` or `void` invoice, and does so in the same migration that owns row 13. A row cannot ask for a write the design prohibits and still be executable; that is §36.2 row 45's defect in its second form, and the fix is Option C below. Row 13 is bound to `fin_invoice_items` as well as to `fin_payment_allocations`, so the line `INSERT` runs the **identical** `helper → UPDATE fin_invoices` chain this half exists to witness. **Asserting `balance === 0` rather than a moved balance is what gives the half its teeth:** `fin_invoice_reapply_derived_state` early-returns for `draft`/`void`, and its own comment records that an earlier revision instead *preserved the draft label while still executing the UPDATE*, leaving a draft at balance 100 while `fin_v_invoice_balance` excludes drafts and §9.6.0 says a draft's balance is 0. "Preserving the label is not preserving the invariant." The second statement is the companion that makes the `WHEN` clause's `NEW.status <> 'void'` conjunct load-bearing rather than decorative: `draft → void` is a legal **discard** (§9.2, C-13) and it is the only transition on this writer the conjunct turns away, so without it the stamp would freeze the lines of an invoice the draft exists to keep editable. **It must drive the real producer.** Calling `fin_invoice_reapply_derived_state` directly is **not** a substitute: a direct call proves the helper's arithmetic, not that the trigger chain reaches it, and the chain is the thing under test — which is the defect observed in the source (see the note after the controls) |
+| **C-SEC-M7** | as **`school_migrator`**, one statement per column: `UPDATE fin_invoices SET <col> = …` for each of `subtotal`, `total`, `balance`, `invoice_no`, `issued_at`, `voided_at`, `paid_at` | **`55000` on all seven.** §28.3 already asserts the runtime role is refused; this asserts the *owner* is refused too, which is the property `pg_trigger_depth() >= 2` exists to provide and which no other layer gives |
+
+**Why M6b's producer is a line write: the D9 interaction, and the option adopted.** M6b is the only
+one of the seven controls whose subject row (`13`) is `0024`-owned but whose *specified setup* reaches
+back into `0023`'s rules, and the two collide. **D9 (§12.5.1, §36.2 row 46, a P0) refuses an `apply`
+allocation whose target invoice is `draft` or `void`** — verified against the applied `0024` catalog,
+where the statement raises `55000`. So "a real allocation row naming" a draft invoice is not merely
+discouraged, it is **impossible**, and M6b as previously written could never have run. Three ways out:
+
+- **(A) Relax D9 so an allocation may name a draft.** Rejected. D9 is a P0 fix, it is the invariant
+  that stops cash being applied to an invoice a user may still edit, and §12.5.1's reasoning
+  ("`issued_at` may be NULL yet the invoice is not payable") does not weaken when the test is
+  inconvenient. Changing a P0 to make a test expressible inverts the order of authority.
+- **(B) Move M6b wholesale to `0023` and assert only its structural half there.** Rejected: that is
+  option **(A)** of §28.3.1's three ways out, already considered and refused, and it drops the only
+  behavioural witness that the `WHEN` clause holds back a *real* writer.
+- **(C), adopted — keep D9, and reach row 13 through the binding it also has.**
+  `trg_fin_invoice_balance_recompute` is bound to **three** tables: `fin_invoice_items`,
+  `fin_invoice_adjustments` and `fin_payment_allocations`. The first two are `0023`'s, are bound on a
+  **draft** invoice without let, and drive the **same** `fin_invoice_reapply_derived_state` call and
+  the **same** `UPDATE fin_invoices` naming `status`. The invariant M6b exists to pin — *a draft is
+  never settled, and its lines are never stamped* — is therefore reachable without contradicting D9
+  by a single character, and D9 keeps doing the job it was added to do.
+
+The resolution is not a weakening of either control. D9's own coverage is **unchanged and asserted in
+`finance-payments.test.ts`**, which drives the refusal at `55000` and then drives the legal path by
+issuing the invoice first — so the invariant is pinned from both sides: the allocation path *cannot*
+reach a draft, and the line path reaches one and *does not* settle it. What is withdrawn is one
+sentence of test prose, not a property.
+
+**Three controls, because §28.6 requires that each fix be shown to be load-bearing (P1-06 style).**
+
+- **`ctl_csec_a` — revert §9.6.0 clause (2) to the previous revision's unconditional refusal.** Applied
+  through `pnpm db:migrate` against an emptied database. Expected result: **C-SEC-M1, M2 and M3a all
+  fail with `55000`**, and every other row of §28.3 still passes. A control that leaves the whole suite
+  green has proved nothing — the whole point is that it breaks exactly the positive maintenance tests
+  and nothing else.
+- **`ctl_csec_b` — move the stamp back into a `BEFORE UPDATE` trigger on `fin_invoices`.** Expected
+  result: **C-SEC-M2 fails, C-SEC-M6a fails, and C-SEC-M6b fails on its second statement.** If M2 fails
+  with `55000`, that is the original P0 reproduced by reverting the structural change; if M6a fails, the
+  structural form was what the half was written to pin; and M6b fails because a `BEFORE UPDATE` binding
+  with no `WHEN` clause stamps a draft's lines on the **`draft → void`** discard — the one transition
+  the clause's `NEW.status <> 'void'` conjunct exists to turn away, and therefore the only one on this
+  writer that can witness the clause behaviourally. If M2 *passes*, the harness is wrong, because the
+  same design must fail with the clause (2) widening reverted (`ctl_csec_a`) and cannot satisfy both.
+  **A control whose outcome depends on which of two reverts is applied is a real control**; the
+  previous revision had none, which is how the contradiction survived a suite of twenty negative tests.
+  **Adding the `0023`-executable half gave this control a second witness**, and giving M6b its discard
+  companion a third — which is the concrete return on the split rather than an assertion that the split
+  was tidier.
+- **`ctl_csec_c` — narrow the guard's vocabulary to `'invoice_line_totals'` alone.** Expected result:
+  **C-SEC-M3a fails** (it is the only assertion that reads the literal count), **C-SEC-M5 fails** (the
+  `invoice_balance_state` mismatch case no longer has a scope to be refused from), and **C-SEC-M3b fails**
+  at `0024` once the producer runs. This is the third revert and the only one that needs no `0024`
+  object to be *specified* to detect, which is why M3a exists at all: before the split, the defect that
+  a one-value vocabulary introduces was discoverable only at `0024`.
+
+**Observed in the applied source during this pass, recorded and deliberately not remediated here.**
+`packages/db/src/security/finance-cache-maintenance.test.ts` exists and labels its cases `C-SEC-M3`
+and `C-SEC-M6`, and both satisfy the halves **only in appearance**: each synthesises a stand-in producer
+instead of the `0024` trigger — M3 sets `fin.invoice_maintenance_scope = 'invoice_balance_state'` by
+hand and asserts a seeded `balance`, and M6 issues a direct nested `UPDATE` rather than the allocation
+`INSERT` that would run row 13. Two consequences follow, and both are defects **of the test**, not of
+this design. First, **neither case is M3 or M6 as specified**: a hand-set GUC proves the guard *accepts*
+a scope value, not that any producer sets it, and a direct nested `UPDATE` proves the `WHEN` clause
+suppresses a write, not that the real writer produces one. Second, the file asserts **zero** of the
+`0023` halves that are now specified — M3a, M4a's definership split, or M6a's structural check — so as
+written it would pass against a guard with a one-value vocabulary. **This pass is design-only and does
+not touch the test**; the finding is registered in §36.2 as row 45 with the remediation assigned to the
+implementation pass, and the assertion set above is what that pass must implement.
+
+#### 28.3.2 Allocation DELETE prohibition (C-ALLOC-DEL)
+
+The allocation DELETE policy is database-enforced as specified in §12.1.
+
+**C-ALLOC-DEL-1 — Normal allocation INSERT succeeds.** Create a settled payment and insert an `apply` allocation; the operation succeeds.
+
+**C-ALLOC-DEL-2 — Valid UPDATE where permitted succeeds.** Updates permitted by the correction/reversal model succeed; other updates follow existing constraints.
+
+**C-ALLOC-DEL-3 — Direct allocation DELETE is rejected.** `DELETE FROM fin_payment_allocations` for any existing row raises SQLSTATE `55000` with message containing "append-only".
+
+**C-ALLOC-DEL-4 — DELETE cannot destroy reversal/refund provenance.** Attempting to delete an allocation that is referenced by a reversal or carries refund_id is rejected; provenance remains intact.
+
+**C-ALLOC-DEL-5 — Balance state remains unchanged after rejected DELETE.** Invoice balance and payment position are unchanged after a rejected DELETE attempt.
+
+**C-ALLOC-DEL-6 — Cross-tenant DELETE attempt is rejected.** A DELETE across tenant boundary is rejected by the guard and tenant isolation.
+
+**C-ALLOC-DEL-7 — SECURITY DEFINER functions cannot provide unintended DELETE escape.** No 0024 SECURITY DEFINER function performs or enables DELETE on allocations; attempts to exploit paths are rejected.
+
+**C-ALLOC-DEL-8 — Legitimate reversal/correction workflow works without DELETE.** The append-only correction/reversal model operates via INSERT only.
+
+**C-ALLOC-DEL-9 — Future 0025 refund linkage remains compatible.** The DELETE guard and append-only model do not conflict with adding `fin_pa_refund_fk` in 0025.
+
+**C-ALLOC-DEL-10 — Existing allocation bounds/family/reversal tests remain valid.** The guard is BEFORE DELETE only and does not affect INSERT/UPDATE paths.
+
+**A19 — Allocation DELETE prohibition.** `fin_payment_allocations` is append-only at the database boundary.
+A BEFORE DELETE trigger (`trg_fin_allocations_delete_guard`, bound to `trg_fin_pa_delete_guard()`)
+rejects every DELETE with SQLSTATE `55000`. The guard
+executes as SECURITY INVOKER, is created with `search_path = pg_catalog, public, pg_temp`, and has all
+privileges revoked from PUBLIC. No permitted path removes provenance (`reversal_of_allocation_id`,
+`refund_id`). The AFTER DELETE branch of the balance trigger is never reached, because the BEFORE guard
+aborts the statement first.
+
+**These ten controls are `0024`-owned, and that is why A19 is not a row in §30.3.4.** That table is `0023`'s
+closing assertion set, and A18 states the rule that decides this case: no control in the `0023` share may
+name a relation created after `0023`. `fin_payment_allocations` is `0024`’s, so an assertion about its DELETE
+policy there would fail the very asymmetry check it is written to satisfy — the defect class §36.2 records at
+row 45, not a placement nuance. The assertion lives with the controls it closes instead.
+
+Of the ten, C-ALLOC-DEL-1, -2, -8 and -9 are **positive** (a legitimate `INSERT`, a permitted `UPDATE`, the
+reversal-only workflow, and `0025` compatibility); C-ALLOC-DEL-3 through -7 are **negative**. C-ALLOC-DEL-3 is
+the one that fails loudly. The other six exist so that a future revision cannot replace the guard with a
+cheaper mechanism that satisfies only C-ALLOC-DEL-3.
+
 
 ### 28.4 Property test detail
 
@@ -9302,6 +13565,37 @@ defect rather than a hypothetical one. `editLine` and `deleteLine` are restricte
 (the `trg_fin_invoice_items_freeze` guard), so they exercise the cache triggers on the one document
 class where mutation is legal; `moveAllocation` operates on a payment with two invoice-bound rows.
 
+**Which checkpoint owns this suite, derived rather than asserted.** §30.1's per-migration map fixes
+each operation's first expressible migration, and the suite is executable only where **all twelve**
+are:
+
+| Operation | First expressible at | Why |
+|---|---|---|
+| `issueInvoice`, `voidInvoice`, `adjust`, `editLine`, `deleteLine` | `0023` | `fin_invoices`, `fin_invoice_items`, `fin_invoice_adjustments` |
+| `recordPayment`, `allocate`, `reverse`, `moveAllocation` | `0024` | `fin_payments`, `fin_payment_allocations` |
+| **`refund`** | **`0028`** | `fin_refunds` is `0025` and the `fin_pa_refund_fk` that closes the `0024` window (§30.1 P0-01) is too, so the **rows** are expressible from `0025`. The **operation** is not: a refund can only be *approved* by F11 `postRefundApproval` and *disbursed* by F12 `postRefundProcess`, both `0028` definers, because both transitions `UPDATE fin_refunds.status` and that privilege is revoked (§35.4). This row previously said `0025`, derived from §30.1's map while that map still listed `postRefundApproval` as a `0025` object — **the operation table inherited the defect rather than catching it**, which is §36.2 row 47's class one level down. During `0024` a reversal row may name any `refund_id` unchecked because `trg_fin_refund_provenance` does not exist yet, so a refund is not *testable* at `0024`, only *insertable*; at `0025` it is testable as **data** and not as a **lifecycle** |
+| **`reconcile`, `openThenMatchBatch`** | **`0027`** | `fin_reconciliation_batches`, `fin_reconciliation_matches` and the three finality triggers |
+
+The binding constraint is therefore **`0027`**, and it is set by the reconciliation pair, not by
+`refund`: the per-operation assertions below also require "refund coverage complete" and "a payment
+is final in at most one reconciliation match", both of which are `0027` properties over `0025`
+refund rows. **This is a Phase-level requirement with no single owning migration**, in the same
+category as §30.3's cross-migration closure and §35.2's whole-phase FK map — and for the same
+reason: a requirement is not owned by the migration that happens to be latest when it is read.
+
+**Three consequences, and the one that is a gate.** **(1)** §36.5's `0024` proof list does **not**
+name this suite, and must not: listing it there would make `0024` un-signable-off in exactly the way
+option **(B)** of §28.3.1's three ways out made `0023` un-signable-off before that revision split
+C-SEC into per-checkpoint halves. **(2)** The suite is **scheduled**, not dropped — §28.5 already
+refuses to restate a phase total and requires the file count to come from an actual CI run, and this
+file is one of the ~15 it counts. **(3)** It is **not** to be implemented as a `0024`-checkpoint
+assertion, gated on the applied set the way the C-SEC halves are. A `0024` run of this suite would
+have to skip `refund`, `reconcile` and `openThenMatchBatch`, which is three of the twelve operations
+and two of the four defects the bolded list exists to catch — so it would report a green property
+test over a generator missing the exact interactions §28.4 was written to find. The honest artifact
+at `0024` is **no property test**, plus the per-migration suites that do cover the same cache
+arithmetic deterministically (§28.3's last three rows, and C-SEC-M1/M3b/M3c).
+
 **All four of these operations run as `school_migrator`, and that is a finding rather than a
 convenience.** §35.4 revokes `UPDATE` on `fin_payment_allocations` and there is no line-edit or
 allocation-move route, because a correction is a *reversal row plus a new allocation* — the design is
@@ -9320,7 +13614,7 @@ makes trigger branches unreachable, and the honest answer is to say so rather th
 The current baseline is **68 tracked test files** (`git ls-files`), and the 902-runtime-test figure
 is a clean-checkout run tally from `PHASE_2_6_RECOVERY_AUDIT.md:631-632` that **no CI step
 asserts**. Phase 7 adds ~15 files (§28.2), including the four new ones pinned to the register, the receipt, the target, and the webhook oracle. The design does **not** restate a total; when Phase 7 lands, the
-count must come from an actual CI run, and the three registry pins (93 / 9 / 84 → 111 / 22 / 89)
+count must come from an actual CI run, and the three registry pins (93 / 9 / 84 → 112 / 22 / 90)
 must be updated in the same commit as the enum change.
 
 ### 28.6 Proving a fix is load-bearing, not just present
@@ -9378,18 +13672,18 @@ Additions to `docs/THREAT_MODEL.md` (which this phase does not edit; recorded he
 | T-FIN-12 | Cache drift makes the ledger lie | Ledger is authoritative; caches recomputed; nightly + property test | `finance-009` |
 | T-FIN-13 | PAN/IBAN leaks into `audit_logs`/`outbox_events` | Payload contract (IDs only) + `redactDeep` denylist extension + a static test | `finance-029` |
 | T-FIN-14 | Raw webhook body retains card data | Not stored by default; opt-in only, redacted + encrypted + expiring + restricted | `finance-webhook` |
-| T-FIN-21 | **Tenant enumeration via the webhook endpoint** — unauthenticated `provider_account_ref` probing distinguishes 404 from 401 and maps every school on the platform | Uniform 200 + `{"status":"ignored"}` + dummy-secret timing equalisation for every pre-authorization failure; the distinction is stored, not returned; both counters alert | `finance-webhook` |
 | T-FIN-15 | Payment double-charge on retry | Required idempotency key + fingerprint mismatch → 409 (§21.1) | `finance-013` |
 | T-FIN-16 | Ambiguous fee assignment double-bills | Unique index makes a second active assignment unrepresentable | `finance-002` |
-| T-FIN-26 | Principal reaches an individual invoice through a new route, a new service method, or direct SQL | `reporting_staff` excluded from the `SELECT` policy on every row-level finance table — **zero rows**, not a filtered set; aggregate access only via four owner-scoped views whose columns are pinned to buckets/totals/counts | `finance-aggregate-view` |
 | T-FIN-17 | Concurrent collection over-allocates | Locked, ordered, recomputed availability; bounded retry | `finance-003` |
 | T-FIN-18 | Same-family visible via a soft-unlinked guardian link | `sg.deleted_at IS NULL` in the definer function | `finance-003` (regression) |
 | T-FIN-19 | Artifact swap replaces a published receipt PDF | CAS `file_id IS NULL` + frozen content hash + immutable document | `finance-029` |
 | T-FIN-20 | Custom role silently widened by a template change | Backfill filters `is_system = true`; checksum assertion | `finance-020` |
+| T-FIN-21 | **Tenant enumeration via the webhook endpoint** — unauthenticated `provider_account_ref` probing distinguishes 404 from 401 and maps every school on the platform | Uniform 200 + `{"status":"ignored"}` + dummy-secret timing equalisation for every pre-authorization failure; the distinction is stored, not returned; both counters alert | `finance-webhook` |
 | T-FIN-22 | On-account return posted as `Dr 1200` → a phantom receivable in AR aging and a reconciliation break | Correct posting is `Dr 1300 / Cr Cash`; the assertion pins both accounts and asserts AR is untouched | `finance-021` |
 | T-FIN-23 | Receipt silently edited, or “voided” to hide a collection | `trg_fin_receipt_freeze` for **every** role incl. `school_migrator`, no GUC bypass; no `status` column and no void route exist | `finance-019` |
 | T-FIN-24 | Same-rank fee targets silently resolved by row order | Highest-rank-only rule; same-rank ambiguity **fails** with `55000 ambiguous_fee_target` naming both rows | `finance-target-integrity` |
 | T-FIN-25 | Polymorphic target pointed at another tenant's section | Composite `(tenant_id, id)` FKs — unrepresentable, not merely checked; plus hierarchy-coherence trigger | `finance-target-integrity` |
+| T-FIN-26 | Principal reaches an individual invoice through a new route, a new service method, or direct SQL | `reporting_staff` excluded from the `SELECT` policy on every row-level finance table — **zero rows**, not a filtered set; aggregate access only via four owner-scoped views whose columns are pinned to buckets/totals/counts | `finance-aggregate-view` |
 | T-FIN-27 | A payment is finalised into **two** reconciliation batches, because a batch moved `open → matching` while holding matches stamped `is_final = false` and the partial unique index — keyed on `is_final` — enforced nothing in that window | The **closure**, which is three triggers and cannot be fewer: `trg_fin_recon_is_final` (a match cannot *claim* finality in a non-final batch), `trg_fin_recon_batch_derive_totals` (`BEFORE`: the batch's own totals, and the guard against leaving a finalised batch), and `trg_fin_recon_batch_stamp_matches` (`AFTER`: a batch that *becomes* final claims every match it holds). The `AFTER` binding is part of the remedy, not a detail — bound `BEFORE`, the row trigger re-derives `is_final` from the batch's still-old status and undoes the stamp | `finance-018` case (c) |
 | T-FIN-28 | A half-matched reconciliation batch becomes **unabandonable**: `matching → open` is refused once any match is final, `matching → completed` demands a snapshot, and `/cancel` is gated to `open` only | `/cancel` accepts `open` **or** `matching`; `cancelled` is the transition that records a batch was void. The batch-side trigger refuses only the transitions that would *release* a finalised payment | `finance-018` case (d) |
 | T-FIN-29 | A cached `fin_invoices.balance` is trusted although it was recomputed on only one of its three inputs, or on only the destination of a moved allocation | `trg_fin_invoice_balance_recompute` bound to items + adjustments + allocations; both sides recomputed on a move; arithmetic in one helper; **and every read goes through `fin_v_invoice_balance`, not the cache** (§21.3), so a report cannot inherit the trigger's bugs | `finance-002` |
@@ -9413,12 +13707,13 @@ document.
 |---|---|---|---|---|
 | **0021** | `fin_foundation.sql` | `fin_tenant_settings`, `fin_ledger_accounts` (+ `app_finance_seeds_ledger_accounts()`), `fin_document_counters`, `fin_fee_heads`, `fin_tax_profiles`; **anchor indexes** on the 12 existing Phase 1–6 tables listed in §6.3; money-domain CHECK helpers; `app_finance_actor_class()`, `app_finance_linked_students()`, `app_finance_current_guardian_ids()` | `0002` (trust), `0004` (campuses/years), `0005` (students/guardians), `0006` (soft-link), `0008` (`acd_classes`/sections), `0009` (grade_levels) | **No finance table is reachable by `school_app_rw` yet** — no grants, no policies, and the tables are therefore unreadable even if a route were added. Anchors are `CREATE UNIQUE INDEX IF NOT EXISTS` on already-unique `(tenant_id, id)` pairs, so they cannot fail. |
 | **0022** | `fin_fee_structures.sql` | `fin_fee_structures`, `fin_fee_structure_targets` (5-target shape with the four composite FKs, §7.5), `fin_fee_structure_items`, `fin_fee_installment_plans`, `fin_fee_assignments`, **`fin_billing_runs`, `fin_billing_run_items`**; **SIX** functions and **EIGHT** bindings — `trg_fin_target_validate`, `trg_fin_structure_publish_freeze` (1), `trg_fin_structure_child_freeze` (3), `trg_fin_assignment_validate` (§8.6 pin), `trg_fin_billing_run_freeze`, `trg_fin_billing_run_items_freeze` (§8.7.1) — plus the active-period unique index, whose `structure_id` is coalesced because that column is nullable (§8.6). Intra-file order is normative: `fin_fee_structures` → `fin_fee_structure_items` → `fin_fee_installment_plans` → `fin_fee_structure_targets` → `fin_fee_assignments` → `fin_billing_runs` → `fin_billing_run_items` | 0021, 0008, 0009 | Unreachable. **No composite FK forward-references 0023+.** |
-| **0023** | `fin_invoices.sql` | `fin_invoices`, `fin_invoice_items`, `fin_invoice_adjustments`, `fin_challans`; `trg_fin_invoice_number`, `trg_fin_invoice_void`, `trg_fin_invoice_item_total` (**2** bindings — items + adjustments), `trg_fin_invoice_items_freeze` (2 bindings), `trg_fin_invoice_balance_recompute` (**2** bindings — items + adjustments; the third, on allocations, is in 0024), `trg_fin_challan_status` (§10.2). Intra-file order is normative: `fin_invoices` → `fin_invoice_items` → `fin_invoice_adjustments` → `fin_challans`. **`fin_billing_runs`/`fin_billing_run_items` are NOT here** — the previous revision listed them in this file's intra-file order without creating them, while §8.6/§8.7's DDL and §30.2 place them with the structures that generate them (§8) | 0021, 0022, 0005 (`enrollments`, `students`) | Unreachable. `academic_years_single_active_uq` is **not** here (see 0028). |
-| **0024** | `fin_payments.sql` | `fin_payments` (with `payer_guardian_id`), `fin_payment_allocations` — **created WITHOUT `fin_pa_refund_fk`** (P0-01), `fin_receipts` (with `payer_guardian_id`); `trg_fin_reversal_shape` (magnitude bound), `trg_fin_allocation_bounds` (FI-003, §12.7), `trg_fin_allocation_family_guard` (§12.5), `trg_fin_on_account_return_bounds`, `trg_fin_receipt_freeze`, `trg_fin_invoice_balance_recompute`; the two partial unique indexes; `fin_v_payment_position`, `fin_v_invoice_balance` | 0021, 0023, 0005 (`guardians`, `student_guardians`) | Unreachable. `refund_id` exists as a **plain nullable column with no FK** for the duration of this file — the FK is added by 0025. This is the only window in the sequence in which a column is unconstrained, it contains no application code, and it closes in the very next migration. **No trigger or function in this file may name `fin_refunds`, in its body OR in a `DECLARE` row type** (§30.3.1) — so `trg_fin_refund_provenance` is created and bound entirely in 0025, not here. |
-| **0025** | `fin_refunds.sql` | `fin_refunds`; then `ALTER TABLE fin_payment_allocations ADD CONSTRAINT fin_pa_refund_fk FOREIGN KEY (tenant_id, refund_id) REFERENCES fin_refunds (tenant_id, id);`; `trg_fin_refund_provenance` — the function **and both** of its bindings (allocations side and refunds side); `fn_fin_refund_ceiling` as `fin_allocations_refund_ceiling` (**deferred, INITIALLY DEFERRED**); `postRefundApproval` (F5) | 0024 | Unreachable. After this file the 0024 window is closed and every `fin_*` column that references another `fin_*` table is FK-backed. The provenance function and *both* its triggers are bound here rather than splitting them across 0024/0025, because its `DECLARE` block names the `fin_refunds` composite type and a 0024 `CREATE FUNCTION` would fail with 42704 (§30.3.1). |
-| **0026** | `fin_ledger.sql` | `fin_ledger_entry_groups`, `fin_ledger_entries` (with composite FKs to `students` and `fin_invoices`); `trg_fin_ledger_group_balance` (deferred), `trg_fin_ledger_seal`, `trg_fin_ledger_append_only`, `trg_fin_ledger_sealed_group_reject`; `post_fin_ledger_group()` (F4, `SECURITY DEFINER`, the only write path); `fin_recompute`; V1 `fin_v_ledger_account_balance` + V1 `fin_v_invoice_balance` are in 0023/0024, V2 the four owner-scoped aggregate views here | 0021, 0023, 0024, 0025 | Unreachable. |
+| **0023** | `fin_invoices.sql` | `fin_invoices`, `fin_invoice_items`, `fin_invoice_adjustments`, `fin_challans`; **seven bound functions over nine bindings**: `trg_fin_invoice_number` (row 4), `trg_fin_invoice_header_guard` (row 4a), `trg_fin_invoice_freeze_lines` (row 4d, **`AFTER UPDATE OF status`** — §9.6.0.1), `trg_fin_invoice_item_amount` (row 4b), `trg_fin_invoice_adjustment_approval` (row 4c), `trg_fin_invoice_item_total` (row 6, **2** bindings — items + adjustments), `trg_fin_invoice_items_freeze` (row 7, **2** bindings). `trg_fin_invoice_void`, `trg_fin_invoice_balance_recompute` and `trg_fin_challan_status` are **0024** (C-1, C-2): each names a relation 0024 creates. Intra-file order is normative: `fin_invoices` → `fin_invoice_items` → `fin_invoice_adjustments` → `fin_challans`, and within the file **`fin_invoices` is created before any function that names it** — row 4d is an `AFTER` trigger on a table the same file creates, which is why it needs no forward reference and no dependency on 0024. **`fin_billing_runs`/`fin_billing_run_items` are NOT here** — the previous revision listed them in this file's intra-file order without creating them, while §8.6/§8.7's DDL and §30.2 place them with the structures that generate them (§8) | 0021, 0022, 0005 (`enrollments`, `students`) | Unreachable. `academic_years_single_active_uq` is **not** here (see 0028). **Mandatory controls closable here: C-SEC-M1, M2, M3a, M4a, M5, M6a, M7 — 7 of the 7 controls, in 7 assertions** (§28.3.1). C-SEC-M3b, M4b and M6b belong to `0024` because their subjects are `fin_payment_allocations`, row 13 and `fin_invoice_reapply_derived_state`; no control is skipped, and A18
+ asserts the 7/3 split |
+| **0024** | `fin_payments.sql` | `fin_payments` (with `payer_guardian_id`), `fin_payment_allocations` — **created WITHOUT `fin_pa_refund_fk`** (P0-01), `fin_receipts` (with `payer_guardian_id`); `trg_fin_reversal_shape` (magnitude bound), `trg_fin_allocation_bounds` (FI-003, §12.7), `trg_fin_allocation_family_guard` (§12.5), `trg_fin_allocation_target_state` (§12.5.1, D9), `trg_fin_pa_delete_guard` (§12.1, D1, A19), `trg_fin_on_account_return_bounds`, `trg_fin_receipt_freeze`, `trg_fin_invoice_balance_recompute`; plus the three 0024-bound invoice functions C-1 and C-2 moved out of 0023 — `trg_fin_invoice_void`, the unbound helper `fin_invoice_reapply_derived_state`, and `trg_fin_challan_status` (§10.2) — of which row 13 alone is **three** bindings; **0024 totals ELEVEN bound functions over THIRTEEN statements, not three over five**, and the three-over-five figure is the moved subset alone (per-migration arithmetic in §35.3.2); the two partial unique indexes; `fin_v_payment_position`, `fin_v_invoice_balance` | 0021, 0023, 0005 (`guardians`, `student_guardians`) | Unreachable. `refund_id` exists as a **plain nullable column with no FK** for the duration of this file — the FK is added by 0025. This is the only window in the sequence in which a column is unconstrained, it contains no application code, and it closes in the very next migration. **No trigger or function in this file may name `fin_refunds`, in its body OR in a `DECLARE` row type** (§30.3.1) — so `trg_fin_refund_provenance` is created and bound entirely in 0025, not here. **Mandatory controls closable here: C-SEC-M3b, M4b, M6b — the 3 assertions of §28.3.1 whose subjects are row 13, `fin_payment_allocations` and `fin_invoice_reapply_derived_state`.** That is the concrete reason this migration exists for the maintenance suite: it is where the `'invoice_balance_state'` producer and the helper become real, and therefore where the two positive halves of C-SEC can finally assert that a *writer* works rather than that a vocabulary is spelled correctly |
+| **0025** | `fin_refunds.sql` | `fin_refunds`; then `ALTER TABLE fin_payment_allocations ADD CONSTRAINT fin_pa_refund_fk FOREIGN KEY (tenant_id, refund_id) REFERENCES fin_refunds (tenant_id, id);`; `trg_fin_refund_provenance` — the function **and both** of its bindings (allocations side and refunds side); `fn_fin_refund_ceiling` as `fin_allocations_refund_ceiling` (**deferred, INITIALLY DEFERRED**) | 0024 | Unreachable. After this file the 0024 window is closed and every `fin_*` column that references another `fin_*` table is FK-backed. The provenance function and *both* its triggers are bound here rather than splitting them across 0024/0025, because its `DECLARE` block names the `fin_refunds` composite type and a 0024 `CREATE FUNCTION` would fail with 42704 (§30.3.1). **`postRefundApproval` is NOT created here — it is `0028`'s (F11), with `postRefundProcess` (F12).** The previous revision of this row listed `postRefundApproval (F5)` among `0025`'s creates, and that was wrong three times over: the function had no `CREATE` body anywhere in the document, it was mis-filed as F5 (the 35 `SECURITY INVOKER` `trg_fin_*` trigger functions, which it is not), and it calls `post_fin_ledger_group()` (`0026`) and `app_consume_step_up()` (`0028`), so a `0025` version would have been created cleanly and raised **`42883 undefined_function` on every call**. §30.3.1 forbids naming a later migration's object as though it existed; §13.2.1 states what `0025` therefore delivers, and §36.2 row 49 records the defect. **At this checkpoint `fin_refunds` is a write-once staging table: `requested` is the only reachable state.** **AMENDED 2026-10-05 (§13.1.1, §36.6) — three canonical targets, none implemented:** **(a)** `trg_fin_refund_provenance` is canonically **`SECURITY INVOKER`**, and the immutable source's `SECURITY DEFINER` is source/live drift to be reconciled forward-only, not by editing `0025`; **(b)** the refund-side provenance branch is **removed**, because this design scopes it to `TG_OP = 'INSERT'` where the immediate `NOT DEFERRABLE` `fin_pa_refund_fk` makes its result set empty — the immutable source's **omission** of that predicate is itself the defect, and the superseded "the FK makes all paths safe" rationale is withdrawn; **(c)** `fin_pa_refund_fk` is canonically **`ON DELETE NO ACTION`**, and the immutable source's `ON DELETE SET NULL` is defective (`23502` against a `NOT NULL` `tenant_id`). Additionally, the canonical function's `v_target.effect <> 'apply'` and `v_refund.status IN ('requested','approved')` checks are **absent from the immutable source and from live state** and are forward requirements. **`fin_lock_payment_amount`** is `0025` forward-remediation's unbound `SECURITY DEFINER` support function (§19.7.2 `F5s`), not a third §35.3.1 helper. |
+| **0026** | `fin_ledger.sql` | `fin_ledger_entry_groups` (with `fin_leg_groups_origin_uq` and `fin_leg_groups_reversal_uq`), `fin_ledger_entries` (with composite FKs to `students` and `fin_invoices`), `fin_ledger_event_types` (owner-only closed catalogue); trg_fin_ledger_group_balance` (deferred), **`trg_fin_ledger_group_commit`** (new, deferred, bound to the *group* — see F-05), `trg_fin_ledger_seal`, `trg_fin_ledger_append_only`, `trg_fin_ledger_sealed_group_reject`; `post_fin_ledger_group()` (F4, `SECURITY DEFINER`, the only write path); **`app_finance_actor_has_permission()` (F13)** and **`app_finance_emit_event()` (F14)**, moved here from `0028`; `fin_recompute`; V1 `fin_v_ledger_account_balance` + V1 `fin_v_invoice_balance` are in 0023/0024, V2 the four owner-scoped aggregate views here | `0001`, `0021`, `0023`, `0024` — and **NOT `0025`** (see the ordering note below) | Unreachable. |
 | **0027** | `fin_reconciliation.sql` | `fin_reconciliation_batches`, `fin_reconciliation_matches` + `trg_fin_recon_is_final` (row side) **+ `trg_fin_recon_batch_derive_totals` (`BEFORE`) and `trg_fin_recon_batch_stamp_matches` (`AFTER`)** — the three form the finality closure and cannot be merged, because one effect needs `BEFORE` and the other `AFTER`; §14.1.1 + completion immutability; **tenant-aware** finality index (P2-04) | 0024, 0025, 0026 | Unreachable. |
-| **0028** | `fin_rbac_rls.sql` | `academic_years_single_active_uq`; `auth_mfa_factors`, `auth_step_up_challenges` + `trg_auth_step_up_immutable`, `app_verify_mfa_code` (F7), `app_consume_step_up` (F8), `app_mint_step_up_challenge` (F9); role backfill; `cashier` template; **all finance RLS policies**; the post-condition assertions; **grants, last**. **NO anchor index on `users` or `auth_sessions`** — neither table has a `tenant_id` column, so §6.3 R4's allowlist applies and the FKs to them are single-column (§19.8.1, P0-06a). The previous revision listed "anchor indexes for `users` and `auth_sessions`" here, which would fail with `column "tenant_id" does not exist` | all of the above | **This is the only migration in which `school_app_rw` acquires any access to a `fin_*` table**, and it is sequenced so that RLS is fully in place *before* the first grant. See §30.3 for the required intra-file order and why it is the fix for P0-11. |
+| **0028** | `fin_rbac_rls.sql` | `academic_years_single_active_uq`; `auth_mfa_factors`, `auth_step_up_challenges` + `trg_auth_step_up_immutable`, `app_verify_mfa_code` (F7), `app_consume_step_up` (F8), `app_mint_step_up_challenge` (F9), `app_confirm_mfa_factor` (F10); **`postRefundApproval` (F11) and `postRefundProcess` (F12) — the refund state machine, both `SECURITY DEFINER`**; role backfill; `cashier` template; **all finance RLS policies**; the post-condition assertions; **grants, last**. **NO anchor index on `users` or `auth_sessions`** — neither table has a `tenant_id` column, so §6.3 R4's allowlist applies and the FKs to them are single-column (§19.8.1, P0-06a). The previous revision listed "anchor indexes for `users` and `auth_sessions`" here, which would fail with `column "tenant_id" does not exist` | all of the above | **This is the only migration in which `school_app_rw` acquires any access to a `fin_*` table**, and it is sequenced so that RLS is fully in place *before* the first grant. See §30.3 for the required intra-file order and why it is the fix for P0-11. **It is also the migration that makes the refund state machine executable**, and it owns F11/F12 for two independent reasons that each bind it here: F11 calls F8 (step-up MFA) and F11/F12 call F4 (the ledger), and `0026` is the earliest migration at which both callees exist. F11 and F12 are placed **after** `auth_step_up_challenges` and **after** the ledger tables in §30.3's intra-file order, and their RLS policies must exist before them — a definer bypasses the policy, so the policies here are defence-in-depth for the `school_migrator` path rather than the control for F11/F12's. |
 | **0029** | `fin_artifacts_webhooks.sql` | `fin_document_artifacts`, `fin_payment_gateway_webhooks`, `fin_provider_accounts`, `trg_fin_artifact_document_valid`; refund/reversal/on-account-return advice document types. `fin_webhook_raw_payloads` is **NOT created** (P1-09) | 0023, 0024, 0025 | Unreachable for the runtime role **by design** — no policy and no grant on any 0029 table. These tables are written only by the webhook handler and the artifact worker through `school_migrator`. |
 
 **The P0-01 fix, stated as the one rule it enforces: no migration may declare a foreign key to a
@@ -9497,14 +13792,24 @@ failure timing, so the distinction is stated once here and asserted by
 
 > **Status, stated so it is not mistaken for coverage.** `finance-migration-order.test.ts` **does not
 > exist yet**; every reference to it in this document is a forward reference. It is scoped to parse
-> `0021`–`0029`, and only `0021` and `0022` are written, so it cannot be written yet without either
-> failing on the seven missing files or being special-cased for them. For the two migrations that do
+> `0021`–`0029`, and only `0021`, `0022` and `0023` are written, so it cannot be written yet without
+> either failing on the **six** missing files (`0024`–`0029`) or being special-cased for them. For the
+> three migrations that do
 > exist, the rule is instead enforced *live* rather than by parsing: `0022`'s own
 > `post-0022 assertion` self-test runs 61 behavioural cases at apply time, and
-> `finance-composite-fk.test.ts` asserts the resulting FK graph and anchors against the catalog
-> (including that `fin_tax_profiles` is declared at `schema.ts:2495` **before** `fin_tenant_settings`
-> at `schema.ts:2525`, because Drizzle evaluates `foreignKey({ foreignColumns })` eagerly and the
-> reverse order fails to resolve — the child would be declared before its parent exists). What
+> `finance-composite-fk.test.ts` asserts the resulting FK graph and anchors against the catalog.
+>
+> **The eager-evaluation claim this paragraph used to make is withdrawn.** It said Drizzle evaluates
+> `foreignKey({ foreignColumns })` eagerly, which would make declaration order mandatory in
+> `schema.ts`. In the pinned drizzle-orm 0.38.4 that is false: `pgTable`'s third argument is stored as
+> a builder (`pg-core/table.js` → `PgTable.Symbol.ExtraConfigBuilder`) and invoked from
+> `getTableConfig()` (`pg-core/utils.js`), i.e. after the module has finished evaluating, so a forward
+> reference resolves. Verified, not inferred: a two-table module with the child declared **first** and
+> its FK closing over the parent loads and reports the correct target table and column list.
+> `fin_tax_profiles` is still declared before `fin_tenant_settings` and the child-first order now also
+> appears at `fin_billing_run_items` → `fin_invoices`, because 0023 installs that edge with an ALTER
+> and `schema.ts` states it in place — so the order is a readability choice, not a constraint, and
+> nothing in this document may call it one again. What
 > remains unproven by machine is the *ordering* of objects **within** the SQL files; that is the gap
 > `finance-migration-order.test.ts` is meant to close, and it closes when `0029` is.
 
@@ -9529,8 +13834,15 @@ placed accordingly:
   function fails with 42704; a 0024 *trigger* bound to a 0025 function fails with 42883. Splitting
   the two bindings across 0024 and 0025 is the one arrangement that cannot work, because the function
   is a single object and the earlier binding needs it to exist.
-- `trg_fin_challan_status` declares `v_inv fin_invoices`, and is in 0023 — the same migration that
-  creates `fin_invoices`. Correct as placed.
+- `trg_fin_challan_status` declares `v_inv fin_invoices`, which `0023` creates — so that `DECLARE` row
+  type alone would place it in `0023`, and the previous revision of this list said exactly that. It is
+  nevertheless **`0024`** (C-2), because a second statement in the same body reads
+  `fin_v_invoice_balance`, and `fin_v_invoice_balance` is created by `0024`. A `plpgsql` body resolves
+  its relation references when the trigger first fires, so a `0023` placement would create cleanly and
+  fail at runtime with 42P01 — the worst of both outcomes, and the reason the ordering assertion above
+  is written over the *body* and not over the `DECLARE` rows alone. The rule this list exists to apply is
+  §30.3.1's: **no function may name a relation a later migration creates**, and `DECLARE` row types are
+  the *easy* case, not the hard one.
 
 The test asserts the *ordering*, not the prose: for every function whose `DECLARE` block names a
 `fin_*`/`auth_*` relation as a bare type, the index of that `CREATE FUNCTION` in the concatenated
@@ -9721,11 +14033,64 @@ The adjudicated position, stated so it can be argued with:
   directions so the design cannot silently regress to either failure: direct
   `INSERT INTO fin_ledger_entries` as `school_app_rw` raises `42501 insufficient_privilege` (a
   privilege error, not a policy-filtered empty result, so the test cannot pass for the wrong reason);
-  the full six-argument `post_fin_ledger_group` call with balanced
+  the full five-argument `post_fin_ledger_group` call with balanced
   lines succeeds; the same call with a debit/credit
   imbalance raises `55000` **and leaves zero rows in both ledger tables**; and a line naming another
   tenant's `student_id` raises `55000` with zero rows written. The third and fourth assertions are  the ones that make definership acceptable — they test the *contents* of the elevated capability, not
   just its presence.
+
+#### 30.3.4 `0023`'s closing assertions (C-16)
+
+`0028` has an enumerated order with post-conditions in §30.3.2. **`0023` did not**, and C-16 is
+what requires them: two places in this document told 0023 to *assert* something without saying what,
+so an implementer had no list to check against. The requirements are gathered here, each traced to
+the section that creates it, and each written as something a `DO $assert$` block can test. Nothing
+here is new policy; it is the same content the prose already commits 0023 to.
+
+| # | Assertion | Source | Why it is a check and not a comment |
+|---|---|---|---|
+| A1 | `fin_billing_run_items` has exactly one FK to `fin_invoices`, named `fin_bri_invoice_fk` | C-3, §8.7.1 | A missing FK compiles and silently leaves `invoice_id` unconstrained |
+| A2 | That FK is composite on `(tenant_id, invoice_id)` | C-3, §35.2 | A single-column FK would be tenant-blind and pass every functional test |
+| A3 | Its target is `fin_invoices (tenant_id, id)` | C-3 | Targeting `(id)` alone would make the composite FK impossible to write |
+| A4 | Its delete action is `ON DELETE RESTRICT` | C-4 | `SET NULL` on a `NOT NULL` column fails `23502` at delete time, not at create time |
+| A5 | `fin_invoice_items.installment_no` is nullable and has **no default** | C-7, §9.5 | A default of `1` re-breaks plan-less structures and the previous revision shipped it |
+| A6 | `fin_invoice_items_plan_fk` exists and is `MATCH SIMPLE` | C-7 | Default is `SIMPLE`; asserting it catches a future `MATCH FULL` edit |
+| A7 | `trg_fin_invoice_number`, `trg_fin_invoice_item_total` and `trg_fin_invoice_freeze_lines` are each `SECURITY DEFINER`, and **`trg_fin_invoice_header_guard` is `prosecdef = false`** | C-SEC, §16.5.1, §19.7.4 | The definership of the three cache writers is the whole C-SEC fix; an `INVOKER` on any of them raises `42501` on the first invoice. The fourth clause is equally load-bearing and was missed by the previous revision: a definer guard cannot distinguish a caller's `UPDATE` from a maintenance writer's |
+| A8 | **No `0023` function names a relation `0024`+ creates** | C-1, C-2, §30.3.1 | This is the strict scope rule. `trg_fin_invoice_void` and `trg_fin_challan_status` are the two that violated it |
+| A9 | `fin_invoices`, `fin_invoice_items`, `fin_invoice_adjustments`, `fin_challans` each carry an immediately-following `REVOKE ALL … FROM school_app_rw` | R6′, §35.4 | Without it, `0001`'s `ALTER DEFAULT PRIVILEGES` grants `DELETE` at `CREATE TABLE` time |
+| A10 | No runtime role holds table-level `UPDATE` on the three cached tables | C-SEC, §16.5.1 | The column lists are worthless if a table-level `UPDATE` sits beside them |
+| A11 | The unique index violation on `(tenant_id, enrollment_id)` for a live invoice is translated to `fee_invoice_already_billed` | C-16, §9.1, §21.4 | A raw `23505` reaching the API is not the documented error the contract names |
+| A12 | All **9** `0023` `CREATE TRIGGER` statements name a function defined **in this file** | R2, §35.3 | An orphan trigger name compiles and fails only on first write |
+| A13 | `trg_fin_invoice_header_guard`'s body contains **no `UPDATE`, `INSERT` or `DELETE` statement at all** | C-SEC, §19.7.4 | This is the assertion that would have caught the original defect. Definership was compensating for clause (6); if a future revision re-adds a statement without demoting the function, A7 passes and this fails |
+| A14 | **`0023` owns exactly ONE producer of `fin.invoice_maintenance_scope`** — `trg_fin_invoice_item_total`, with `set_config(..., true)`, and it resets the value to `''` on the same path. Asserted by scanning the `prosrc` of the `0023` functions for `set_config` and for the reset, **not** by asserting the GUC's runtime value. The **whole-phase** figure is **exactly two** producers, the second being row 13's `trg_fin_invoice_balance_recompute` in `0024`, and `0024` must assert it | C-SEC, §9.6, §19.7.4 | A scope set without a reset leaks to the rest of the transaction, and on a pooled connection a leak past the transaction boundary becomes a forgeable session-level hole. Asserting the *runtime* value would pass against a function that sets it in a branch the test never takes. **The count is per migration, and saying so is the fix rather than a clarification**: the previous revision asserted "exactly two" of `0023`'s functions, which is a claim about `0024` made by `0023` — the same defect class as A8, one row above, and it survived in the document because the number happened to be right for the phase and wrong for the file |
+| A15 | `trg_fin_invoice_freeze_lines`'s binding is `AFTER UPDATE OF status` **with a `WHEN` clause**, and its body issues no `UPDATE` on `fin_invoices` | C-SEC, §9.6.0.1 | `BEFORE` reproduces the clobber (control `ctl_csec_b`); a binding without `WHEN` fires on `0024`'s balance path and stamps the lines of a draft invoice (control `C-SEC-M6b`, whose `0023`-expressible structural half is `C-SEC-M6a` and is what this assertion is read by) |
+| A16 | **The `0023`/`0024` scope vocabulary is asymmetric and both halves are checked in the file that owns them**: `0023` declares exactly two literals in the guard's body and exactly one producer (A14); `0024` declares exactly one producer for `'invoice_balance_state'` and no third literal | §28.3.1, C-SEC | This is the assertion that replaces the stale cross-reference "0023 (§30.3.4, assertion 10.7)", which is quoted here and nowhere else — there is no `10.6` anywhere in the document and no other `10.7`, so no live citation depends on it. The previous revision pointed at an assertion number that no longer existed, because the numbering had already moved past it (the current register runs A1–A18
+) and the reference was not moved with it. Asserting the asymmetry is stronger than asserting either side alone: it fails on a narrowed vocabulary, on a duplicated producer, and on a literal added for a scope `0023` cannot have a producer for |
+| A17 | **`expected_current_edges = live_current_edges = 44`** at this checkpoint, with F1 = 0, F2 = 0, F3 = 0 and orphan count 0, derived from §35.2 by the §35.2.1 rule, and **0** deferred rows — including `fin_bri_invoice_fk`, which `0023` owns and adds as its last statement | §35.2, §35.2.1, C-3 | The FK graph is the one thing in `0023` whose completeness has to be machine-checked rather than reviewed, and the check is only sound if it is **checkpoint-filtered**. Asserted here so `0023` closes on it, because `finance-composite-fk.test.ts` runs against a database whose applied set may be larger than `0023`'s |
+| A18 | **Every mandatory control of §28.3.1 has exactly one owning migration and exactly one executable test boundary, the executable-assertion count is 10, and `0023`'s own share is 7** — and **no control in that share names a relation created after `0023`** | §28.3.1, C-SEC | The last clause is the one that would have caught this revision's own defect: C-SEC-M3, M4 and M6 named `fin_payment_allocations`, row 13 and `fin_invoice_reapply_derived_state`, all `0024`, so the suite `0023` is supposed to run against had three cases that could not run there. Counting the assertions as well as the controls is what distinguishes a control that was **scheduled** from one that was **dropped**, and the previous revision's "seven mandatory tests" was a count of controls presented as a count of assertions |
+
+**The counts `0023` must close on, as of this revision**, are **7 bound functions over 9 bindings**,
+**4 `CREATE TABLE`s**, and — the one added in this revision — **`1` `ALTER TABLE … ADD CONSTRAINT`**
+(`fin_bri_invoice_fk`, `ON DELETE RESTRICT`), and they are asserted against §35.3 rather than written
+into a second copy here — a duplicated count is a count that drifts, which is exactly what §36.2 rows 29
+and 31 recorded happening twice.
+
+**What `0023` must NOT assert, and why that is a decision rather than an omission.** `0023` is
+**unreachable** (§35.1): no policy, no grant, RLS not enabled, and the runtime role holds no
+privilege on any of its four tables. A closing assertion that reaches for a grant, a policy, or an
+RLS flag would therefore be asserting against a state `0023` itself did not create. Those checks
+belong to `0028`'s step 7, and A9 is the only privilege-adjacent assertion here — and it asserts
+the **absence** of a grant (`REVOKE ALL`), which is true at `0023` time. This is the same
+fail-closed property §30.3.2 relies on, and it is why the **18** assertions above stay inside `0023`'s
+own scope rather than reaching into a state `0028` creates.
+
+**A note on A7's two halves, because they are different kinds of assertion.** "Is a function
+`SECURITY DEFINER`?" is a one-line catalog read and would pass against a design that made *every*
+function a definer. "Does the header guard issue a statement?" is the assertion that carries the
+design: the previous revision's guard was a definer **because** it issued a statement, and the fix
+was to remove the statement, not to remove the definership and keep it. A13 is stated so that a
+future contributor cannot re-add a clause and leave A7 green.
+
 
 ### 30.4 Migration-scope risks, stated rather than hidden
 
@@ -9810,7 +14175,7 @@ a special case in `0028`.
 - **Deliverables:** billing runs + trace, invoices, items, adjustments, challans, numbering, state
   machines, freeze triggers, the three **cache columns** (`subtotal`, `total`, `balance` — §12.4.1),
   `trg_fin_invoice_item_total` (2 bindings) and `trg_fin_invoice_balance_recompute` (2 bindings +
-  the `trg_fin_invoice_recalc_balance(uuid,uuid)` helper they share, F5a).
+  the `fin_invoice_reapply_derived_state(uuid,uuid)` helper they share, F5a/F5h).
 - **Migrations:** `0023` (+ the `academic_years` index decision, §30.4).
 - **APIs:** `/finance/invoices` (+ issue/void/adjustments), `/finance/billing-runs`, challan read.
 - **UI:** invoice list/detail; challan preview; billing-run wizard.
@@ -9952,8 +14317,8 @@ a special case in `0028`.
 - **No existing permission changes.** `fees.*` is a new namespace; `assertCatalogConsistent()` passes
   because no existing template references an unknown permission. The only existing-template change is
   the additive backfill in `0028`.
-- **No existing event type changes meaning.** 18 new types are appended to the enum (13 HANDLED, 5 NOOP); the three
-  registry pins move from **93 / 9 / 84** to **111 / 22 / 89** in the same commit, and the count is
+- **No existing event type changes meaning.** 19 new types are appended to the enum (13 HANDLED, 6 NOOP); the three
+  registry pins move from **93 / 9 / 84** to **112 / 22 / 90** in the same commit, and the count is
   asserted by name per event rather than by total. The fallback arm is removed — a
   behaviour change to the worker that is a **security improvement** and is covered by the existing
   always-on registry gate.
@@ -10012,14 +14377,23 @@ default if the owner disagrees**.
 | **OD-12** | Should the principal get `fees.invoices.read`? | **No** — aggregate only (§20.2). | A principal cannot open an individual invoice. If the owner wants it, it is one line in the catalog plus the RLS class change — but §20.2 explains why the design does not do it silently. |
 | **OD-13** | Is there an owner-approved **break-glass** path to approve/process a refund when no staff member has an enrolled MFA factor? | **No.** Fails closed with `503 step_up_unavailable`. | A tenant whose staff have enrolled no factor **cannot approve refunds at all** (§19.8.3) — which is the correct default for a control that protects cash, and makes enrollment a go-live prerequisite rather than optional hardening. If the owner later wants a break-glass path, it must be a *separately permissioned*, dual-approval, expiring, **fully audited** workflow — never a flag on the refund route, because "approve a refund without step-up" is exactly what a disappointed implementer reaches for and exactly what defeats the control. The design deliberately does **not** sketch it, so the omission reads as an omission. |
 | **OD-14** | How does the step-up binding obtain the **session id**, given `app_ctx_session_id()` does not exist and `0002` is immutable? | **Route argument, validated against `auth_sessions.token_hash`.** F9/F8 take the session id as an explicit argument that the route supplies from the session it has *already* authenticated, and both functions verify it against `auth_sessions` before minting or consuming. | The alternative — adding a session claim to `0002`'s signed ticket — is a **cross-phase change to an immutable migration**, and `CREATE OR REPLACE` cannot add a claim to an already-issued ticket format, so it would invalidate every outstanding ticket. The shipped default therefore costs one extra `auth_sessions` lookup per step-up and leaves `0002` untouched (P2-10). If the owner prefers the ticket claim, it is a Phase-1/2 ticket-format migration plus a forced re-login, and it must land **before** `0028`, or F8/F9 are written against an interface that does not exist. |
-| **OD-15** | Does the invoice-adjustment approval provide **separation of duties**? The §20.3 catalog defines `fees.adjustments.approve` as a post-issue approval control on cash, and §20.4 states the create/approve split explicitly | **Ship what is enforceable without a schema change: one type-keyed gate.** A `concession` or `waiver` needs `fees.adjustments.create` **and** `fees.adjustments.approve`; every other type needs `create` alone. Every role holding `create` also holds `approve`, so the approver is the creator and the separation is nominal | **Add `fin_invoice_adjustments.status` plus an approver identity and an approval timestamp**, making the two-step real: request, then approve by a different user, with the ledger reversal tied to the approval rather than to the insert. **Before `0023` is written** — the table is created in `0023`, and adding the columns later means an `ALTER` on a table whose rows are already append-only by trigger, so the historical rows would have no approver to record. Medium. The nominal split is honest to document and weak to rely on; a school that needs four-eyes control on concessions cannot get it from the current schema |
-| **OD-16** | `fin_ledger_entry_groups.event_type` is `NOT NULL`, but the F4 signature (`p_tenant_id, p_source_type, p_source_id, p_lines`) has no `event_type` argument, so the body sets `event_type := p_source_type` and the column duplicates `source_type`. Nothing in this document reads it | **Keep it, and treat it as the event label.** The column is correct and the *signature* is the narrow thing | **Drop the column**, or add a fifth argument so the group distinguishes the business event (`invoice.issued`, `payment.received`, `refund.processed`) from the source table it came from. **Before `0026` is written** — the table is created there, and a later `ALTER` would have to drop or backfill a column whose value was never recorded. Low. The current state is *correct but redundant*: no query filters on it and no test asserts it |
+| **OD-15** | Does the invoice-adjustment approval provide **separation of duties**? The §20.3 catalog defines `fees.adjustments.approve` as a post-issue approval control on cash, and §20.4 states the create/approve split explicitly | **RESOLVED by C-6. Real separation, enforced by the schema.** `fin_invoice_adjustments` carries `status` (`pending`/`approved`/`rejected`), `requested_by`, `approved_by`, `approved_at` and `rejected_reason`. Every adjustment is created `pending`; only an **`approved`** row counts toward `total` (§9.6.2); `approved_by <> requested_by` is a CHECK; and `trg_fin_invoice_adjustment_approval` (§9.6.2) refuses every field except the four approval columns, and refuses every transition except `pending → approved/rejected` | **Nothing further.** The consequence column is retained because the *previous* default — a type-keyed permission gate with every `create` holder also holding `approve`, so the approver was the creator and the separation was nominal — is what C-6 replaced. If the owner wants to go further, the natural next step is a **second approver for large amounts**, which needs an amount threshold on the role or tenant and is **not** in this revision. The remaining known limit is stated in §9.5.1: **every** type requires approval, including `correction`, which is stricter than OD-15's original ask and is a deliberate consequence of C-5 closing the `direction`/`correction` loophole |
+| **OD-16** | ~~`fin_ledger_entry_groups.event_type` is `NOT NULL`, but the F4 signature (`p_tenant_id, p_source_type, p_source_id, p_lines`) has no `event_type` argument, so the body sets `event_type := p_source_type` and the column duplicates `source_type`. Nothing in this document reads it~~ | **Keep it, and treat it as the event label.** The column is correct and the *signature* is the narrow thing | **Drop the column**, or add a fifth argument so the group distinguishes the business event (`invoice.issued`, `payment.received`, `refund.processed`) from the source table it came from. **Before `0026` is written** — the table is created there, and a later `ALTER` would have to drop or backfill a column whose value was never recorded. Low. The current state is *correct but redundant*: no query filters on it and no test asserts it. **RESOLVED — the row is retained for the audit trail and is no longer an open decision. F4's second argument is now `p_event_type`, so the caller states the event directly; `source_type` is read from `fin_ledger_event_types` for that event; and `event_type` is the key half of `fin_leg_groups_origin_uq UNIQUE (tenant_id, event_type, source_id) WHERE reversal_of_group IS NULL`, so the column is load-bearing and has a test asserting it. Neither column can be restated by the caller any more, which is the part the original row missed: the wart was not the redundancy, it was that **both** provenance columns were caller-written |
 
-**Count: 16 open decisions. None blocks implementation** — each has a shipped default that produces a
-working, internally consistent system, and each names the cost of that default. **Three carry a
+**Count: 16 open decisions, of which one — OD-15 — is now RESOLVED and shipped.** None of the
+remainder blocks implementation: each has a shipped default that produces a working, internally
+consistent system, and each names the cost of that default. **Two carry a
 cross-phase ordering constraint**, and each must be settled before the named migration is *written*,
-not before it is applied: **OD-14** before `0028`, **OD-15** before `0023`, and **OD-16** before
-`0026`.
+not before it is applied: **OD-14** before `0028`, and **OD-16** before `0026`. **OD-15's constraint
+("before `0023` is written") is discharged** — C-6 added the columns to the 0023 DDL rather than
+proposing an `ALTER` on a table that does not yet exist, which is the only way that constraint could
+be satisfied.
+
+**`OD-17` was cited as "§33 open decision OD-17" and never had a row here**, which is §36.2 row 30's
+defect class reproduced by the revision that wrote row 30. It is not counted in the 16 because it is no
+longer open: F11/F12's two helper names are now **defined** as **F13**/**F14** in §19.7.3, so the
+question the decision asked — define them, or inline them — has an answer rather than a preference, and
+a decision with no alternatives left is not a decision. The honest record of the gap is §36.2 row 52.
 
 ---
 
@@ -10034,6 +14408,7 @@ not before it is applied: **OD-14** before `0028`, **OD-15** before `0023`, and 
 | Generic `OR app_privileged()` inherited into finance | §19: four purpose-built policy classes; `platform_admin` explicitly excluded; a `0020`-style post-condition assertion that fails the migration if any finance policy mentions platform scope |
 | Numbering `NOT NULL` vs "issue assigns the number" | §9.1/§14: `draft ⇒ NULL`, partial unique index, transactional allocation, monotonic committed numbering, gaps permitted, committed numbers never reused. **No gap-free claim is made** |
 | **A second reversal mechanism on `fin_payments`** (`reverses_payment_id` + `status='reversed'`) duplicating the signed allocation table | **Found and removed in this revision** (§11.1). A payment is append-only with no compensating row and no reversed status; reversal is a `fin_payment_allocations` row and nothing else, and "fully reversed" is a predicate in `fin_v_payment_position` rather than a mutation of an append-only table (FI-007) |
+| **The header guard refused the phase's own cache writers, so no invoice could be built** | **Found in this revision** (C-SEC). `trg_fin_invoice_header_guard` refused every `UPDATE` of a server-owned header column with no declared writer, while §35.4 revokes those columns from `school_app_rw` — so the cache writers could not write and the first `INSERT` of an invoice line raised `55000`. Two design changes fix it, and **neither is "make the guard less strict"**. (1) The writers declare themselves: a closed, transaction-local maintenance context `fin.invoice_maintenance_scope` with **two values covering four columns**, and the guard requires `pg_trigger_depth() >= 2` **as well as** a matching scope (FI-020). The GUC is forgeable and is not the boundary; the column ACL is. (2) The guard's own clause (6) — the `frozen_at` stamp — **moved out** to `trg_fin_invoice_freeze_lines`, an `AFTER UPDATE OF status` trigger with a `WHEN` clause. `AFTER` because a `BEFORE` trigger's nested write is either refused or, once clause (2) is widened, silently clobbered by the outer statement's pre-image. The stamp's move is also what lets the guard be `SECURITY INVOKER`, which is what makes "caller" mean anything inside clause (2). **Seven mandatory controls (C-SEC-M1…M7) in ten checkpoint-scoped assertions — 7 of the 10 assertable at `0023` and 3 at `0024`, none skipped — with M1 and M3b positive, one per producer, plus three reverted-clause controls. M3, M4 and M6 are each split into an `0023` half and an `0024` half (M3a/M4a/M6a, M3b/M4b/M6b) precisely so that each is asserted in the file that owns its subject; the definership count is scoped the same way, **3 at `0023` and 5 at `0024`**, because the guard's own move to `INVOKER` removed one definer from `0023` (regained by `trg_fin_invoice_freeze_lines`) and rows 13 and 8a added two at `0024`** — because twenty negative tests all passed against the broken design | §9.6.0, §9.6.0.1, §19.7.4, FI-020, §28.3.1, §35.4 |
 
 ### 34.2 P1 — resolved (0 open)
 
@@ -10045,12 +14420,12 @@ The load-bearing resolutions, each a change from the naive design rather than a 
 | **Receipt immutability** | The `status = issued \| void` contradiction is removed **entirely**. No status column, no void route, no `PATCH`. Immutability is trigger-enforced for every role including `school_migrator`, with no GUC bypass; a correction mints a new `version` with `supersedes_id`; `amount` is overwritten from the payment, not validated | §25.5, FI-019 |
 | **Target precedence** | A strict total order — section > class > grade > campus > all — where a match at a more specific level **excludes** every less specific level. `all` is a genuine catch-all, not an additive fourth price list. Same-rank ambiguity **fails** with `55000 ambiguous_fee_target` rather than resolving by row order | §7.5 |
 | **Polymorphic target integrity** | No bare `target_id`. `target_type` + four typed columns + `fin_targets_shape_ck` + `trg_fin_target_validate`, resolving the requirement to **five** testable properties: existence, tenant, shape, hierarchy coherence, year applicability. Tenant safety is *unrepresentable* via composite FKs, not merely checked | §7.6 |
-| **SECURITY DEFINER contract** | §19.7 is a formal, closed contract for every Phase 7 function **and** for the two view classes: owner, kind, `search_path`, `PUBLIC` revoke, grant, purpose, arguments, tenant derivation, returns, caller context, RLS interaction, transaction, audit/outbox, and failure mode for each. F1/F2/F6–F9 definer (argless or read-only, so unfalsifiable); F3 definer but **not** granted to the runtime role; **F4 definer by necessity** — the canonical ledger posting function, bounded by a closed `jsonb` line shape validated before any insert and by the runtime role having no direct `INSERT`; F5 triggers **invoker**; V1 views `security_invoker = on`, V2 views owner-scoped, with no `SECURITY DEFINER` view claimed because PostgreSQL has no such option (P1-06, P1-07). Asserted by a static test against `prosecdef`/`proconfig`/`proacl` for functions and `reloptions`/owner for views | §19.7, §15.2.1 |
+| **SECURITY DEFINER contract** | §19.7 is a formal, closed contract for every Phase 7 function **and** for the two view classes: owner, kind, `search_path`, `PUBLIC` revoke, grant, purpose, arguments, tenant derivation, returns, caller context, RLS interaction, transaction, audit/outbox, and failure mode for each. F1/F2/F6–F9 definer (argless or read-only, so unfalsifiable); F3 definer but **not** granted to the runtime role; **F4 definer by necessity** — the canonical ledger posting function, bounded by a closed `jsonb` line shape validated before any insert and by the runtime role having no direct `INSERT`; F5 triggers **invoker**, save for the **five** F5d rows (4, 4d, 6, 13, 8a) whose classification is driven by the statements they issue, not by their timing — and the whole-phase figure is five rather than three because row 4a's clause (6) moved to row 4d, which took a statement and therefore a definership with it, and P0-07 later made row 8a a fifth. **The per-checkpoint figures differ and both are asserted**: rows 4, 4d and 6 are `0023`'s and rows 13 and 8a are `0024`'s, so C-SEC-M4a asserts **3** definers over **13** functions at `0023` (`0022`'s six plus `0023`'s seven) and C-SEC-M4b asserts **5** over **24** at `0024` (`0024` adds its eleven). A single unscoped count is wrong at both ends; V1 views `security_invoker = on`, V2 views owner-scoped, with no `SECURITY DEFINER` view claimed because PostgreSQL has no such option (P1-06, P1-07). Asserted by a static test against `prosecdef`/`proconfig`/`proacl` for functions and `reloptions`/owner for views | §19.7, §15.2.1 |
 | **Webhook enumeration oracle** | Resolving the account before verifying the signature is unavoidable, so all pre-authorization failures return **HTTP 200 + `{"status":"ignored"}`** with a dummy-secret substitution for timing equalisation. 404-vs-401 would have let an unauthenticated caller map every school on the platform. The distinction is stored, not returned; an authenticated `/webhook/verify` self-check pays back the operational cost | §27.4, §27.5, T-FIN-21 |
 | **Tenant isolation vs the worker** | FI-014 is restated with the `school_migrator` carve-out **written into the invariant** and its two clauses tested separately, instead of asserting universal isolation that its own tests violate | FI-014 |
 | **Receipt RLS contradiction** | A parent must read a receipt but never a payment. `fin_receipts` is its own portal-document class with an inverted reachability path (receipt → allocation → invoice → linked student), so the sub-select returns a boolean and leaks no amount | §19.2, §19.4 |
 | **RBAC catalog integrity** | **25** permissions, catalog and matrix reconciled row-for-row. The invented `fees.challans.read` is gone; the duplicated `fees.adjustments.approve` row is collapsed; the accountant's two cells are corrected to match the narrative; cashier is exactly **3** permissions; and `fees.receipts.reissue` is **added** so the receipt-reissue route is not gated on a read permission (P1-03) | §20.3, §20.4, §20.5 |
-| **Event accounting** | 18 new events are **13 HANDLED / 5 NOOP**, counted row-by-row from the disposition table: **111 = 22 HANDLED / 89 NOOP**. Two earlier revisions were wrong in different ways — one said 21/91, which was an arithmetic error, and the next said 19 new / 112 total because it kept a HANDLED row for `fee.reconciliation.exception`, an event no publisher emits. Deleting that phantom removes one new event and one HANDLED and leaves NOOP at 5/89. Asserted by name per event, not by total | §24.1, §24.2, §15.3, §16.5 |
+| **Event accounting** | 19 new events are **13 HANDLED / 6 NOOP**, counted row-by-row from the disposition table: **112 = 22 HANDLED / 90 NOOP**. The nineteenth is `fee.refund.rejected`, required by §35.7 row 3 and emitted by F12's reject branch (§36.2 row 52). Two earlier revisions were wrong in different ways — one said 21/91, which was an arithmetic error, and the next said 19 new / 112 total because it kept a HANDLED row for `fee.reconciliation.exception`, an event no publisher emits. Deleting that phantom removes one new event and one HANDLED and leaves NOOP at 5/89. Asserted by name per event, not by total | §24.1, §24.2, §15.3, §16.5 |
 | **Reconciliation finality was derived but never propagated** | `is_final` was derived from `batch.status` inside a trigger bound only to the *match* table, so a batch moving `open → matching` left its existing matches non-final and the partial unique index that prevents one payment being matched in two batches enforced nothing during that window. The batch side is now **two** triggers — `trg_fin_recon_batch_derive_totals` (`BEFORE`, derives the batch's own `matched_total`/`variance_amount` and refuses to leave a finalised batch) and `trg_fin_recon_batch_stamp_matches` (`AFTER`, propagates `is_final` to the batch's existing matches and **releases** every claim when the batch is `cancelled`). The previous single merged trigger could be bound correctly at neither timing, and had no release branch at all, so cancelling a `matching` batch stranded the payments it had claimed | §14.1.1, §14.2, §35.6 |
 | **`COALESCE(NEW.x, OLD.x)` in a row trigger** | Six functions read the fired-on row as `COALESCE(NEW.c, OLD.c)`. In PL/pgSQL a row trigger assigns only `NEW` on INSERT and only `OLD` on DELETE; `COALESCE` evaluates every argument, so it dereferences the unassigned record and raises P0002 `record "new" is not assigned yet` on the single-operation paths. The document previously *asserted* this was the correct DELETE-path idiom. All six now branch on `TG_OP` explicitly, including the `RETURN`, which in a BEFORE trigger is the row that gets written | §7.4, §9.4.1, §9.6, §12.4.1, §13.3.1, §15.1 |
 | **`trg_fin_invoice_item_total` bound to one of its two inputs** | The function reads `fin_invoice_adjustments` but was bound only to `fin_invoice_items`, so a trigger never fired for an adjustment edit and a waiver never reached `total`. Bound to both | §9.6, §35.3.2 |
@@ -10059,7 +14434,7 @@ The load-bearing resolutions, each a change from the naive design rather than a 
 | **Principal's entire finance surface was prose** | The four owner-scoped V2 aggregate views and the V1 ledger view were named in nine places and defined in none. All five are now written out, with the tenant pin in both the projection and the `WHERE`, and `fee_head_id`'s bounded exception from the no-`id` rule recorded rather than left to be discovered by a failing test | §12.4.2, §15.2.2 |
 | Installment vs UNIQUE conflict | Explicit schedule model (`installment_no`), not relaxed uniqueness | §7.1 |
 | Reconciliation uniqueness | `is_final` + partial unique index, closing the `unique(batch_id, payment_id)` gap | §14.1 |
-| Portal RLS | The first relationship-aware policies in the codebase; the soft-unlink defect of `attendance.ts:136-158` is fixed, not inherited | §19.3 |
+| Portal RLS | The first relationship-aware policies in the codebase; the soft-unlink defect of `apps/api/src/routes/school/attendance.ts:136-158` is fixed, not inherited | §19.3 |
 | Principal visibility | Aggregate only, enforced in two independent layers: `reporting_staff` is excluded from every row-level `SELECT` policy (zero rows, not a filter), and the principal's surface is four owner-scoped aggregate views whose output columns are pinned by a test | §15.2.1, §19.4, §20.2 |
 | Role backfill | The `is_system` filter plus a before/after checksum assertion makes "no custom role widened" mechanically verified, and is the reason §1.5's tenant-creation-only materialisation is not a silent P1 | §1.5, §20.5 |
 | Raw webhook retention | Off by default; opt-in is encrypted, redacted, expiring, and RLS-restricted | §27.6 |
@@ -10099,16 +14474,13 @@ while remediating P0/P1 and are grouped separately so the original audit's count
 | **P2-11** | `docs/JOB_ARCHITECTURE.md` is almost entirely aspirational: `job_runs`, `runAsTenant`, DLQ, per-aggregate ordering, `PermanentJobError`, metrics, cron leadership lock — none of it is implemented. Not edited; not this phase's artifact. | **Open — deferred by scope.** §32.1 lists it as superseded-by-this-document for the finance subset |
 | **P2-12** | `redactDeep` (`packages/audit/src/index.ts:21-39`) and `sanitizePayload` (`packages/events/src/outbox.ts:6-14`) do not denylist finance PII (`iban`, `pan`, `card`, `account_number`). Phase 7 mitigates this with an **IDs-only payload contract** (§24.2) plus `T-FIN-20`, but the shared helpers themselves remain unchanged and are used by other phases. | **Mitigated in Phase 7, open for the helpers** — the mitigation is a contract, not a fix, and a future phase that puts a PAN in an audit payload will not be caught by anything Phase 7 wrote |
 
-### 34.4 No-implementation verification
+### 34.4 Implementation-state verification
 
-`git status --porcelain` and `git diff --stat` were run after the final edit, at
-`HEAD = 71aaffe9cb90b8635ca0ae176d78bf76288cae1f`. `git diff --stat` is **empty** — no tracked file
-in the repository is modified. The **only** working-tree change is the new, untracked
-`docs/PHASE_7_FINANCE_DESIGN.md`; the eight pre-existing untracked scratch files listed in §1 are
-untouched. The migration directory ceiling is still `0020_schema_migrations_runtime_protection.sql`.
-Specifically **not** done:
+**This subsection was a no-implementation attestation when it was written and is now a state record, because the two are no longer the same claim.** The original text asserted that nothing in `packages/` had been created; `0021`, `0022` and `0023` now exist, so an unqualified "no-implementation verification" heading would be false on its face. The historical attestation is retained below as the design-time baseline, and the current verified state follows it. Keeping both is deliberate: the original claim was true when made and is what the audit accepted, and deleting it would destroy the record of *what was true when the design was signed off*.
 
-- ❌ no `0021` migration created (the migration ceiling remains `0020`)
+**Design-time baseline, at `HEAD = 71aaffe9cb90b8635ca0ae176d78bf76288cae1f`.** `git diff --stat` was empty — no tracked file in the repository modified. The **only** working-tree change was the new, untracked `docs/PHASE_7_FINANCE_DESIGN.md`; the eight pre-existing untracked scratch files listed in §1 were untouched. **The migration directory ceiling was then `0020_schema_migrations_runtime_protection.sql`.** Specifically **not** done at that point:
+
+- ❌ no `0021` migration created (the migration ceiling remained `0020`)
 - ❌ no existing migration `0001`–`0020` modified
 - ❌ no application source, route, schema, or worker file modified
 - ❌ no RBAC seed or permission catalog change
@@ -10120,7 +14492,37 @@ Specifically **not** done:
 - ❌ `docs/FINANCE_DESIGN.md`, `docs/DATABASE_DESIGN.md`, `docs/DEVELOPMENT_ROADMAP.md`,
   `docs/EVENT_ARCHITECTURE.md`, `docs/JOB_ARCHITECTURE.md` left byte-identical
 
-**Migration `0021` (`fin_foundation.sql`) is authorized to be designed and implemented next**, on the
+**Current state, derived from the actual migration inventory rather than restated.** The migration
+directory is contiguous `0001`…**`0023`**, and the ceiling is therefore
+**`0023_fin_invoices.sql`** — not `0020`, and not `0024`. Three Phase 7 migrations exist:
+
+| File | Phase 7 role | Verified how |
+|---|---|---|
+| `packages/db/migrations/0021_fin_foundation.sql` | §35.1's `0021` row | SHA-256 pinned; **immutable** |
+| `packages/db/migrations/0022_fin_fee_structures.sql` | §35.1's `0022` row | SHA-256 pinned; **immutable** |
+| `packages/db/migrations/0023_fin_invoices.sql` | §35.1's `0023` row, **including `fin_bri_invoice_fk`** | Verified against the `0023` checkpoint: `F1 = F2 = F3 = 0`, orphans `0`, **44 / 44** live edges |
+
+What the current state still does **not** contain, stated so the boundary is unambiguous:
+
+- ❌ no `0024`–`0029` migration. `0024` is the **next** migration to be written, and its inventory
+  (11 bound functions over 13 bindings, row 13's three bindings, the `F5h` helper, `trg_fin_invoice_void`,
+  `trg_fin_challan_status`) is **normative and unimplemented** — nothing in it may be created inside
+  `0023` (C-1, C-2, §30.3.1).
+- ❌ no modification to any of `0001`–`0022`. `0021` and `0022` carry pinned digests precisely so this
+  is checkable rather than asserted.
+- ❌ no RBAC seed or permission catalog change. `0028` is the only migration that grants
+  `school_app_rw` anything in finance, so the runtime role has **no** finance access at the `0023`
+  checkpoint.
+- ❌ no web/UI change, and no CI change.
+- ❌ nothing committed, pushed, or tagged by this work. The `0023` migration, the finance test files and
+  the schema mirror are working-tree state only.
+- ❌ no database operation against the development database. The catalog verification above ran against
+  a disposable **test** database only; the runtime suites' own `runtime-db.ts` guard enforces the
+  disposable-name rule.
+- ✅ schema mirror and finance security test files **are** created or modified — the two entries that
+  were previously "not done" and are now done, and are listed here rather than left implied.
+
+**Migration `0024` (`fin_payments.sql`) is authorized to be designed and implemented next**, on the
 conditions in §30.3 and the function contract in §19.7: the header comment states why no existing
 migration is edited; every function carries `SET search_path = pg_catalog, public, pg_temp`; every
 function is `REVOKE ALL … FROM PUBLIC` followed by an explicit `GRANT`; the closed F1–F10 set of
@@ -10167,92 +14569,194 @@ concerned. The rules:
 |---|---|---|---|---|
 | **0021** | `fin_foundation.sql` | `fin_tenant_settings`, `fin_ledger_accounts`, `fin_document_counters`, `fin_fee_heads`, `fin_tax_profiles`; 12 anchor indexes on existing Phase 1–6 tables (§6.3); F1 `app_finance_actor_class`, F2 `app_finance_linked_students`, F6 `app_finance_current_guardian_ids`, F3 `app_finance_seeds_ledger_accounts` | 0002, 0004, 0005, 0006, 0008, 0009 | **Unreachable.** No grants, no policies. The four functions are individually `REVOKE`d from `PUBLIC` and granted explicitly. |
 | **0022** | `fin_fee_structures.sql` | `fin_fee_structures`, `fin_fee_structure_items`, `fin_fee_installment_plans`, `fin_fee_structure_targets`, `fin_fee_assignments`, `fin_billing_runs`, `fin_billing_run_items`; **SIX** functions / **EIGHT** bindings — `trg_fin_target_validate`, `trg_fin_structure_publish_freeze`, `trg_fin_structure_child_freeze` (3 bindings), `trg_fin_assignment_validate`, `trg_fin_billing_run_freeze`, `trg_fin_billing_run_items_freeze`; active-period trigger | 0021, 0008, 0009 | Unreachable. No forward FK. |
-| **0023** | `fin_invoices.sql` | `fin_invoices`, `fin_invoice_items`, `fin_invoice_adjustments`, `fin_challans`; `trg_fin_challan_status` (§10.2); `trg_fin_invoice_number`, `trg_fin_invoice_void`, `trg_fin_invoice_item_total` (**2** bindings), `trg_fin_invoice_items_freeze` (2 bindings), `trg_fin_invoice_balance_recompute` (**2** bindings; third in 0024) | 0021, 0022, 0005 | Unreachable. |
-| **0024** | `fin_payments.sql` | `fin_payments`, `fin_payment_allocations`, `fin_receipts`; `trg_fin_reversal_shape`, `trg_fin_allocation_family_guard`, `trg_fin_allocation_bounds` (FI-003, §12.7), `trg_fin_on_account_return_bounds`, `trg_fin_invoice_balance_recompute`; `trg_fin_receipt_freeze`; 2 partial unique indexes; V1 `fin_v_payment_position`, `fin_v_invoice_balance` | 0021, 0023, 0005 | Unreachable. **`refund_id` has no FK for the duration of this file** (P0-01 window); closed by 0025. **No trigger or function here may name `fin_refunds`**, which 0025 creates — body *or* `DECLARE` row type (§30.3.1). |
-| **0025** | `fin_refunds.sql` | `fin_refunds`; `ALTER … ADD CONSTRAINT fin_pa_refund_fk`; `trg_fin_refund_provenance` (function + **both** bindings), `fn_fin_refund_ceiling` (deferred constraint trigger) | 0024 | Unreachable. After this file every `fin_*`→`fin_*` reference is FK-backed. |
-| **0026** | `fin_ledger.sql` | `fin_ledger_entry_groups`, `fin_ledger_entries`; `trg_fin_ledger_group_balance` (deferred), `trg_fin_ledger_seal`, `trg_fin_ledger_append_only`, `trg_fin_ledger_sealed_group_reject`; **F4 `post_fin_ledger_group`** (the only ledger write path); `fin_recompute`; V1 `fin_v_ledger_account_balance` (§12.4.2); V2 the four owner-scoped aggregate views (§15.2.2) | 0021, 0023, 0024, 0025 | Unreachable. Runtime `INSERT/UPDATE/DELETE` on both ledger tables is `REVOKE`d and stays revoked. |
+| **0023** | `fin_invoices.sql` | `fin_invoices`, `fin_invoice_items`, `fin_invoice_adjustments`, `fin_challans`; **seven bound functions over nine bindings** — rows 4, 4a, 4d, 4b, 4c, 6 (**2** bindings) and 7 (**2** bindings); **and `ALTER … ADD CONSTRAINT fin_bri_invoice_fk`** (`fin_billing_run_items (tenant_id, invoice_id) → fin_invoices`, `ON DELETE RESTRICT`) as the file's **last** statement, after `fin_invoices` exists (C-3, C-4, §9.5). `trg_fin_invoice_void`, `trg_fin_invoice_balance_recompute` and `trg_fin_challan_status` are **0024** (C-1, C-2) | 0021, 0022, 0005 | Unreachable. |
+| **0024** | `fin_payments.sql` | `fin_payments`, `fin_payment_allocations`, `fin_receipts`; `trg_fin_reversal_shape`, `trg_fin_allocation_family_guard`, `trg_fin_allocation_target_state` (D9, §12.5.1), `trg_fin_allocation_bounds` (FI-003, §12.7), `trg_fin_pa_delete_guard` (D1, A19, §12.1), `trg_fin_on_account_return_bounds`, `trg_fin_receipt_freeze`; plus the three `0024`-bound invoice functions moved out of `0023` (C-1, C-2) — `trg_fin_invoice_void`, `trg_fin_challan_status`, and `trg_fin_invoice_balance_recompute` — **ELEVEN bound functions over THIRTEEN bindings**, of which row 13 alone is **three**; plus the unbound `SECURITY INVOKER` helper `fin_invoice_reapply_derived_state` (F5h — declared, not bound, so not one of the eleven); 2 partial unique indexes; V1 `fin_v_payment_position`, `fin_v_invoice_balance` | 0021, 0023, 0005 | Unreachable. **`refund_id` has no FK for the duration of this file** (P0-01 window); closed by 0025. **No trigger or function here may name `fin_refunds`**, which 0025 creates — body *or* `DECLARE` row type (§30.3.1). |
+| **0025** | `fin_refunds.sql` | `fin_refunds`; `ALTER … ADD CONSTRAINT fin_pa_refund_fk FOREIGN KEY (tenant_id, refund_id) REFERENCES fin_refunds (tenant_id, id);` — **canonical `ON DELETE NO ACTION`, the clause being omitted above because it is the default**; `trg_fin_refund_provenance` (function + **both** bindings, `SECURITY INVOKER`, §13.1.1 D2B), `fn_fin_refund_ceiling` (deferred constraint trigger); plus the unbound `SECURITY DEFINER` support function **`fin_lock_payment_amount`** (§19.7.2 `F5s`, §13.1.1 D2C) | 0024 | Unreachable. After this file every `fin_*`→`fin_*` reference is FK-backed. **`fin_refunds` is a write-once staging table at this checkpoint** — only `requested` is reachable, because `UPDATE` is revoked and the definer that owns transitions is `0028`'s F11/F12 (§13.2.1, §36.2 row 49). **AMENDED 2026-10-05:** the immutable `0025` source declares `ON DELETE SET NULL` instead of the canonical `NO ACTION`, which is **defective** because `fin_payment_allocations.tenant_id` is `NOT NULL` and composite `SET NULL` raises `23502`; the canonical DDL is **not** altered to match live state, and the correction is a **forward-only migration** (§13.1.1 D3, §36.6). |
+| **0026** | `fin_ledger.sql` | `fin_ledger_entry_groups` (with `fin_leg_groups_origin_uq` and `fin_leg_groups_reversal_uq`), `fin_ledger_entries`, `fin_ledger_event_types` (owner-only closed catalogue); `trg_fin_ledger_group_balance` (deferred), **`trg_fin_ledger_group_commit`** (new, deferred, bound to the *group* — F-05), `trg_fin_ledger_seal`, `trg_fin_ledger_append_only`, `trg_fin_ledger_sealed_group_reject`; **F4 `post_fin_ledger_group`** (the only ledger write path); **F13 `app_finance_actor_has_permission`** and **F14 `app_finance_emit_event`** (moved here from `0028` — `0025` already calls both); `fin_recompute`; V1 `fin_v_ledger_account_balance` (§12.4.2); V2 the four owner-scoped aggregate views (§15.2.2) | 0021, 0023, 0024, 0025 | Unreachable. Runtime `INSERT/UPDATE/DELETE` on both ledger tables is `REVOKE`d and stays revoked. |
 | **0027** | `fin_reconciliation.sql` | `fin_reconciliation_batches`, `fin_reconciliation_matches`; `trg_fin_recon_is_final` (row side) **+ `trg_fin_recon_batch_derive_totals` (`BEFORE`, derives the batch's own totals) and `trg_fin_recon_batch_stamp_matches` (`AFTER`, propagates and releases `is_final`, §14.1.1)**; `fin_recon_payment_final_uq (tenant_id, payment_id) WHERE is_final` (P2-04) | 0024, 0025, 0026 | Unreachable. |
-| **0028** | `fin_rbac_rls.sql` | `academic_years_single_active_uq`; `auth_mfa_factors`, `auth_step_up_challenges`; `trg_auth_step_up_immutable`; F7/F8/F9; role backfill; `cashier` template; **all** finance RLS policies; post-condition assertions; **grants, last** | 0021–0027, 0001, 0002 | **The only migration in which `school_app_rw` gains any finance access**, and it is sequenced so RLS precedes every grant. **No anchor index on `users`/`auth_sessions`** — §6.3 R4 allowlist (P0-06a). |
+| **0028** | `fin_rbac_rls.sql` | `academic_years_single_active_uq`; `auth_mfa_factors`, `auth_step_up_challenges`; `trg_auth_step_up_immutable`; F7 `app_verify_mfa_code`, F8 `app_consume_step_up`, F9 `app_mint_step_up_challenge`, F10 `app_confirm_mfa_factor`, **F11 `postRefundApproval`, F12 `postRefundProcess`** (both `SECURITY DEFINER`, the refund state machine); role backfill; `cashier` template; **all** finance RLS policies; post-condition assertions; **grants, last** | 0021–0027, 0001, 0002 | **The only migration in which `school_app_rw` gains any finance access**, and it is sequenced so RLS precedes every grant. **No anchor index on `users`/`auth_sessions`** — §6.3 R4 allowlist (P0-06a). |
 | **0029** | `fin_artifacts_webhooks.sql` | `fin_document_artifacts`, `fin_payment_gateway_webhooks`, `fin_provider_accounts`; `trg_fin_artifact_document_valid` | 0023, 0024, 0025 | **Unreachable for the runtime role by design** — no policy, no grant. Written only by the webhook handler and artifact worker. `fin_webhook_raw_payloads` is **not** created (P1-09). |
 
 ### 35.2 Foreign-key source → target map
 
-Every tenant-scoped FK in Phase 7, with the target's anchor. **A row here with a target that has no
-`(tenant_id, id)` anchor is a §6.3 R1 violation, and `finance-composite-fk.test.ts` fails the build on
-it.** The §6.3 R4 exceptions are the only single-column entries and are marked — there are **twelve FK
-rows** naming **three distinct target tables** (`tenants`, `users`, `auth_sessions`). The two counts
-differ because `tenants` is the target of six of the twelve rows and `users` of five. Stating both
-numbers is the point: an earlier revision wrote "four exceptions" while listing five, and a count
-written from memory rather than from the DDL is what produced it.
+**What kind of contract this section is — adjudicated, because the previous revision asserted two
+incompatible ones at once.** §35.2 is the **whole-Phase-7 design map**: every FK edge Phase 7 creates across
+`0021`–`0029`, each row carrying the migration that **owns** it. `finance-composite-fk.test.ts` reads this
+table as the **authoritative allowlist** — the set of edges permitted to exist. Two totals therefore
+follow, they are deliberately different numbers, and both are asserted:
 
-| Source | Source columns | Target | Target columns | Target unique anchor |
-|---|---|---|---|---|
-| `auth_mfa_factors` | `(user_id)` | `users` | `(id)` | `users_pkey` — **§6.3 R4 exception (P0-06a)**: platform-global identity, no `tenant_id` |
-| `auth_step_up_challenges` | `(session_id)` | `auth_sessions` | `(id)` | `auth_sessions_pkey` — **§6.3 R4 exception (P0-06a)** |
-| `auth_step_up_challenges` | `(tenant_id)` | `tenants` | `(id)` | `tenants_pkey` — **§6.3 R4 exception**: `tenants` **is** the tenant |
-| `auth_step_up_challenges` | `(user_id)` | `users` | `(id)` | `users_pkey` — **§6.3 R4 exception (P0-06a)**: platform-global identity, no `tenant_id` |
-| `fin_billing_run_items` | `(tenant_id, assignment_id)` | `fin_fee_assignments` | `(tenant_id, id)` | `fin_fee_assignments_ten_id_uq` — **nullable** |
-| `fin_billing_run_items` | `(tenant_id, enrollment_id)` | `enrollments` | `(tenant_id, id)` | `enrollments_tenant_id_uq` (0021 — **absent in 0005**) |
-| `fin_billing_run_items` | `(tenant_id, invoice_id)` | `fin_invoices` | `(tenant_id, id)` | `fin_invoices_ten_id_uq` — **added by `ALTER` at the end of `0024`** |
-| `fin_billing_run_items` | `(tenant_id, run_id)` | `fin_billing_runs` | `(tenant_id, id)` | `fin_billing_runs_ten_id_uq` |
-| `fin_billing_run_items` | `(tenant_id, structure_id)` | `fin_fee_structures` | `(tenant_id, id)` | `fin_fee_structures_ten_id_uq` |
-| `fin_billing_run_items` | `(tenant_id, student_id)` | `students` | `(tenant_id, id)` | `students_tenant_id_uq` (existing) |
-| `fin_billing_runs` | `(started_by)` | `users` | `(id)` | `users_pkey` — **§6.3 R4 exception (P0-06a)**: platform-global identity, no `tenant_id` |
-| `fin_fee_structures` | `(published_by)` | `users` | `(id)` | `users_pkey` — **§6.3 R4 exception (P0-06a)**, and the **only** `ON DELETE RESTRICT` among the R4 rows: the write-once publication stamp (§7.3.1) refuses the referential `UPDATE` that `SET NULL` is implemented as, so a `SET NULL` action could never fire (§7.3) |
-| `fin_billing_runs` | `(tenant_id, academic_year_id)` | `academic_years` | `(tenant_id, id)` | `academic_years_tenant_id_uq` (existing) |
-| `fin_challans` | `(tenant_id, invoice_id)` | `fin_invoices` | `(tenant_id, id)` | `fin_invoices_ten_id_uq` |
-| `fin_document_artifacts` | `(tenant_id, file_id)` | `files` | `(tenant_id, id)` | `files_tenant_id_uq` (existing) |
-| `fin_document_counters` | `(tenant_id, academic_year_id)` | `academic_years` | `(tenant_id, id)` | `academic_years_tenant_id_uq` (existing) |
-| `fin_fee_assignments` | `(tenant_id, academic_year_id)` | `academic_years` | `(tenant_id, id)` | `academic_years_tenant_id_uq` (existing) |
-| `fin_fee_assignments` | `(tenant_id, enrollment_id)` | `enrollments` | `(tenant_id, id)` | `enrollments_tenant_id_uq` (0021 — **absent in 0005**) |
-| `fin_fee_assignments` | `(tenant_id, installment_plan_id)` | `fin_fee_installment_plans` | `(tenant_id, id)` | `fin_installment_plans_ten_id_uq` |
-| `fin_fee_assignments` | `(tenant_id, structure_id)` | `fin_fee_structures` | `(tenant_id, id)` | `fin_fee_structures_ten_id_uq` |
-| `fin_fee_assignments` | `(tenant_id, student_id)` | `students` | `(tenant_id, id)` | `students_tenant_id_uq` (existing) |
-| `fin_fee_heads` | `(tenant_id)` | `tenants` | `(id)` | `tenants_pkey` — **§6.3 R4 exception**: `tenants` **is** the tenant |
-| `fin_fee_installment_plans` | `(tenant_id, structure_id)` | `fin_fee_structures` | `(tenant_id, id)` | `fin_fee_structures_ten_id_uq` |
-| `fin_fee_structure_items` | `(tenant_id, fee_head_id)` | `fin_fee_heads` | `(tenant_id, id)` | `fin_fee_heads_ten_id_uq` |
-| `fin_fee_structure_items` | `(tenant_id, structure_id)` | `fin_fee_structures` | `(tenant_id, id)` | `fin_fee_structures_ten_id_uq` |
-| `fin_fee_structure_targets` | `(tenant_id, campus_id)` | `campuses` | `(tenant_id, id)` | `campuses_tenant_id_uq` (existing) |
-| `fin_fee_structure_targets` | `(tenant_id, class_id)` | `acd_classes` | `(tenant_id, id)` | `acd_classes_tenant_id_uq` (existing) — **not `classes`** |
-| `fin_fee_structure_targets` | `(tenant_id, grade_id)` | `grade_levels` | `(tenant_id, id)` | `grade_levels_tenant_id_uq` (existing) |
-| `fin_fee_structure_targets` | `(tenant_id, section_id)` | `sections` | `(tenant_id, id)` | `sections_tenant_id_uq` (existing) |
-| `fin_fee_structure_targets` | `(tenant_id, structure_id)` | `fin_fee_structures` | `(tenant_id, id)` | `fin_fee_structures_ten_id_uq` |
-| `fin_fee_structures` | `(tenant_id, academic_year_id)` | `academic_years` | `(tenant_id, id)` | `academic_years_tenant_id_uq` (existing) |
-| `fin_fee_structures` | `(tenant_id, supersedes_id)` | `fin_fee_structures` | `(tenant_id, id)` | `fin_fee_structures_ten_id_uq` |
-| `fin_invoice_adjustments` | `(approved_by)` | `users` | `(id)` | `users_pkey` — **§6.3 R4 exception (P0-06a)**: platform-global identity, no `tenant_id` |
-| `fin_invoice_adjustments` | `(tenant_id, invoice_id)` | `fin_invoices` | `(tenant_id, id)` | `fin_invoices_ten_id_uq` |
-| `fin_invoice_items` | `(tenant_id, fee_head_id)` | `fin_fee_heads` | `(tenant_id, id)` | `fin_fee_heads_ten_id_uq` |
-| `fin_invoice_items` | `(tenant_id, invoice_id)` | `fin_invoices` | `(tenant_id, id)` | `fin_invoices_ten_id_uq` |
-| `fin_invoices` | `(tenant_id, academic_year_id)` | `academic_years` | `(tenant_id, id)` | `academic_years_tenant_id_uq` (existing) |
-| `fin_invoices` | `(tenant_id, enrollment_id)` | `enrollments` | `(tenant_id, id)` | `enrollments_tenant_id_uq` (0021 — **absent in 0005**) |
-| `fin_invoices` | `(tenant_id, structure_id)` | `fin_fee_structures` | `(tenant_id, id)` | `fin_fee_structures_ten_id_uq` |
-| `fin_invoices` | `(tenant_id, student_id)` | `students` | `(tenant_id, id)` | `students_tenant_id_uq` (existing) |
-| `fin_ledger_accounts` | `(tenant_id)` | `tenants` | `(id)` | `tenants_pkey` — **§6.3 R4 exception**: `tenants` **is** the tenant |
-| `fin_ledger_entries` | `(tenant_id, account_code)` | `fin_ledger_accounts` | `(tenant_id, code)` | `fin_ledger_accounts_code_uq` — keyed on the **business** code anchor |
-| `fin_ledger_entries` | `(tenant_id, entry_group_id)` | `fin_ledger_entry_groups` | `(tenant_id, id)` | `fin_leg_groups_ten_id_uq` |
-| `fin_ledger_entries` | `(tenant_id, invoice_id)` | `fin_invoices` | `(tenant_id, id)` | `fin_invoices_ten_id_uq` (P1-08 — **was no FK at all**) |
-| `fin_ledger_entries` | `(tenant_id, student_id)` | `students` | `(tenant_id, id)` | `students_tenant_id_uq` (existing) (P1-08 — **was no FK at all**) |
-| `fin_ledger_entry_groups` | `(tenant_id, reversal_of_group)` | `fin_ledger_entry_groups` | `(tenant_id, id)` | `fin_leg_groups_ten_id_uq` |
-| `fin_payment_allocations` | `(tenant_id, invoice_id)` | `fin_invoices` | `(tenant_id, id)` | `fin_invoices_ten_id_uq` |
-| `fin_payment_allocations` | `(tenant_id, payment_id)` | `fin_payments` | `(tenant_id, id)` | `fin_payments_ten_id_uq` |
-| `fin_payment_allocations` | `(tenant_id, refund_id)` | `fin_refunds` | `(tenant_id, id)` | `fin_refunds_ten_id_uq` — **added by `0025`, not `0024`** |
-| `fin_payment_allocations` | `(tenant_id, reversal_of_allocation_id)` | `fin_payment_allocations` | `(tenant_id, id)` | `fin_pa_ten_id_uq` |
-| `fin_payments` | `(tenant_id, payer_guardian_id)` | `guardians` | `(tenant_id, id)` | `guardians_tenant_id_uq` (existing) |
-| `fin_provider_accounts` | `(tenant_id)` | `tenants` | `(id)` | `tenants_pkey` — **§6.3 R4 exception**: `tenants` **is** the tenant |
-| `fin_receipts` | `(tenant_id, payer_guardian_id)` | `guardians` | `(tenant_id, id)` | `guardians_tenant_id_uq` (existing) |
-| `fin_receipts` | `(tenant_id, payment_id)` | `fin_payments` | `(tenant_id, id)` | `fin_payments_ten_id_uq` |
-| `fin_receipts` | `(tenant_id, supersedes_id)` | `fin_receipts` | `(tenant_id, id)` | `fin_receipts_ten_id_uq` |
-| `fin_reconciliation_batches` | `(tenant_id, statement_file_id)` | `files` | `(tenant_id, id)` | `files_tenant_id_uq` (existing) |
-| `fin_reconciliation_matches` | `(tenant_id, batch_id)` | `fin_reconciliation_batches` | `(tenant_id, id)` | `fin_recon_batches_ten_id_uq` |
-| `fin_reconciliation_matches` | `(tenant_id, payment_id)` | `fin_payments` | `(tenant_id, id)` | `fin_payments_ten_id_uq` |
-| `fin_refunds` | `(tenant_id, payment_id)` | `fin_payments` | `(tenant_id, id)` | `fin_payments_ten_id_uq` |
-| `fin_tax_profiles` | `(tenant_id)` | `tenants` | `(id)` | `tenants_pkey` — **§6.3 R4 exception**: `tenants` **is** the tenant |
-| `fin_tenant_settings` | `(tenant_id)` | `tenants` | `(id)` | `tenants_pkey` — **§6.3 R4 exception**: `tenants` **is** the tenant |
-| `fin_tenant_settings` | `(tenant_id, tax_profile_id)` | `fin_tax_profiles` | `(tenant_id, id)` | `fin_tax_profiles_ten_id_uq` — added by `ALTER` in `0021` |
+| Quantity | Definition | Value |
+|---|---|---|
+| **design total** | every row in this table (`0021`–`0029`) | **67** |
+| **current checkpoint** | rows whose owning migration is `≤ 0023` | **44** |
+| **future** | rows whose owning migration is `≥ 0024` | **23** |
+| single-column rows (of the design total) | one source column | **14** — `tenants` 6, `users` 7, `auth_sessions` 1 |
+| composite rows (of the design total) | two or more source columns | **53** |
+| single-column rows at the `0023` checkpoint | — | **9** — `tenants` 4, `users` 5 |
+| composite rows at the `0023` checkpoint | — | **35** |
+| **live edges at the `0023` checkpoint** | `pg_constraint` where `contype='f'`, over the 19 tables `0021`–`0023` create | **44** |
+| **orphans** | a live edge with no map row | **0** |
+| **deferred rows on a live table** | a map row owned by a *later* migration, on a table that already exists | **0** — the last such row, `fin_billing_run_items (tenant_id, invoice_id) → fin_invoices`, was re-owned by `0023` in this revision (see below) |
+| **rows naming a source table that exists after `0023`** | — | **44** — every checkpoint row, and no deferred row on top of them |
+| **duplicate map rows** | two rows with the same source, source columns, target and target columns | **0** |
 
+**The one row whose owning migration moved in this revision, and the arithmetic it changes.**
+`fin_billing_run_items (tenant_id, invoice_id) → fin_invoices` was mapped to `0024` in the previous
+revision. It is adjudicated to **`0023`**, with `ON DELETE RESTRICT`, and §9.5 already carried the DDL and
+the reasoning. The re-ownership moves one row across the checkpoint filter, and because every dependent
+figure is a sum over the same table rather than a restated number, the whole set shifts together:
+
+| Figure | Before the re-ownership | After |
+|---|---|---|
+| design total | 67 | **67** — unchanged; the row moved owner, it did not move phase |
+| rows owned by `0023` | 14 | **15** |
+| rows owned by `0024` | 8 | **7** |
+| current checkpoint (`≤ 0023`) | 43 | **44** |
+| future (`≥ 0024`) | 24 | **23** |
+| composite rows at the checkpoint | 34 | **35** |
+| live edges at the checkpoint | 43 | **44** |
+| deferred rows on a live table | 1 | **0** |
+| rows naming a live source table | 44 (= 43 + 1) | **44** (= 44 + 0) |
+
+The last row is the one that would look wrong and is not: the *total* stays at 44 while its
+*derivation* changes, because the deferred row stopped being an addition on top of the checkpoint set
+and became a member of it. `R11′` re-derives both figures and §36.1 records the restatement.
+
+**Why whole-phase rather than a per-checkpoint map.** A per-checkpoint map would describe only the edges
+present at each migration, so every assertion written against it is trivially true when written and false
+the moment the next migration lands — and the document's own architecture already contradicts it: §30.1 is
+a **normative whole-sequence** matrix, §30.3.1 forbids `0023` from naming a `0024` relation, and the previous
+revision of this table carried `fin_billing_run_items → fin_invoices` annotated *“added by `ALTER` at the end of
+`0024`”* — an annotation §9.5's DDL, §8.7's column comment and §30.2 all contradicted. A map that omitted
+future rows could not express the rule that makes the sequence legal. The adopted model keeps every row and
+adds an **owning migration**, so the difference between a design *expectation* and a catalog *fact* is
+carried by one column and consumed by the filter in §35.2.1. It also means a re-adjudicated owner is a
+one-cell edit with mechanically derived consequences, which is exactly how the `0024 → 0023` re-ownership
+above was applied rather than guessed at.
+
+#### 35.2.1 How the audit derives `expected_current_edges` from this map
+
+**One rule, stated once, mechanically executable.** Let `A` be the set of migration names applied to the
+database under test, read from `schema_migrations`, and let `R` be the rows of this table. Then
+
+```text
+expected_current_edges := { r ∈ R : r.owning_migration ∈ A }
+live_current_edges     := { e ∈ pg_constraint : e.contype = 'f'
+                            and the migration creating e.conrelid ∈ A }
+```
+
+and the audit **fails** unless all four of the following hold:
+
+| # | Assertion | Why it is a separate check |
+|---|---|---|
+| **F1** | `live_current_edges − expected_current_edges = ∅` — every live FK has **exactly one** map row | An edge in the catalog with no row is DDL that grew past the contract. This is the assertion that would have failed on `0023`'s five constraints |
+| **F2** | `expected_current_edges − live_current_edges = ∅` — every current-checkpoint row is realised | The converse, and the one that catches the failure mode nobody looks for: a map row claiming `0023` owns an edge that does not exist is a map that **over-claims**, which is how a design passes its own audit while the DDL is missing a constraint |
+| **F3** | `duplicate map rows = 0`, keyed on `(source, source columns, target, target columns)` | Two rows for one edge leave the edge count unchanged and a set difference does not detect them, so a naive `F1`+`F2` passes a map whose totals are wrong. Asserted separately for exactly that reason |
+| **F4** | every row's owning migration is in `0021`…`0029`; **and** every row that forward-references a table names an owner **later** than the migration creating its source | The second clause is §30.1's P0-01 rule expressed on the map rather than on the SQL: no migration may declare an FK to a table a later migration creates, and an `ALTER` that crosses the boundary is the legal way to do it. **One** row does this on purpose — `fin_payment_allocations → fin_refunds`, owned by `0025` — and F4 is what records it as deliberate. The `fin_billing_run_items → fin_invoices` row was the second such row until this revision re-owned it to `0023`, which is a legitimate resolution of the same rule rather than an exemption from it: §30.3.1's problem is a `DECLARE` or an inline `CREATE TABLE` clause naming a relation that does not exist yet, and an `ALTER` **after** the target table is created names nothing that is missing |
+
+**The expected numbers, and why F1/F2 are both zero at `0023`.** At the `0023` checkpoint
+(`A = {0021, 0022, 0023}`) the derivation yields `expected_current_edges = 44` and the catalog reports
+`live_current_edges = 44`: `F1 = 0`, `F2 = 0`, `F3 = 0`, orphans `0`. The **23** future rows are **not**
+counted as live-current. Exactly **one** future row names a table that will already exist when its owner
+runs — `fin_payment_allocations → fin_refunds`, because P0-01 defers it to `0025` — so it is not live at
+the `0024` checkpoint either, and §30.1's two-step is what says so. That row is the **only** remaining
+deferred row, which is why the header's *deferred rows on a live table* figure is **0** at this checkpoint:
+no row is both owned later than `0023` and sitting on a table that exists at `0023`.
+
+| Source | Source columns | Target | Target columns | Target unique anchor | Owning migration |
+|---|---|---|---|---|---|
+| `auth_mfa_factors` | `(user_id)` | `users` | `(id)` | `users_pkey` — **§6.3 R4 exception (P0-06a)**: platform-global identity, no `tenant_id` | `0028` |
+| `auth_step_up_challenges` | `(session_id)` | `auth_sessions` | `(id)` | `auth_sessions_pkey` — **§6.3 R4 exception (P0-06a)** | `0028` |
+| `auth_step_up_challenges` | `(tenant_id)` | `tenants` | `(id)` | `tenants_pkey` — **§6.3 R4 exception**: `tenants` **is** the tenant | `0028` |
+| `auth_step_up_challenges` | `(user_id)` | `users` | `(id)` | `users_pkey` — **§6.3 R4 exception (P0-06a)**: platform-global identity, no `tenant_id` | `0028` |
+| `fin_billing_run_items` | `(tenant_id, assignment_id)` | `fin_fee_assignments` | `(tenant_id, id)` | `fin_fee_assignments_ten_id_uq` — **nullable** | `0022` |
+| `fin_billing_run_items` | `(tenant_id, enrollment_id)` | `enrollments` | `(tenant_id, id)` | `enrollments_tenant_id_uq` (0021 — **absent in 0005**) | `0022` |
+| `fin_billing_run_items` | `(tenant_id, invoice_id)` | `fin_invoices` | `(tenant_id, id)` | `fin_invoices_ten_id_uq` — declared **inline** in `fin_invoices`, so the `ALTER` that adds this FK does not create the anchor. **Added by `ALTER` at the end of `0023`, `ON DELETE RESTRICT`** (C-3, C-4, §9.5) | `0023` |
+| `fin_billing_run_items` | `(tenant_id, run_id)` | `fin_billing_runs` | `(tenant_id, id)` | `fin_billing_runs_ten_id_uq` | `0022` |
+| `fin_billing_run_items` | `(tenant_id, structure_id)` | `fin_fee_structures` | `(tenant_id, id)` | `fin_fee_structures_ten_id_uq` | `0022` |
+| `fin_billing_run_items` | `(tenant_id, student_id)` | `students` | `(tenant_id, id)` | `students_tenant_id_uq` (existing) | `0022` |
+| `fin_billing_runs` | `(started_by)` | `users` | `(id)` | `users_pkey` — **§6.3 R4 exception (P0-06a)**: platform-global identity, no `tenant_id` | `0022` |
+| `fin_billing_runs` | `(tenant_id, academic_year_id)` | `academic_years` | `(tenant_id, id)` | `academic_years_tenant_id_uq` (existing) | `0022` |
+| `fin_challans` | `(tenant_id, invoice_id)` | `fin_invoices` | `(tenant_id, id)` | `fin_invoices_ten_id_uq` | `0023` |
+| `fin_document_artifacts` | `(tenant_id, file_id)` | `files` | `(tenant_id, id)` | `files_tenant_id_uq` (existing) | `0029` |
+| `fin_document_counters` | `(tenant_id, academic_year_id)` | `academic_years` | `(tenant_id, id)` | `academic_years_tenant_id_uq` (existing) | `0021` |
+| `fin_fee_assignments` | `(tenant_id, academic_year_id)` | `academic_years` | `(tenant_id, id)` | `academic_years_tenant_id_uq` (existing) | `0022` |
+| `fin_fee_assignments` | `(tenant_id, enrollment_id)` | `enrollments` | `(tenant_id, id)` | `enrollments_tenant_id_uq` (0021 — **absent in 0005**) | `0022` |
+| `fin_fee_assignments` | `(tenant_id, installment_plan_id)` | `fin_fee_installment_plans` | `(tenant_id, id)` | `fin_installment_plans_ten_id_uq` | `0022` |
+| `fin_fee_assignments` | `(tenant_id, structure_id)` | `fin_fee_structures` | `(tenant_id, id)` | `fin_fee_structures_ten_id_uq` | `0022` |
+| `fin_fee_assignments` | `(tenant_id, student_id)` | `students` | `(tenant_id, id)` | `students_tenant_id_uq` (existing) | `0022` |
+| `fin_fee_heads` | `(tenant_id)` | `tenants` | `(id)` | `tenants_pkey` — **§6.3 R4 exception**: `tenants` **is** the tenant | `0021` |
+| `fin_fee_installment_plans` | `(tenant_id, structure_id)` | `fin_fee_structures` | `(tenant_id, id)` | `fin_fee_structures_ten_id_uq` | `0022` |
+| `fin_fee_structure_items` | `(tenant_id, fee_head_id)` | `fin_fee_heads` | `(tenant_id, id)` | `fin_fee_heads_ten_id_uq` | `0022` |
+| `fin_fee_structure_items` | `(tenant_id, structure_id)` | `fin_fee_structures` | `(tenant_id, id)` | `fin_fee_structures_ten_id_uq` | `0022` |
+| `fin_fee_structure_targets` | `(tenant_id, campus_id)` | `campuses` | `(tenant_id, id)` | `campuses_tenant_id_uq` (existing) | `0022` |
+| `fin_fee_structure_targets` | `(tenant_id, class_id)` | `acd_classes` | `(tenant_id, id)` | `acd_classes_tenant_id_uq` (existing) — **not `classes`** | `0022` |
+| `fin_fee_structure_targets` | `(tenant_id, grade_id)` | `grade_levels` | `(tenant_id, id)` | `grade_levels_tenant_id_uq` (existing) | `0022` |
+| `fin_fee_structure_targets` | `(tenant_id, section_id)` | `sections` | `(tenant_id, id)` | `sections_tenant_id_uq` (existing) | `0022` |
+| `fin_fee_structure_targets` | `(tenant_id, structure_id)` | `fin_fee_structures` | `(tenant_id, id)` | `fin_fee_structures_ten_id_uq` | `0022` |
+| `fin_fee_structures` | `(published_by)` | `users` | `(id)` | `users_pkey` — **§6.3 R4 exception (P0-06a)**, and the **only** `ON DELETE RESTRICT` among the R4 rows: the write-once publication stamp (§7.3.1) refuses the referential `UPDATE` that `SET NULL` is implemented as, so a `SET NULL` action could never fire (§7.3) | `0022` |
+| `fin_fee_structures` | `(tenant_id, academic_year_id)` | `academic_years` | `(tenant_id, id)` | `academic_years_tenant_id_uq` (existing) | `0022` |
+| `fin_fee_structures` | `(tenant_id, supersedes_id)` | `fin_fee_structures` | `(tenant_id, id)` | `fin_fee_structures_ten_id_uq` | `0022` |
+| `fin_invoice_adjustments` | `(approved_by)` | `users` | `(id)` | `users_pkey` — **§6.3 R4 exception (P0-06a)**: platform-global identity, no `tenant_id` | `0023` |
+| `fin_invoice_adjustments` | `(requested_by)` | `users` | `(id)` | `users_pkey` — **§6.3 R4 exception (P0-06a)**: platform-global identity, no `tenant_id`. The counterparty half of row 4c's rule that only a `school_finance_manager` may approve (C-14), and one of the two identities a correction row carries | `0023` |
+| `fin_invoice_adjustments` | `(tenant_id, invoice_id)` | `fin_invoices` | `(tenant_id, id)` | `fin_invoices_ten_id_uq` | `0023` |
+| `fin_invoice_adjustments` | `(tenant_id, reverses_adjustment_id)` | `fin_invoice_adjustments` | `(tenant_id, id)` | `fin_invoice_adjustments_ten_id_uq` — self-reference. It is what makes the tenant component of the reference load-bearing: a correction can only reverse an **approved** row of **its own** invoice's tenant (row 4c, C-6) | `0023` |
+| `fin_invoice_items` | `(tenant_id, fee_head_id)` | `fin_fee_heads` | `(tenant_id, id)` | `fin_fee_heads_ten_id_uq` | `0023` |
+| `fin_invoice_items` | `(tenant_id, invoice_id)` | `fin_invoices` | `(tenant_id, id)` | `fin_invoices_ten_id_uq` | `0023` |
+| `fin_invoice_items` | `(tenant_id, structure_id)` | `fin_fee_structures` | `(tenant_id, id)` | `fin_fee_structures_ten_id_uq` — §7.4's "a line names a real structure". Redundant with the structure implied by the plan on the same row, and stated anyway: redundant constraints are asserted, redundant ones that are never checked are not | `0023` |
+| `fin_invoice_items` | `(tenant_id, structure_id, installment_no)` | `fin_fee_installment_plans` | `(tenant_id, structure_id, installment_no)` | **`fin_installment_plans_uq` — §6.3 R5, this document's only natural-key anchor**, added in this revision. The target declares `UNIQUE (tenant_id, structure_id, installment_no)` in `0022`; `tenant_id` is the **leading** column, so the reference still carries the tenant and R2's tenancy guarantee is intact. It is *stronger* than `(tenant_id, id)` for its purpose — it binds the line to a plan **of its own structure** rather than to any plan in the tenant — and *weaker* on one axis, which is why it is enumerated rather than generalised: it does not prove the plan's `id`. `installment_no` is nullable, so `MATCH SIMPLE` is **required** and a non-installment line is unconstrained on this pair rather than refused | `0023` |
+| `fin_invoices` | `(created_by)` | `users` | `(id)` | `users_pkey` — **§6.3 R4 exception (P0-06a)**: platform-global identity, no `tenant_id`. Write-once issuance stamp (C-13) | `0023` |
+| `fin_invoices` | `(tenant_id, academic_year_id)` | `academic_years` | `(tenant_id, id)` | `academic_years_tenant_id_uq` (existing) | `0023` |
+| `fin_invoices` | `(tenant_id, enrollment_id)` | `enrollments` | `(tenant_id, id)` | `enrollments_tenant_id_uq` (0021 — **absent in 0005**) | `0023` |
+| `fin_invoices` | `(tenant_id, structure_id)` | `fin_fee_structures` | `(tenant_id, id)` | `fin_fee_structures_ten_id_uq` | `0023` |
+| `fin_invoices` | `(tenant_id, student_id)` | `students` | `(tenant_id, id)` | `students_tenant_id_uq` (existing) | `0023` |
+| `fin_ledger_accounts` | `(tenant_id)` | `tenants` | `(id)` | `tenants_pkey` — **§6.3 R4 exception**: `tenants` **is** the tenant | `0021` |
+| `fin_ledger_entries` | `(tenant_id, account_code)` | `fin_ledger_accounts` | `(tenant_id, code)` | `fin_ledger_accounts_code_uq` — keyed on the **business** code anchor | `0026` |
+| `fin_ledger_entries` | `(tenant_id, entry_group_id)` | `fin_ledger_entry_groups` | `(tenant_id, id)` | `fin_leg_groups_ten_id_uq` | `0026` |
+| `fin_ledger_entries` | `(tenant_id, invoice_id)` | `fin_invoices` | `(tenant_id, id)` | `fin_invoices_ten_id_uq` (P1-08 — **was no FK at all**) | `0026` |
+| `fin_ledger_entries` | `(tenant_id, student_id)` | `students` | `(tenant_id, id)` | `students_tenant_id_uq` (existing) (P1-08 — **was no FK at all**) | `0026` |
+| `fin_ledger_entry_groups` | `(tenant_id, reversal_of_group)` | `fin_ledger_entry_groups` | `(tenant_id, id)` | `fin_leg_groups_ten_id_uq` | `0026` |
+| `fin_payment_allocations` | `(tenant_id, invoice_id)` | `fin_invoices` | `(tenant_id, id)` | `fin_invoices_ten_id_uq` | `0024` |
+| `fin_payment_allocations` | `(tenant_id, payment_id)` | `fin_payments` | `(tenant_id, id)` | `fin_payments_ten_id_uq` | `0024` |
+| `fin_payment_allocations` | `(tenant_id, refund_id)` | `fin_refunds` | `(tenant_id, id)` | `fin_refunds_ten_id_uq` — **added by `0025`, not `0024`** | `0025` |
+| `fin_payment_allocations` | `(tenant_id, reversal_of_allocation_id)` | `fin_payment_allocations` | `(tenant_id, id)` | `fin_pa_ten_id_uq` | `0024` |
+| `fin_payments` | `(tenant_id, payer_guardian_id)` | `guardians` | `(tenant_id, id)` | `guardians_tenant_id_uq` (existing) | `0024` |
+| `fin_provider_accounts` | `(tenant_id)` | `tenants` | `(id)` | `tenants_pkey` — **§6.3 R4 exception**: `tenants` **is** the tenant | `0029` |
+| `fin_receipts` | `(tenant_id, payer_guardian_id)` | `guardians` | `(tenant_id, id)` | `guardians_tenant_id_uq` (existing) | `0024` |
+| `fin_receipts` | `(tenant_id, payment_id)` | `fin_payments` | `(tenant_id, id)` | `fin_payments_ten_id_uq` | `0024` |
+| `fin_receipts` | `(tenant_id, supersedes_id)` | `fin_receipts` | `(tenant_id, id)` | `fin_receipts_ten_id_uq` | `0024` |
+| `fin_reconciliation_batches` | `(tenant_id, statement_file_id)` | `files` | `(tenant_id, id)` | `files_tenant_id_uq` (existing) | `0027` |
+| `fin_reconciliation_matches` | `(tenant_id, batch_id)` | `fin_reconciliation_batches` | `(tenant_id, id)` | `fin_recon_batches_ten_id_uq` | `0027` |
+| `fin_reconciliation_matches` | `(tenant_id, payment_id)` | `fin_payments` | `(tenant_id, id)` | `fin_payments_ten_id_uq` | `0027` |
+| `fin_refunds` | `(tenant_id, payment_id)` | `fin_payments` | `(tenant_id, id)` | `fin_payments_ten_id_uq` | `0025` |
+| `fin_tax_profiles` | `(tenant_id)` | `tenants` | `(id)` | `tenants_pkey` — **§6.3 R4 exception**: `tenants` **is** the tenant | `0021` |
+| `fin_tenant_settings` | `(tenant_id)` | `tenants` | `(id)` | `tenants_pkey` — **§6.3 R4 exception**: `tenants` **is** the tenant | `0021` |
+| `fin_tenant_settings` | `(tenant_id, tax_profile_id)` | `fin_tax_profiles` | `(tenant_id, id)` | `fin_tax_profiles_ten_id_uq` — added by `ALTER` in `0021` | `0021` |
+
+**The final whole-Phase-7 assertion, to be performed once `0029` is applied.** With `A = {0021 … 0029}`:
+`expected_current_edges = 67`, and the catalog must report `live_current_edges = 67`. `F1 = 0`, `F2 = 0`,
+`F3 = 0`, orphans `0`, and the deferred-row count stays at **0** — it was already **0** at the `0023`
+checkpoint in this revision, and `fin_payment_allocations → fin_refunds` is the one row that brings it down
+when `0025` lands. **At that point the design total and the live total are the same number by construction,
+and that is the point at which they stop being two numbers.**
+
+**What changed in this revision, stated as a defect rather than as an edit.** Two passes, and the second is
+the one this row is now about. The **first**: the table held **62** rows and its own header claimed
+**twelve** single-column rows and **three** target tables, all three of which were right while the totals
+were not — the five edges `0023` actually creates were **present in the DDL and absent from the map**, so
+`live_current_edges` was 43 against a map that described 38 of them. The header's arithmetic (12 = 6 + 5 + 1)
+was self-consistent and about a set three rows short of the whole phase. A row count written from memory
+rather than derived from the DDL is what produced it. The **second**, this pass: with the table complete at
+**67**, `fin_billing_run_items (tenant_id, invoice_id) → fin_invoices` was still owned by `0024` — a claim
+§9.5's DDL, §8.7's column comment, §30.2's intra-file order and §30.3.1's composite-type rule all
+contradicted, in six places against one map cell. It is adjudicated to `0023` with `ON DELETE RESTRICT`, and
+the header's dependent figures are re-derived in the table above rather than adjusted by hand. **The
+common shape of both passes is the same**: a number written beside a table instead of derived from it. At
+the `0023` checkpoint the map now covers the catalog **exactly** at **44 / 44**, and F1–F4 exist so that the
+next disagreement is a test failure rather than a reviewer's reading.
 ### 35.3 Function and trigger inventory
 
-**Counting rule, corrected a third time.** §19.7.2's F5 row now says "27 named `trg_*` trigger
+**Counting rule, corrected a fifth time.** §19.7.2's F5 row now says "34 named `trg_*` trigger
 functions + `fn_fin_refund_ceiling`". The original document said "13 trigger functions"; the first
 remediation said "17 rows, 16 `trg_fin_*`, 1 `trg_auth_*`"; the second said "22 `trg_fin_*`
 functions + `fn_fin_refund_ceiling`" and "24 rows". All were wrong, and the second was wrong for a
@@ -10260,35 +14764,62 @@ subtler reason: it counted only the functions the earlier revision had *remember
 the prose promised several more (the structure child-freeze, the issued-line freeze, the
 payment-total bound, the sealed-group guard, and the invoice number/void/total triggers).
 
-It was **also off by one before `0022` arrived** — it claimed 24 rows for a table numbered to 25 —
-so the arithmetic is now derived from the table rather than restated beside it. The
-correction that matters is that counting is a **property of the table, not of the prose**: the
-table below is the set the bindings create, every row is bound, and both the row count and the
-statement count are summed from it. It has **28 rows** (1–25 plus 3a–3c, no gap, no duplicate):
+It was **also off by one before `0022` arrived** — it claimed 24 rows for a table numbered to 25 — and
+C-1, C-2 and C-SEC have now moved it **five times in this revision alone**: C-8 and C-9 added
+rows **4a** (`trg_fin_invoice_header_guard`) and **4b** (`trg_fin_invoice_item_amount`), C-6 added
+row **4c** (`trg_fin_invoice_adjustment_approval`), the cache-writer remediation added row **4d**
+(`trg_fin_invoice_freeze_lines`), and this pass added rows **10a** (`trg_fin_pa_delete_guard`, D1) and
+**12a** (`trg_fin_allocation_target_state`, D9). So the arithmetic is now derived from the table rather
+than restated beside it. The correction that matters is that counting is a **property of the table, not
+of the prose**: the table below is the set the bindings create, every row is bound, and both the row
+count and the statement count are summed from it. It has **35 rows** (1–25 plus 3a–3c plus 4a–4d plus
+10a plus 12a, no gap, no duplicate):
 
 | Set | Count | Membership |
 |---|---|---|
-| `trg_fin_*` trigger functions | **26** | every `trg_fin_*` row below (rows 1–14, 16–24, 3a–3c) |
+| `trg_fin_*` trigger functions | **33** | every `trg_fin_*` row below (rows 1–14, 16–24, 3a–3c, 4a–4d, 10a, 12a) |
 | `fn_fin_refund_ceiling` | **1** | named `fn_*` because it is bound as a deferred `CONSTRAINT TRIGGER` rather than a `trg_fin_*` row trigger, and it also calls the `trg_fin_reversal_shape_check` helper |
 | Auth trigger set | **1** | `trg_auth_step_up_immutable` |
-| **Total bound functions** | **28** | 26 + 1 + 1, one per inventory row. **3 of the 26 are added by `0022`** (`trg_fin_assignment_validate`, `trg_fin_billing_run_freeze`, `trg_fin_billing_run_items_freeze` — §8.6, §8.7.1); the other 23 predate it |
-| Named `trg_*` functions | **27** | 26 `trg_fin_*` + `trg_auth_step_up_immutable`; the figure F5 quotes |
-| `CREATE [CONSTRAINT] TRIGGER` statements | **35** | 26 in the §35.3.2 block + 1 in §19.8.1 + **8 from `0022`**; exceeds 28 because 5 functions bind to more than one table, adding 7 statements — see §35.3.2 |
+| **Total bound functions** | **35** | 33 + 1 + 1, one per inventory row. **Scope rule (§19.7.2 F5, §38.2): "total bound" = 35 and "document-bound" = 34.** The two differ by exactly one function — row 3a `trg_fin_assignment_validate` — which is created by the **applied `0022`** migration and therefore has no `CREATE FUNCTION` in this document (§8.6). **3 of the 33 are added by `0022`** (`trg_fin_assignment_validate`, `trg_fin_billing_run_freeze`, `trg_fin_billing_run_items_freeze` — §8.6, §8.7.1), **4 more by C-8/C-9/C-6 and the cache-writer remediation** (rows 4a–4d), and **2 by this pass** (rows 10a, 12a); the other 26 predate all three. §35.3.2's per-migration table is the authoritative split, and it is per migration rather than per phase because a band hides the `0023` figures C-SEC-M4a asserts |
+| Named `trg_*` functions | **34** | 33 `trg_fin_*` + `trg_auth_step_up_immutable`; the figure F5 quotes |
+| **`SECURITY DEFINER` among them (F5d)** | **5** | rows **4, 4d, 6, 13, 8a** — the five that issue (or, for row 13, cause) their **own** `UPDATE` on a column §16.5.1 does not grant. **Row 8a is new in this revision** (P0-07, §10.2.1): it writes `fin_challans.status`, which §35.4 grants to nobody, so the challan mirror is as dependent on an elevation as the invoice caches are. **Row 4a is not among them**: it assigns only `NEW` since clause (6) moved to row 4d, so §16.5.2's rule makes it INVOKER, and making it a definer again would destroy the caller-vs-maintenance distinction §9.6.0 clause (2) relies on. **Rows 10a and 12a are not among them**: both are `SECURITY INVOKER` by construction (the delete guard has nothing to elevate to, and the target-state guard only reads). **Not a separate function count**: they are rows in this table and are counted once each. **F5d names exactly these five** — not six. The unbound helper `fin_invoice_reapply_derived_state` that row 13 `PERFORM`s is `SECURITY INVOKER`, is not a row in this table, and has its own `F5h` row; it is deliberately excluded from F5d, whose membership criterion is *issues its own `UPDATE`*, which the helper does not do. §19.7.4 and §19.7.3's F5h narrative state why. **The figure 5 is whole-phase and must be scoped before it is asserted at a checkpoint: it is 3 at `0023`** (rows 4, 4d, 6), because rows 13 and 8a are `0024`'s, so it is **5 at `0024` and beyond** — and C-SEC-M4a / M4b assert the two checkpoint numbers separately for exactly that reason (§35.3.2). Of those three `0023` definers, exactly **one** — row 6 — calls `set_config('fin.invoice_maintenance_scope', …, true)`; rows 4 and 4d are definers for the unrelated reason that they write `frozen_at`, and neither sets a scope. **So "definers" and "scope producers" are different sets**, and §17's FI-020 names one function of each rather than implying they coincide |
+| `CREATE [CONSTRAINT] TRIGGER` statements | **42** | **41** in the §35.3.2 block (**33** excluding the `0022` sub-block of 8) + 1 in §19.8.1; exceeds 35 because the 5 multi-table functions add 7 statements — see §35.3.2 |
 
-**Scoping, because a document-wide text search finds 38 and both numbers are right.** This document
-contains **38** `CREATE TRIGGER` lines. Three of them — `fin_structures_publish` in §7.3.1,
-`fin_runs_freeze` in §8.7.1 and `fin_run_items_freeze` in §8.7.1 — are the same `0022` bindings
-repeated inside the section that specifies their function, because a reader of §8.7.1 has no reason
-to walk to §35.3.2 to learn that a committed run is bound at all. They are **restatements, not
-additional statements**: each names a table and function already in the block, and `0022` really
-does create 8 triggers, not 11. The statement count is therefore **35 distinct bindings** (§35.3.2
-block 34 + §19.8.1 1), while the text-search total is 38. `R7′` asserts both, and §35.3.2's
+**Scoping, because a document-wide text search finds 46 and both numbers are right.** This document
+contains **46** `CREATE TRIGGER` / `CREATE CONSTRAINT TRIGGER` lines. **Four** of them —
+`fin_structures_publish` in §7.3.1, `fin_runs_freeze` in §8.7.1, `fin_run_items_freeze` in §8.7.1, and
+**`fin_invoices_freeze_lines` in §9.6.0.1** — are the same bindings repeated inside the section that
+specifies their function, because a reader of §8.7.1 or §9.6.0.1 has no reason
+to walk to §35.3.2 to learn that a committed run is bound, or that the issue-time stamp is a binding at
+all. They are **restatements, not additional statements**: each names a table and function already in
+the block, `0022` really
+does create 8 triggers and not 11, and `0023` really creates 9 and not 10. The statement count is
+therefore **42 distinct bindings** (§35.3.2
+block 41 + §19.8.1 1), while the text-search total is 46. `R7′` asserts both, and §35.3.2's
 `0022` sub-block is the one an implementer copies.
 
-The `0022` share is **8 statements over 6 functions**, and it is the only number in this table that
-was measured rather than projected: the file contains exactly 8 `CREATE TRIGGER` and 6 `CREATE
-FUNCTION` statements, and 10.6 asserts that inventory at apply time (§28.6). Every other figure
-here is a specification for `0023`–`0029`, none of which exists yet.
+**The fourth restatement was missed until this pass, and the miss is the point.** The scoping paragraph
+was written when there were three, and row 4d was then added to §9.6.0.1 with its binding shown in
+place — which is the same courtesy §8.7.1 extends to the run freezes — **without this count being
+updated**. The text-search total therefore read **42** while the true figure was **43**, and `R7′`
+asserted the wrong number. The substantive figures were unaffected, because a restatement adds no
+binding and the 41 was always right; what was wrong was the *claim about the document*, which is the
+only kind of claim a reader cannot re-derive from the DDL. It is recorded here rather than silently
+corrected because a restatement added without updating the count is the **same failure shape** as row
+45 — a named thing added without updating the inventory that names it — and the two together are the
+best argument in this document for asserting counts rather than restating them.
+
+The `0022` share is **8 statements over 6 functions**, and it was the only number in this table that was
+**measured rather than projected** when the table was written: the file contains exactly 8 `CREATE
+TRIGGER` and 6 `CREATE FUNCTION` statements, and that file's own **`post-0022 assertion`** self-test
+(§28.6) asserts the inventory at apply time. **`0023` has since joined it**, and the figure this
+revision measured from the file is the same one §35.3.2's per-migration table gives: **7 bound
+functions over 9 bindings, 3 of them `SECURITY DEFINER`** — matching the file's own header inventory
+line, `7 functions, 9 CREATE TRIGGER statements`. Every other figure here is still a specification for
+`0024`–`0029`, none of which exists yet. The measurement matters for a reason beyond bookkeeping: a
+**definership count scoped to a checkpoint** (3 at `0023`, 5 at `0024`, 5 at `0029`) can only be
+trusted because it was counted against the file that owns the functions, and C-SEC-M4a and M4b assert
+those two numbers separately.
 
 The previous revision asserted "15 rows, of which 13 are `trg_fin_*` and 2 are auth triggers" — wrong
 in all three numbers at once — and then "17 rows / 16 `trg_fin_*`", which was still missing five
@@ -10299,9 +14830,12 @@ multi-table rule in §35.3.2 rather than a naive one-to-one.
 
 **The row-to-statement sum, so a reader can re-derive the numbers rather than trust them.**
 Each row is one function; the number of statements it contributes is the number of tables it is
-bound to. 23 rows bind to one table (23 statements); rows 3, 6, 7, 9 and 13 bind to 3, 2, 2, 2 and
-3 tables (12 statements). 23 + 12 = **35**, against 28 bound functions — the 7-statement excess is
-exactly the multi-table design and is not slack.
+bound to. **29** rows bind to one table (29 statements); rows 3, 6, 7, 9 and 13 bind to 3, 2, 2, 2 and
+3 tables (12 statements). 29 + 12 = **41** for the §35.3.2 block, against 34 block functions (35 rows
+less the one auth row that lives in §19.8.1) — the 7-statement excess is exactly the multi-table design
+and is not slack. Adding §19.8.1's single binding gives **42**. **Rows 10a and 12a are this pass's two
+new rows**, and each is bound to exactly one table, which is why two functions added two statements and
+not more.
 
 | # | Function | Table | Timing | Events | Purpose |
 |---|---|---|---|---|---|
@@ -10311,16 +14845,23 @@ exactly the multi-table design and is not slack.
 | 3a | `trg_fin_assignment_validate` | `fin_fee_assignments` | BEFORE | INSERT, UPDATE | §6.4's student/year pin, and the active-period grain. A composite FK can prove the enrollment exists and belongs to the tenant; it cannot prove the assignment's `student_id` is the enrollment's student (§8.6) |
 | 3b | `trg_fin_billing_run_freeze` | `fin_billing_runs` | BEFORE | UPDATE, DELETE | A committed run's provenance and totals are frozen, and it may not be deleted; re-run as a new run instead (§8.7.1) |
 | 3c | `trg_fin_billing_run_items_freeze` | `fin_billing_run_items` | BEFORE | **INSERT, UPDATE, DELETE** | A committed run's items are frozen. On UPDATE **both** runs are read — the one the row is in and the one it is moving into — so `run_id` is not an exit. The sole permitted write is attaching the invoice the run produced, once (§8.7.1) |
-| 4 | `trg_fin_invoice_number` | `fin_invoices` | BEFORE | INSERT, UPDATE | Allocates `invoice_no` on issue; enforces `draft ⟺ no number` (§9.6) |
-| 5 | `trg_fin_invoice_void` | `fin_invoices` | BEFORE | UPDATE | Enforces `void` preconditions (balance = 0) and stamps provenance (§9.6) |
-| 6 | `trg_fin_invoice_item_total` | `fin_invoice_items`, `fin_invoice_adjustments` | AFTER | INSERT, UPDATE, DELETE | Recomputes `fin_invoices.subtotal`/`total` from lines + adjustments (§9.6). Bound to BOTH input tables: the function reads adjustments, so a trigger on items alone never fires for an adjustment edit |
-| 7 | `trg_fin_invoice_items_freeze` | `fin_invoice_items`, `fin_invoice_adjustments` | BEFORE | UPDATE, DELETE | A line or adjustment of a non-draft invoice is frozen (§9.4.1) |
-| 8 | `trg_fin_challan_status` | `fin_challans` | BEFORE | INSERT, UPDATE | Derives `status` from the invoice (incl. `void`), enforces terminality and frozen identity (§10.2) |
+| 4 | `trg_fin_invoice_number` | `fin_invoices` | BEFORE | INSERT, UPDATE | Allocates `invoice_no` on issue; enforces `draft ⟺ no number`, and `draft → void` consumes no counter value (C-13, §9.6.1). **F5d — `SECURITY DEFINER`** |
+| 4a | `trg_fin_invoice_header_guard` | `fin_invoices` | BEFORE | INSERT, UPDATE | (C-8, C-9.1, C-SEC). Forces `subtotal`/`total`/`balance`/`paid_at` to their zero values on INSERT, derives `due_date` from the structure's plans or `effective_from`, refuses `due_date` changes once the invoice leaves draft, and refuses a direct `UPDATE` of any server-owned header column (§9.6.0). `SECURITY INVOKER` — **it used to be F5d**, because its clause (6) issued its own `UPDATE fin_invoice_items SET frozen_at`. That clause moved to row 4d; see §9.6.0.1 for why it had to. It must not become a definer again: definership would erase the caller-vs-maintenance distinction clause (2) depends on (§16.5.2, C-SEC-M4a) |
+| 4d | `trg_fin_invoice_freeze_lines` | `fin_invoices` | **AFTER** | UPDATE **of `status`** | **NEW in this revision (C-SEC), and the direct cause of the fix.** Stamps every line's `frozen_at` when the invoice leaves `draft` (§9.6.0.1). `AFTER`, so the header row is already STORED and the stamp's re-entrant `trg_fin_invoice_item_total` write cannot be clobbered by the outer statement — in a `BEFORE` trigger it was, which is why issuing an invoice raised 55000. `WHEN (OLD.status = 'draft' AND NEW.status <> 'draft' AND NEW.status <> 'void')` keeps it off the 0024 balance writer's path, which never moves an invoice out of draft (§12.4.1, C-SEC-M6a structurally / C-SEC-M6b behaviourally). **F5d — `SECURITY DEFINER`**, because it issues its own `UPDATE` on `frozen_at` |
+| 4b | `trg_fin_invoice_item_amount` | `fin_invoice_items` | BEFORE | INSERT, UPDATE | **NEW (C-9.1).** Computes `NEW.amount := round(quantity * unit_amount, 2)` in a BEFORE trigger, because an AFTER trigger cannot assign `NEW` (§9.6.2). `SECURITY INVOKER` |
+| 4c | `trg_fin_invoice_adjustment_approval` | `fin_invoice_adjustments` | BEFORE | UPDATE | **NEW (C-6).** The only writer of the four ungranted columns: every non-approval field must be unchanged, `pending → approved/rejected` is the only transition, self-approval is refused, and a correction may only reverse an **approved** row (§9.6.2). `SECURITY INVOKER` |
+| 5 | `trg_fin_invoice_void` | `fin_invoices` | BEFORE | UPDATE | **0024, not 0023 (C-2)** — it reads `fin_payment_allocations`, so §30.3.1 forbids creating it in 0023. Refuses `paid → void` (C-12), requires `balance = 0` derived from allocations, requires a reason, stamps `voided_at` (§9.3.1). `SECURITY INVOKER` |
+| 6 | `trg_fin_invoice_item_total` | `fin_invoice_items`, `fin_invoice_adjustments` | AFTER | INSERT, UPDATE, DELETE | Recomputes `fin_invoices.subtotal`/`total` from lines + **approved** adjustments (C-6), summing the two tables separately to avoid a Cartesian product (§9.6.2). Bound to BOTH input tables: the function reads adjustments, so a trigger on items alone never fires for an adjustment edit. **F5d — `SECURITY DEFINER`** |
+| 7 | `trg_fin_invoice_items_freeze` | `fin_invoice_items`, `fin_invoice_adjustments` | BEFORE | UPDATE, DELETE | A line or adjustment of a non-draft invoice is frozen; `TG_TABLE_NAME` narrows the `void` line-deletion exception so adjustments stay permanent (§9.4.1, C-13) |
+| 8 | `trg_fin_challan_status` | `fin_challans` | BEFORE | INSERT, UPDATE | **0024, not 0023 (C-2)** — it reads `fin_v_invoice_balance`, which 0024 creates. Derives `status` from the invoice (incl. `void`), enforces terminality and frozen identity (§10.2) |
+| 8a | `trg_fin_challan_refresh` | `fin_invoices` | **AFTER** | UPDATE **of `status`** | **NEW in this revision — P0-07, §10.2.1.** The *refresh point* for row 8, which fires only when a **challan** row is written and therefore never on a payment, a refund, a line correction or a void. Bound to the invoice's `status` column so it catches every writer of that column and needs no second derivation: it issues `UPDATE fin_challans SET status = status WHERE tenant_id = NEW.tenant_id AND invoice_id = NEW.id`, which re-enters row 8's BEFORE trigger. **F5d — `SECURITY DEFINER`**, because it writes `fin_challans.status`, which §35.4 does not grant to `school_app_rw`. Bound to exactly one table, so the statement count rose by exactly as many as the function count |
 | 9 | `trg_fin_refund_provenance` | `fin_payment_allocations`, `fin_refunds` | BEFORE | INSERT, UPDATE | Three-way agreement: the reversal, the allocation it names, and the refund all name the same payment (§13.1) |
 | 10 | `trg_fin_reversal_shape` | `fin_payment_allocations` | BEFORE | INSERT, UPDATE | Thin wrapper: delegates to `trg_fin_reversal_shape_check` (§12.1) |
+| 10a | `trg_fin_pa_delete_guard` | `fin_payment_allocations` | BEFORE | DELETE | **NEW in this revision (D1).** The append-only boundary: every `DELETE` is refused with SQLSTATE `55000`, before the `AFTER … DELETE` cache recomputation can run. `SECURITY INVOKER`, `search_path` pinned, revoked from `PUBLIC`. §35.3.2 already bound it, but the previous revision's inventory had no row for it — the omission is what A19 closes (§12.1, §28.3.2) |
 | 11 | `trg_fin_allocation_family_guard` | `fin_payment_allocations` | BEFORE | INSERT, UPDATE | Every allocation's invoice's student must be linked to the payer guardian (§12.5) |
 | 12 | `trg_fin_allocation_bounds` | `fin_payment_allocations` | BEFORE | INSERT, UPDATE | FI-003: locked recompute of the non-refund allocation total against `payment.amount` (§12.7) |
-| 13 | `trg_fin_invoice_balance_recompute` | `fin_invoice_items`, `fin_invoice_adjustments`, `fin_payment_allocations` | AFTER | INSERT, UPDATE, DELETE | FI-002 cache writer for `fin_invoices.balance`; all three tables feed `balance`, and both sides are recomputed when an allocation moves between invoices (§12.4.1). Arithmetic lives in the non-trigger helper `trg_fin_invoice_recalc_balance(uuid,uuid)`. Two bindings in 0023, one in 0024 |
+| 12a | `trg_fin_allocation_target_state` | `fin_payment_allocations` | BEFORE | INSERT, UPDATE | **NEW in this revision (D9, P0).** §12.5.1: an `apply` row may not name a `draft` or `void` invoice. Returns early for every non-`apply` row and for a missing invoice (the composite FK owns that case). `SECURITY INVOKER`, `search_path` pinned, revoked from `PUBLIC` |
+| 13 | `trg_fin_invoice_balance_recompute` | `fin_invoice_items`, `fin_invoice_adjustments`, `fin_payment_allocations` | AFTER | INSERT, UPDATE, DELETE | **ALL THREE bindings are 0024, not two-in-0023-plus-one-in-0024 (C-1)** — the function names `fin_payment_allocations`, so §30.3.1 forbids creating it in 0023 at all. FI-002 cache writer for `fin_invoices.balance`, **`status`** and **`paid_at`** (C-9.2); all three tables feed `balance`, and both sides are recomputed when an allocation moves between invoices (§12.4.1). Arithmetic and the status decision live in the non-trigger helper `fin_invoice_reapply_derived_state(uuid,uuid)`. **F5d — `SECURITY DEFINER`** |
 | 14 | `trg_fin_on_account_return_bounds` | `fin_payment_allocations` | BEFORE | INSERT, UPDATE | `on_account_return` magnitude ≤ cash still held on account; a permission distinct from refunds (§13.3.2) |
 | 15 | `fn_fin_refund_ceiling` | `fin_payment_allocations` | **AFTER, DEFERRABLE INITIALLY DEFERRED** | INSERT, UPDATE | At COMMIT: per-refund allocation completeness, and per-payment refunded ≤ applied (§13.3.1) |
 | 16 | `trg_fin_receipt_freeze` | `fin_receipts` | BEFORE | INSERT, UPDATE, DELETE | Receipt is immutable for every role incl. `school_migrator`; a correction is a new `version` with `supersedes_id` (§25.5) |
@@ -10334,7 +14875,7 @@ exactly the multi-table design and is not slack.
 | 24 | `trg_fin_artifact_document_valid` | `fin_document_artifacts` | BEFORE | INSERT, UPDATE | Validates the cross-table artifact reference against a closed type map (§27) |
 | 25 | `trg_auth_step_up_immutable` | `auth_step_up_challenges` | BEFORE | UPDATE | Binding columns frozen; `consumed_at` monotonic; `attempts_left` only decreases (§19.8.1) |
 
-#### 35.3.1 What the invariant actually is, and the one helper
+#### 35.3.1 What the invariant actually is, and the two helpers
 
 The earlier revision's note — "`trg_fin_reversal_shape_check` and `trg_fin_artifact_document_valid`
 are helpers called by rows 8 and the artifact validator" — is **half right and half wrong**.
@@ -10342,10 +14883,31 @@ are helpers called by rows 8 and the artifact validator" — is **half right and
 `trg_fin_reversal_shape` via `PERFORM` and re-called by `fn_fin_refund_ceiling`, bound to no trigger,
 and therefore correctly absent from the table. `trg_fin_artifact_document_valid` is **not** a helper:
 it is bound directly as the `fin_artifacts_document` trigger function, so it is row 24 and the old
-note was wrong about it. There is exactly **one** helper, and the verifier asserts exactly one:
-`trg_fin_reversal_shape_check`.
+note was wrong about it.
 
-#### 35.3.2 Why the statement count is 35 and not 28
+**There are exactly TWO helpers, and the verifier asserts exactly two:**
+`trg_fin_reversal_shape_check` (row 8's callee, §13.1) and `fin_invoice_reapply_derived_state` (row
+13's callee, §12.4.1). Both are `RETURNS void`, both are `PERFORM`ed from inside another trigger
+function, and neither is named by any `CREATE TRIGGER`. An earlier revision of this subsection said
+"exactly one" and cited only the first — true when `trg_fin_invoice_balance_recompute` still carried
+the arithmetic inline, and stale once the arithmetic moved into the helper, which is what made the
+recompute two lines long. §19.7.2's F5h row lists the same two, and the count is asserted rather
+than restated so a third cannot arrive unremarked.
+
+**The count is still two after the `0025` forward remediation, and that is a decision rather than an
+oversight.** The remediation adds `fin_lock_payment_amount(p_tenant_id uuid, p_payment_id uuid)
+RETURNS numeric(19,4)` — unbound, `SECURITY DEFINER`, named by no `CREATE TRIGGER`
+(§13.1.1, D2C; §19.7.2 `F5s`). It is **not** a third helper: it returns `numeric` rather than
+`void`, and it is called as an expression rather than `PERFORM`ed for effect, so it fails two of the
+three defining properties above. It is carried in a separately named category — **unbound
+`SECURITY DEFINER` support function** — whose count is **1**, and whose elevation rationale is
+different in kind from a helper's: a helper inherits its caller's context, whereas
+`fin_lock_payment_amount` must be a definer precisely because its two callers are `SECURITY INVOKER`
+and have no elevation to pass down (§16.5.2). **Widening this definition to admit it would have
+defeated the tripwire**, which exists to force an unbound, non-API-reachable surface to be remarked
+on when it grows. It is remarked on instead: separate row, separate count, separate audit.
+
+#### 35.3.2 Why the statement count is 41 and not 34
 
 Five functions are bound to more than one table, and that is a design requirement rather than
 sloppiness:
@@ -10363,28 +14925,68 @@ sloppiness:
   feed `balance`, and a cache that is correct for only one of its three inputs is worse than no cache,
   because it is trusted.
 
-So: 27 distinct functions bound outside `0022` (26 finance + 1 auth), 27 statements for them
-(25 in the §35.3.2 block below + 1 in §19.8.1 for `trg_auth_step_up_immutable`, the auth one), plus
-**8 statements from `0022`** over 6 functions = **35 statements document-wide over 28 bound
-functions**. The four ledger functions
+**The four functions C-8/C-9/C-6 and the cache-writer remediation added — rows 4a, 4b, 4c and 4d — are
+each bound to exactly one table**, which is why the statement count rose by exactly as many as the
+function count. That is the
+non-obvious part of the change: a reader who assumed "four more functions" implied more than four
+statements would be right only by accident, and `R7′` asserts the pairing rather than trusting it.
+
+So, re-derived from the table rather than restated: **34 bound functions, 41 statements** in this
+block. **Read the 34 as _document-bound_**: these are the functions this document defines and binds.
+Adding row 3a — an **applied `0022`** function resolved against `0022`'s immutable DDL, which is why
+it has no definition here — gives the **35** that the whole-phase inventory asserts. **"document-bound"
+is always 34 and "total bound" is always 35**; the two are different populations and a sentence must
+not use them interchangeably (§19.7.2 F5, §38.2). Split by the migration that creates each — and
+split **per migration** rather than into a
+`0023`–`0029` band,
+because a band hides exactly the numbers the checkpoint-scoped assertions of §28.3.1 depend on
+(`C-SEC-M4a` asserts 13 functions and 3 definers at `0023` — the running total of the `0022` and `0023`
+rows above — `C-SEC-M4b` asserts 24 and 5 at `0024`, and
+neither figure had anywhere to be derived from):
+
+| Migration | Bound functions | Statements | `SECURITY DEFINER` | Rows |
+|---|---|---|---|---|
+| `0021` | **0** | **0** | **0** | — the foundation creates tables, anchors and helpers, and binds nothing |
+| `0022` | **6** | **8** | **0** | rows 1, 2, 3, 3a, 3b, 3c — the 7th and 8th statements are row 3's two extra child bindings |
+| `0023` | **7** | **9** | **3** | rows 4, 4a, 4b, 4c, 4d, 6, 7 — definers are rows 4, 4d, 6 |
+| `0024` | **11** | **13** | **2** | rows 5, 8, 8a, 10, 10a, 11, 12, 12a, 13, 14, 16 — the definers are rows 13 and 8a; plus the **unbound** helper `fin_invoice_reapply_derived_state`, which is a function without a statement and so appears in no column of this table. Rows 10a (`trg_fin_pa_delete_guard`, D1) and 12a (`trg_fin_allocation_target_state`, D9) are new in this pass |
+| `0025` | **2** | **3** | **0** | rows 9, 15 — row 9's second statement is the refunds-side binding, and row 15 is the deferred `CONSTRAINT TRIGGER`. **Nothing else is `0025`'s**, and the absence is deliberate rather than an omission: the refund state machine (F11/F12) is `0028`'s, so `0025` contributes **no** definer and **no** unbound function. The previous revision listed `postRefundApproval` as a `0025` deliverable in §30.1 while this table — correctly — never counted it, because it is not a trigger function; the two representations disagreed and the trigger inventory was right. §36.2 row 49 |
+| `0026` | **4** | **4** | **0** | rows 17, 18, 19, 20 |
+| `0027` | **3** | **3** | **0** | rows 21, 22, 23 |
+| `0028` | **1** | **1** | **0** | row 25, bound in §19.8.1 rather than in this block. **Plus the two unbound definers F11 `postRefundApproval` and F12 `postRefundProcess`**, which appear in no column of this table because it counts *bound* functions only — a function with no `CREATE TRIGGER` has no statement, exactly as `fin_invoice_reapply_derived_state` does not appear against `0024`; the `SECURITY DEFINER` column reads 0 for `0028` because this table counts definers *among bound functions*, and the whole-phase bound-definer total of 5 is likewise unaffected. Counting definers here without the "among bound functions" qualifier would report 7 and silently redefine the F5d contract, which is about cache writers. **This row's earlier claim — that `0028` is "the only migration that owns a `SECURITY DEFINER` function which is not a trigger function" — is no longer true and is withdrawn.** `0025` forward remediation owns one: `fin_lock_payment_amount` (§13.1.1, D2C; §19.7.2 `F5s`), an unbound `SECURITY DEFINER` **support function**. The two categories are **intentionally distinct** and must not be merged: F11/F12 are **application-facing** RPCs, granted `EXECUTE` to `school_app_rw` and reachable from the API, whereas `fin_lock_payment_amount` is **not** an application-facing function, has **no runtime `EXECUTE` grant** (`PUBLIC` and `school_app_rw` both revoked), and its only intended callers are the two `SECURITY INVOKER` `0024` payment-lock trigger functions `trg_fin_allocation_bounds` and `trg_fin_on_account_return_bounds`. Its elevation exists for one specific reason: those callers hold no `UPDATE` privilege on `fin_payments` and cannot take the required `SELECT … FOR UPDATE` themselves, so the lock is performed by a definer they call (§16.5.2's inheritance clause and its boundary). **This does not make the `0025` helper category contain three helpers**: the strict §35.3.1 count remains **2** and `fin_lock_payment_amount` is carried separately as the single unbound `SECURITY DEFINER` support function. **All other `0028` security-boundary statements in this row stand unchanged.** |
+| `0029` | **1** | **1** | **0** | row 24 — the binding moved here because `fin_document_artifacts` is created here |
+| **Total** | **35** | **42** | **5** | functions 0+6+7+11+2+4+3+1+1; statements 0+8+9+13+3+4+3+1+1; definers 0+0+3+2 |
+
+**Three of those columns are the ones the F5d row's "4" hides, and stating them separately is what
+makes the scoped assertion honest.** "Exactly **5** `SECURITY DEFINER` among the 35" is the
+**whole-phase** figure and is correct; at the `0023` checkpoint the figure is **3** and at `0024` it
+reaches **5**, because rows 13 and 8a are `0024`'s. A test written at `0023` that asserts 5 is asserting
+rows that do not exist yet, and one written at `0029` that asserts 3 would be asserting less than the
+design requires. The previous revision had no per-migration column at all, which is why C-SEC-M4 could
+read "all 35 bound functions" from a suite whose own migration owns seven of them (now split into
+M4a/M4b, §28.3.1).
+
+The four ledger functions
 (`trg_fin_ledger_group_balance`, `trg_fin_ledger_seal`, `trg_fin_ledger_sealed_group_reject`)
-plus `trg_fin_ledger_append_only` are **four rows over two tables**, and the ledger therefore
+plus `trg_fin_ledger_append_only` are **four rows over four tables** — one statement each — and the
+ledger therefore
 contributes exactly 4 statements to the count. The count rose by one statement and one function when
 the reconciliation batch side was split into `trg_fin_recon_batch_derive_totals` (`BEFORE`) and
 `trg_fin_recon_batch_stamp_matches` (`AFTER`), which §14.1.1 explains is forced rather than
-optional, and by 3 statements and 3 functions when `0022` added the assignment pin and the two
-run freezes.
+optional, by 3 statements and 3 functions when `0022` added the assignment pin and the two
+run freezes, and by one more when the issue-time stamp moved out of the header guard into row 4d
+(§9.6.0.1) — a row added to fix a defect, not to add a feature.
 
-The correct assertions are: **28 bound functions**, **35 statements**, each statement naming a
-defined function, and each of the 28 appearing in at least one statement. The previous "appears
+The correct assertions are: **35 bound functions**, **42 statements**, each statement naming a
+defined function, and each of the 34 appearing in at least one statement. The previous "appears
 exactly once" claim was false for the five multi-table functions; it is replaced by "at least once,
 and no extra functions."
 
 **The binding block, so the inventory is verifiable rather than asserted.** It is written in
 migration order and opens with the **8 statements `0022` actually executes**, then continues with
-the **26** for `0023`–`0029` that bind the 20 finance functions `0022` does not create.
-(`trg_auth_step_up_immutable`'s single binding is in §19.8.1, not here.) 8 + 26 = 34 in this block
-plus 1 in §19.8.1 = **35**.
+the **33** for `0023`–`0029` that bind the 28 functions `0022` does not create.
+(`trg_auth_step_up_immutable`'s single binding is in §19.8.1, not here.) 8 + 33 = 41 in this block,
+plus 1 in §19.8.1 = **42**.
 
 ```sql
 -- 0022: fee structures
@@ -10421,10 +15023,37 @@ CREATE TRIGGER fin_run_items_freeze   BEFORE INSERT OR UPDATE OR DELETE ON fin_b
     FOR EACH ROW EXECUTE FUNCTION trg_fin_billing_run_items_freeze();
 
 -- 0023: invoices, items, challans
+--
+-- SCOPE (C-1, C-2, §30.3.1 strict form): NOTHING in this block may name
+-- fin_payment_allocations or fin_v_invoice_balance, in a body OR in a DECLARE
+-- row type. That is why trg_fin_invoice_void, trg_fin_challan_status and
+-- trg_fin_invoice_balance_recompute are NOT here — all three are in the 0024
+-- block below. The previous revision bound all three in 0023 and each would have
+-- failed 42P01 on first use.
 CREATE TRIGGER fin_invoices_number       BEFORE INSERT OR UPDATE ON fin_invoices
     FOR EACH ROW EXECUTE FUNCTION trg_fin_invoice_number();
-CREATE TRIGGER fin_invoice_void_guard    BEFORE UPDATE ON fin_invoices
-    FOR EACH ROW EXECUTE FUNCTION trg_fin_invoice_void();
+-- C-8/C-9.1/C-SEC: server-owned header fields, due_date derivation, and the
+-- maintenance-context refusal. BEFORE, because it sets NEW and (on INSERT)
+-- normalises the caches. SECURITY INVOKER: it issues no statement of its own
+-- (§16.5.2), which is what lets clause (2) tell a caller's direct UPDATE from a
+-- maintenance writer's nested one.
+CREATE TRIGGER fin_invoices_header_guard BEFORE INSERT OR UPDATE ON fin_invoices
+    FOR EACH ROW EXECUTE FUNCTION trg_fin_invoice_header_guard();
+-- C-SEC: the issue-time line stamp, moved OUT of the header guard's clause (6)
+-- into its own AFTER trigger. AFTER is the fix, not a preference: from a BEFORE
+-- trigger the nested UPDATE hit the header guard's own server-owned refusal
+-- (55000), and even once that was allowed the outer statement would have stored
+-- its own pre-image and silently clobbered the cache write (§9.6.0.1). UPDATE OF
+-- status plus WHEN keeps it off the 0024 balance writer's path, which never
+-- moves an invoice out of draft.
+CREATE TRIGGER fin_invoices_freeze_lines AFTER UPDATE OF status ON fin_invoices
+    FOR EACH ROW
+    WHEN (OLD.status = 'draft' AND NEW.status <> 'draft' AND NEW.status <> 'void')
+    EXECUTE FUNCTION trg_fin_invoice_freeze_lines();
+-- C-9.1: the line amount is a cache of quantity * unit_amount and cannot be set
+-- by an AFTER trigger.
+CREATE TRIGGER fin_invoice_items_amount   BEFORE INSERT OR UPDATE ON fin_invoice_items
+    FOR EACH ROW EXECUTE FUNCTION trg_fin_invoice_item_amount();
 CREATE TRIGGER fin_invoice_items_total   AFTER INSERT OR UPDATE OR DELETE ON fin_invoice_items
     FOR EACH ROW EXECUTE FUNCTION trg_fin_invoice_item_total();
 -- The SAME function on the adjustments table. Without this, an adjustment
@@ -10434,26 +15063,45 @@ CREATE TRIGGER fin_invoice_items_total   AFTER INSERT OR UPDATE OR DELETE ON fin
 -- 500 fee that does not appear on the invoice is the failure.
 CREATE TRIGGER fin_invoice_adjustments_total AFTER INSERT OR UPDATE OR DELETE ON fin_invoice_adjustments
     FOR EACH ROW EXECUTE FUNCTION trg_fin_invoice_item_total();
--- FI-002 balance cache writer (§12.4.1), on the two tables created HERE. Three
--- tables feed `balance`; the third is bound in 0024 with the allocations. A
--- trigger bound only to allocations would leave a posted invoice whose balance no
--- longer equals `total - net_applied`, and the first thing to notice is month-end
--- reconciliation, against a document already sent to a family.
--- `trg_fin_invoice_recalc_balance` is the helper holding the expression; this is
--- the trigger that decides WHICH invoice to recompute.
-CREATE TRIGGER fin_invoice_items_balance AFTER INSERT OR UPDATE OR DELETE ON fin_invoice_items
-    FOR EACH ROW EXECUTE FUNCTION trg_fin_invoice_balance_recompute();
-CREATE TRIGGER fin_invoice_adjustments_balance AFTER INSERT OR UPDATE OR DELETE ON fin_invoice_adjustments
-    FOR EACH ROW EXECUTE FUNCTION trg_fin_invoice_balance_recompute();
+-- C-6: the approval transition. Bound to UPDATE only, because INSERT carries the
+-- pending default and DELETE is refused entirely (§9.4.1).
+CREATE TRIGGER fin_invoice_adjustments_approval BEFORE UPDATE ON fin_invoice_adjustments
+    FOR EACH ROW EXECUTE FUNCTION trg_fin_invoice_adjustment_approval();
 -- Issued-line freeze (§9.4.1): one function, both sides of the invoice total.
 CREATE TRIGGER fin_invoice_items_freeze  BEFORE UPDATE OR DELETE ON fin_invoice_items
     FOR EACH ROW EXECUTE FUNCTION trg_fin_invoice_items_freeze();
 CREATE TRIGGER fin_invoice_adjustments_freeze BEFORE UPDATE OR DELETE ON fin_invoice_adjustments
     FOR EACH ROW EXECUTE FUNCTION trg_fin_invoice_items_freeze();
-CREATE TRIGGER fin_challans_status       BEFORE INSERT OR UPDATE ON fin_challans
-    FOR EACH ROW EXECUTE FUNCTION trg_fin_challan_status();
 
 -- 0024: payments, allocations  (NOT fin_refunds — that table is created by 0025)
+--
+-- The three invoice triggers that need payment data are bound HERE (C-1, C-2):
+--   fin_invoice_void_guard    - reads fin_payment_allocations
+--   fin_invoice_items_balance - reads fin_payment_allocations
+--   fin_challans_status       - reads fin_v_invoice_balance
+-- In the previous revision all three sat in the 0023 block above.
+CREATE TRIGGER fin_invoice_void_guard    BEFORE UPDATE ON fin_invoices
+    FOR EACH ROW EXECUTE FUNCTION trg_fin_invoice_void();
+-- FI-002 cache writer for balance/status/paid_at (§12.4.1), now on ALL THREE
+-- tables that feed it. A trigger bound only to allocations would leave a posted
+-- invoice whose balance no longer equals `total - net_applied`, and the first
+-- thing to notice is month-end reconciliation, against a document already sent to
+-- a family. `fin_invoice_reapply_derived_state` is the helper holding the
+-- expression and the status decision; this is the trigger that decides WHICH
+-- invoice to reapply.
+CREATE TRIGGER fin_invoice_items_balance AFTER INSERT OR UPDATE OR DELETE ON fin_invoice_items
+    FOR EACH ROW EXECUTE FUNCTION trg_fin_invoice_balance_recompute();
+CREATE TRIGGER fin_invoice_adjustments_balance AFTER INSERT OR UPDATE OR DELETE ON fin_invoice_adjustments
+    FOR EACH ROW EXECUTE FUNCTION trg_fin_invoice_balance_recompute();
+CREATE TRIGGER fin_challans_status       BEFORE INSERT OR UPDATE ON fin_challans
+    FOR EACH ROW EXECUTE FUNCTION trg_fin_challan_status();
+-- (P0-07 §10.2.1) fin_challans_refresh - the MISSING refresh point. Row 8 above
+-- derives the challan's status, but it fires only when a CHALLAN row is written,
+-- and nothing in this document ever writes one after INSERT. Without this binding
+-- a challan's status is frozen at the moment it is issued. See §10.2.1.
+CREATE TRIGGER fin_invoices_challan_refresh AFTER UPDATE OF status ON fin_invoices
+    FOR EACH ROW EXECUTE FUNCTION trg_fin_challan_refresh();
+
 -- NOTE: trg_fin_refund_provenance is NOT bound here, even though
 -- fin_payment_allocations is. Its DECLARE block names the composite type
 -- fin_refunds, which 0024 does not create, so both the function and its
@@ -10462,12 +15110,22 @@ CREATE TRIGGER fin_allocations_shape     BEFORE INSERT OR UPDATE ON fin_payment_
     FOR EACH ROW EXECUTE FUNCTION trg_fin_reversal_shape();
 CREATE TRIGGER fin_allocations_family    BEFORE INSERT OR UPDATE ON fin_payment_allocations
     FOR EACH ROW EXECUTE FUNCTION trg_fin_allocation_family_guard();
+-- §12.5.1 P0-09's second half: an apply row may not name a draft or void invoice.
+-- Disjoint from `fin_allocations_family` on `effect` and from `fin_allocations_shape`
+-- the other way, so the three share no row and no ordering constraint.
+CREATE TRIGGER fin_allocations_target_state BEFORE INSERT OR UPDATE ON fin_payment_allocations
+    FOR EACH ROW EXECUTE FUNCTION trg_fin_allocation_target_state();
 -- FI-003 (§12.7): the payment total, locked and summed. Distinct from the on-account
 -- return ceiling below, which bounds one effect against cash still held on account.
 CREATE TRIGGER fin_allocations_bounds    BEFORE INSERT OR UPDATE ON fin_payment_allocations
     FOR EACH ROW EXECUTE FUNCTION trg_fin_allocation_bounds();
 CREATE TRIGGER fin_allocations_onaccount BEFORE INSERT OR UPDATE ON fin_payment_allocations
     FOR EACH ROW EXECUTE FUNCTION trg_fin_on_account_return_bounds();
+
+CREATE TRIGGER trg_fin_allocations_delete_guard
+  BEFORE DELETE ON fin_payment_allocations
+  FOR EACH ROW EXECUTE FUNCTION trg_fin_pa_delete_guard();
+
 -- The third binding of the same function, on the table created HERE. Both sides
 -- of an allocation move are recomputed (§12.4.1). Views are NOT repeated in this
 -- block: fin_v_invoice_balance (V1, §12.4.1), fin_v_ledger_account_balance (V1,
@@ -10476,8 +15134,14 @@ CREATE TRIGGER fin_allocations_onaccount BEFORE INSERT OR UPDATE ON fin_payment_
 -- that owns their contract.
 CREATE TRIGGER fin_allocations_balance_cache AFTER INSERT OR UPDATE OR DELETE ON fin_payment_allocations
     FOR EACH ROW EXECUTE FUNCTION trg_fin_invoice_balance_recompute();
+-- Receipts are created and frozen in the SAME file: trg_fin_receipt_freeze's body names
+-- nothing 0025+ creates, so §30.3.1 permits binding it here, and §30.1's 0024 row lists it.
+-- A previous revision filed it under 0025 instead, which made §30.1 and this block disagree
+-- about which migration owns it — the sort of drift R7′ exists to catch.
+CREATE TRIGGER fin_receipts_freeze       BEFORE INSERT OR UPDATE OR DELETE ON fin_receipts
+    FOR EACH ROW EXECUTE FUNCTION trg_fin_receipt_freeze();
 
--- 0025: refunds, receipts
+-- 0025: refunds
 -- fin_refunds exists only now, so everything below that touches it is bound HERE and
 -- not in 0024. Two bindings for trg_fin_refund_provenance, because its DECLARE block
 -- names the fin_refunds composite type (§13.1): a 0024 CREATE FUNCTION would fail
@@ -10498,8 +15162,6 @@ CREATE CONSTRAINT TRIGGER fin_allocations_refund_ceiling
     AFTER INSERT OR UPDATE ON fin_payment_allocations
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW EXECUTE FUNCTION fn_fin_refund_ceiling();
-CREATE TRIGGER fin_receipts_freeze       BEFORE INSERT OR UPDATE OR DELETE ON fin_receipts
-    FOR EACH ROW EXECUTE FUNCTION trg_fin_receipt_freeze();
 
 -- 0026: ledger
 CREATE CONSTRAINT TRIGGER fin_ledger_balanced
@@ -10555,23 +15217,37 @@ CREATE TRIGGER fin_artifacts_document   BEFORE INSERT OR UPDATE ON fin_document_
     FOR EACH ROW EXECUTE FUNCTION trg_fin_artifact_document_valid();
 ```
 
-**Counting the block, honestly.** It contains **34 `CREATE [CONSTRAINT] TRIGGER` statements** —
-**8** for `0022` over 6 functions (rows 1, 2, 3, 3a, 3b, 3c) and **26** for `0023`–`0029` over the
-remaining 21 finance functions — so **27 functions over 34 statements in the block**. Adding row
-25's single binding, which §19.8.1 places outside the block, gives **28 bound functions and 35
-distinct statements document-wide**.
+**Counting the block, honestly.** It contains **41 `CREATE [CONSTRAINT] TRIGGER` statements** over
+**34 functions**, and the per-migration split is the checkable part:
+
+| Migration | Statements in the block | Functions |
+|---|---|---|
+| `0022` | 8 | 6 (rows 1, 2, 3, 3a, 3b, 3c) |
+| `0023` | **9** | 7 (rows 4, 4a, **4d**, 4b, 4c, 6 ×2, 7 ×2) |
+| `0024` | 13 | 11 (rows 5, 8, 8a, 10, **10a**, 11, 12, **12a**, 13 ×3, 14, 16) |
+| `0025` | 3 | 2 (rows 9 ×2, 15) |
+| `0026` | 4 | 4 (rows 17–20) |
+| `0027` | 3 | 3 (rows 21, 22, 23) |
+| `0028` | 0 | 0 — its one binding is in §19.8.1 |
+| `0029` | 1 | 1 (row 24) |
+| **Block** | **41** | **34** |
+
+Adding row 25's single binding, which §19.8.1 places outside the block, gives **35 bound functions and
+42 distinct statements document-wide**. The rows C-8/C-9/C-6 and the cache-writer remediation added
+(4a–4d), plus rows 10a and 12a, are why the non-`0022` figures moved from 26/21 to 33/28.
 
 The statement count exceeds the function count because five functions are bound to more
 than one table: structure child-freeze → 3, refund provenance → 2, invoice items-freeze → 2, invoice
 item-total → 2, invoice balance-recompute → 3. §35.3.2 states the counting rule. Note also that a
-document-wide text search finds **38** `CREATE TRIGGER` lines rather than 35, because §7.3.1 and
-§8.7.1 each restate one of `0022`'s bindings next to the function it belongs to; those three are
+document-wide text search finds **46** `CREATE TRIGGER` lines rather than **42**, because §7.3.1,
+§8.7.1 **and §9.6.0.1** each restate one of the block's bindings next to the function it belongs to;
+those four are
 restatements, and `R7′` asserts both numbers.
 
 There are **two** helpers, and neither is a row in the inventory table. `trg_fin_reversal_shape_check` is
 a `RETURNS void` function called by
 `trg_fin_reversal_shape` (§13.1) and re-called by `fn_fin_refund_ceiling` (§13.3.1); it is not bound
-to any trigger. `trg_fin_invoice_recalc_balance(uuid, uuid)` (§12.4.1) holds the `balance` arithmetic
+to any trigger. `fin_invoice_reapply_derived_state(uuid, uuid)` (§12.4.1) holds the `balance` arithmetic
 so that `trg_fin_invoice_balance_recompute` contains only the decision about *which* invoice to
 recompute — which is what makes "both sides of a move" a two-line change rather than a duplicated
 expression. `trg_fin_artifact_document_valid`
@@ -10628,20 +15304,78 @@ grant `INSERT` to one role and withhold it from another **on the same table**, s
 Anyone reading that table to configure `0028`'s grant block would have granted every table every
 write privilege. The two blocks are now labelled for what they are.
 
+**The `fin_invoices` row's UPDATE cell is a C-SEC CHANGE, and it is the only cell in this table that
+is not a single word.** Everywhere else, "grant" means *table-level* `GRANT UPDATE`, which is what
+`aclexplode` reports and what the `0028` block contains. On `fin_invoices`, `fin_invoice_items` and
+`fin_invoice_adjustments` it means **a column list**, because those three tables carry cached columns
+and a table-level UPDATE would hand the runtime role the right to write them (§16.5.1). The three
+grants are therefore:
+
+```sql
+-- C-SEC. Column-level, because these tables carry trigger-maintained caches.
+-- The full column lists are in §16.5.1 and are normative; these are the shapes.
+-- SELECT / INSERT / UPDATE are SEPARATE statements on purpose: PostgreSQL applies
+-- a column list only to UPDATE, so the combined form the previous revision used
+-- left INSERT table-level -- i.e. `total` was still insertable.
+GRANT SELECT ON fin_invoices TO school_app_rw;
+GRANT INSERT (tenant_id, student_id, academic_year_id, enrollment_id, structure_id,
+              due_date, void_reason, created_by) ON fin_invoices TO school_app_rw;
+GRANT UPDATE (status, due_date, void_reason) ON fin_invoices TO school_app_rw;
+
+GRANT SELECT ON fin_invoice_items TO school_app_rw;
+GRANT INSERT (tenant_id, invoice_id, structure_id, installment_no, fee_head_id,
+              quantity, unit_amount, tax_amount, description)
+    ON fin_invoice_items TO school_app_rw;
+GRANT UPDATE (description) ON fin_invoice_items TO school_app_rw;
+
+GRANT SELECT ON fin_invoice_adjustments TO school_app_rw;
+GRANT INSERT (tenant_id, invoice_id, adjustment_type, amount, reason, requested_by,
+              reverses_adjustment_id) ON fin_invoice_adjustments TO school_app_rw;
+GRANT UPDATE (status, approved_by, approved_at, rejected_reason)
+    ON fin_invoice_adjustments TO school_app_rw;
+```
+
+**No `DELETE` is granted on any of the three**, so `finance-composite-fk.test.ts`'s existing
+assertion that no `fin_*` table carries a `school_app_rw` `DELETE` entry still holds, and C-13's
+"a draft is voided, never deleted" is now enforced by the ACL as well as by the absence of a route.
+This is the first place in Phase 7 where the ACL shape differs by table, and it is recorded in the
+`R9′` row as **ten `GRANT` statements — six table-level plus four column-level**, so the shape
+assertion compares against the right thing.
+
+The three consequences, stated here because they change rows above and below:
+
+* **`fin_invoice_items.amount` is no longer insertable.** It is computed by
+  `trg_fin_invoice_item_amount` (§9.6.2), so the INSERT column list omits it. A caller that tries to
+  supply it gets `42501` — a permission error naming a column, rather than a silent override of a
+  cache by a trigger that cannot see the caller's intent. This is also why that function is
+  `SECURITY INVOKER`: it assigns `NEW`, so it needs no privilege of its own, and the ACL is what
+  makes its derivation the only possible value.
+* **`fin_invoices.status` is NOT insertable.** It is absent from the INSERT list and `DEFAULT 'draft'`
+  supplies it, so a caller cannot `INSERT` an invoice already marked `issued` and skip the issue
+  route, the number allocation and the line freeze in one statement. The previous revision's combined
+  grant form put `status` in the list, which permitted exactly that.
+* **`fin_invoice_adjustments.status` is insertable but must be `pending`.** It is in the UPDATE list
+  (the approval transition needs it) and absent from the INSERT list (the `DEFAULT 'pending'` does),
+  so a caller cannot create a pre-approved adjustment. The four-eyes CHECK
+  (`fin_invoice_adjustments_no_self_approval_ck`) is then the second line of defence rather than the
+  first, which is the right order: the ACL is the boundary and the CHECK is the reason the boundary
+  is not an accident.
+
 | Table | Enabled | Forced | ACL SELECT | ACL INSERT | ACL UPDATE | ACL DELETE | RLS branch — SELECT sees | RLS branch — INSERT/UPDATE requires |
 |---|---|---|---|---|---|---|---|---|
 | `fin_tenant_settings` | yes | yes | grant | grant | grant | **— revoked** | `finance_staff` | `finance_staff` |
 | `fin_ledger_accounts` | yes | yes | grant | school_migrator only (F3) | revoked | **— revoked** | `finance_staff` | F3, via `app_finance_seeds_ledger_accounts()` |
-| `fin_document_counters` | yes | yes | grant | grant | revoked | **— revoked** | `finance_staff` | `finance_staff` |
+| `fin_document_counters` | yes | yes | grant | grant | revoked | **— revoked** | `finance_staff` | `finance_staff` — but `UPDATE` is revoked table-wide, so only `trg_fin_invoice_number` (F5d) can advance a counter |
 | `fin_fee_heads` | yes | yes | grant | grant | grant | **— revoked** | `finance_staff` | `fees.structures.manage` |
 | `fin_tax_profiles` | yes | yes | grant | grant | grant | **— revoked** | `finance_staff` | `fees.structures.manage` |
 | `fin_fee_structures (+ items, targets, plans)` | yes | yes | grant | grant | grant | **— revoked** | `finance_staff` | `fees.structures.manage`; published rows additionally frozen by trigger |
 | `fin_fee_assignments` | yes | yes | grant | grant | grant | **— revoked** | `finance_staff` | `fees.assignments.manage` |
 | `fin_billing_runs (+ items)` | yes | yes | grant | grant | revoked | **— revoked** | `finance_staff` | `fees.assignments.manage` |
-| `fin_invoices (+ items, adjustments, **challans**)` | yes | yes | grant | grant | grant | **— revoked** | `finance_staff`; guardian (linked students only); student (own only); **`reporting_staff` excluded → 0 rows** | `finance_staff`; guardian writes **nothing** |
+| `fin_invoices (+ items, adjustments, **challans**)` | yes | yes | grant | grant | **column list** (§16.5.1) — no `subtotal`/`total`/`balance`/`invoice_no`/`issued_at`/`voided_at`/`paid_at` | **— revoked** | `finance_staff`; guardian (linked students only); student (own only); **`reporting_staff` excluded → 0 rows** | `finance_staff`; guardian writes **nothing** |
+| `fin_challans` | yes | yes | grant | grant | revoked | **— revoked** | `finance_staff`; guardian (own only) | `fees.invoices.issue` |
 | `fin_payments` | yes | yes | grant | grant | revoked | **— revoked** | `finance_staff` — **no guardian branch at all** | `fees.payments.collect` |
 | `fin_payment_allocations` | yes | yes | grant | grant | revoked | **— revoked** | `finance_staff` | `fees.payments.collect` |
-| `fin_refunds` | yes | yes | grant | grant | revoked | **— revoked** | `finance_staff` | `fees.refunds.request` |
+| `fin_refunds` | yes | yes | grant | grant | revoked | **— revoked** | `finance_staff` | **INSERT:** `fees.refunds.request`. **UPDATE: unreachable** — the ACL revokes it table-wide, and the only writer is **F11/F12** (`0028`, `SECURITY DEFINER`), which bypasses this policy entirely and re-checks `fees.refunds.approve` / `.process` through **F13** in its own body. The `UPDATE` privilege is revoked precisely so that F11/F12 are the *only* possible writers of `status` and of the seven other server-owned columns, `disbursement_reference` among them (§13.2.1, §36.2 row 49) |
 | `fin_receipts` | yes | yes | grant | grant | revoked | **— revoked** | `finance_staff`; guardian via **inverted** reachability (predicate returns a boolean, leaks no amount) | `fees.receipts.reissue`, or payment-issue |
 | `fin_reconciliation_batches (+ matches)` | yes | yes | grant | grant | grant | **— revoked** | `finance_staff` | `fees.reconciliation.manage`; completion additionally frozen by trigger |
 | `fin_ledger_entry_groups` | yes | yes | grant | **— revoked** (F4 only) | **— revoked** | **— revoked** | `finance_staff` | F4 `post_fin_ledger_group()` only |
@@ -10684,10 +15418,46 @@ GRANT SELECT, INSERT, UPDATE ON
     fin_tenant_settings, fin_fee_heads, fin_tax_profiles,
     fin_fee_structures, fin_fee_structure_items, fin_fee_structure_targets,
     fin_fee_installment_plans, fin_fee_assignments,
-    fin_invoices, fin_invoice_items, fin_invoice_adjustments, fin_challans,
     fin_reconciliation_batches, fin_reconciliation_matches,
     auth_mfa_factors, auth_step_up_challenges
 TO school_app_rw;
+
+-- C-SEC: the four invoice/challan tables are NOT in shape 1. They carry
+-- trigger-maintained cached columns (§16.5), so the runtime role gets
+-- column-level INSERT and UPDATE, and NO DELETE at all. The column lists are
+-- normative in §16.5.1 and are repeated verbatim here because §16.5.1 is prose
+-- and this is the migration.
+--
+-- THREE SEPARATE GRANTS PER TABLE, NOT ONE. PostgreSQL applies a column list
+-- only to UPDATE: in `GRANT SELECT, INSERT, UPDATE (a, b) ON t` the SELECT and
+-- the INSERT are TABLE-LEVEL. The previous revision wrote that combined form,
+-- which read as though `total` and `amount` were protected on insert and were
+-- not -- `INSERT INTO fin_invoices (total) VALUES (0)` still succeeded, and
+-- that is the exact hole C-SEC exists to close. Never combine these.
+GRANT SELECT ON fin_invoices TO school_app_rw;
+GRANT INSERT (tenant_id, student_id, academic_year_id, enrollment_id, structure_id,
+              due_date, void_reason, created_by)
+    ON fin_invoices TO school_app_rw;
+GRANT UPDATE (status, due_date, void_reason)
+    ON fin_invoices TO school_app_rw;
+
+GRANT SELECT ON fin_invoice_items TO school_app_rw;
+GRANT INSERT (tenant_id, invoice_id, structure_id, installment_no, fee_head_id,
+              quantity, unit_amount, tax_amount, description)
+    ON fin_invoice_items TO school_app_rw;
+GRANT UPDATE (description) ON fin_invoice_items TO school_app_rw;
+
+GRANT SELECT ON fin_invoice_adjustments TO school_app_rw;
+GRANT INSERT (tenant_id, invoice_id, adjustment_type, amount, reason, requested_by,
+              reverses_adjustment_id)
+    ON fin_invoice_adjustments TO school_app_rw;
+GRANT UPDATE (status, approved_by, approved_at, rejected_reason)
+    ON fin_invoice_adjustments TO school_app_rw;
+
+-- fin_challans is SELECT/INSERT only because no route updates a challan -- its
+-- status is derived by trg_fin_challan_status (0024), which is why that function
+-- is a trigger at all rather than a service call.
+GRANT SELECT, INSERT ON fin_challans TO school_app_rw;
 
 -- Shape 2: SELECT, INSERT. No UPDATE -- these rows are written once and are
 -- append-only or counter-maintained, so no runtime route edits an existing row.
@@ -10721,6 +15491,38 @@ plus a new allocation, never a rewrite (§11.1). Yet `trg_fin_invoice_item_total
 `trg_fin_invoice_items_freeze` and `trg_fin_invoice_balance_recompute` are each bound `AFTER/BEFORE
 UPDATE` to `fin_invoice_items`/`fin_invoice_adjustments`/`fin_payment_allocations`, which the runtime
 role *can* reach for the invoice tables but **cannot** reach for `fin_payment_allocations`.
+
+**C-SEC's column-level grants resolve the half of this that mattered, and the other half is unchanged.**
+Before this revision, `fin_invoices` held table-level `UPDATE`, which meant both that the cached
+columns were writable by the runtime role **and** that the `UPDATE`-bound triggers on
+`fin_invoice_items`/`fin_invoice_adjustments` were reachable. The column lists keep the second
+property and remove the first:
+
+| Trigger branch | Reachable? | Because |
+|---|---|---|
+| `trg_fin_invoice_items_freeze` BEFORE UPDATE on items/adjustments | **yes** | `fin_invoice_items` grants `UPDATE (description)`, `fin_invoice_adjustments` grants `UPDATE (status, approved_by, approved_at, rejected_reason)` — so the freeze fires on a real `description` edit and on a real approval |
+| `trg_fin_invoice_item_amount` BEFORE INSERT OR UPDATE | **yes** | `INSERT` is granted on both children; on UPDATE it fires and recomputes `amount`, which is why it must be able to overwrite a supplied one |
+| `trg_fin_invoice_adjustment_approval` BEFORE UPDATE | **yes** | the four approval columns are exactly what it governs |
+| `trg_fin_invoice_item_total` AFTER UPDATE | **yes** | as above; an approval or a description edit moves `total` |
+| `trg_fin_invoice_balance_recompute` AFTER UPDATE on `fin_payment_allocations` | **no, and now deliberately** | `UPDATE` stays revoked table-wide. §35.4 asserts it, and no route moves an allocation — a correction is a reversal row plus a new allocation. The branch is a guard for `school_migrator`, and the FI-002 property test runs as `school_migrator` for exactly this reason |
+| `trg_fin_invoice_header_guard` BEFORE UPDATE on `fin_invoices` | **yes** | `UPDATE (status, …)` is granted, so issuing and voiding both pass through it |
+| `trg_fin_invoice_freeze_lines` AFTER UPDATE **of `status`** on `fin_invoices` | **yes** | the same `UPDATE (status)` grant; and the `AFTER UPDATE OF status` filter means the trigger fires **less** often than the guard, never more |
+
+The last row is the one worth reading twice: `trg_fin_invoice_header_guard` **refuses** an UPDATE of a
+server-owned column, and it fires on an UPDATE that the caller is authorised to make. That is the
+intended shape — the ACL already prevents the write, and the trigger's clause (2) is defence in depth
+against `school_migrator` and against a future `GRANT` mistake (§9.6.0).
+
+**The guard being `SECURITY INVOKER` (§19.7.4) has an ACL consequence, and it is satisfied.** An
+invoker executes with the caller's privileges, so every relation the guard *reads* must be readable by
+`school_app_rw`. It reads exactly one thing outside the fired-on row: the fee structure and its
+installment plans, to derive `due_date` (C-8) — and §35.4 grants `SELECT` on
+`fin_fee_structures (+ items, targets, plans)`. It reads nothing it cannot have. **This is the one
+place where the demotion from definer to invoker could have broken issuance, and the check that would
+have caught it is stated rather than assumed: a test asserts the guard succeeds on a real
+`INSERT`/`status` transition as `school_app_rw` (C-SEC-M1, C-SEC-M2), which cannot pass if the read is
+unprivileged.** Contrast row 4d, which *is* a definer and therefore needs no such grant — it writes
+`frozen_at` and reads nothing.
 
 This is the same class of defect as P1-07 pointed the other way. There, a revoked `INSERT` made a
 `SECURITY DEFINER` posting function unexecutable. Here, a revoked `UPDATE` makes a trigger branch
@@ -10799,9 +15601,9 @@ is a `55000` conflict, not a silent no-op.
 
 | From | To | Guard | Enforced by |
 |---|---|---|---|
-| `draft` | `issued` | `invoice_no` allocated, `issued_at` set, `total > 0` | trigger + service |
+| `draft` | `issued` | `invoice_no` allocated, `issued_at` set, `total > 0`, **every line's `frozen_at` stamped** | `trg_fin_invoice_number` (row 4) + `trg_fin_invoice_freeze_lines` (row 4d), both on the same `UPDATE`; service |
 | `draft` | *(deleted)* | no items with amounts | `DELETE` policy |
-| `issued` | `partially_paid` | `0 < balance < total` | `trg_fin_invoice_item_total` / allocation |
+| `issued` | `partially_paid` | `0 < balance < total` | `trg_fin_invoice_balance_recompute` (row 13) via `fin_invoice_reapply_derived_state` |
 | `issued` | `paid` | `balance = 0` | same |
 | `issued` | `void` | `balance = 0` only | `trg_fin_invoice_void` |
 | `partially_paid` | `paid` | `balance = 0` | same |
@@ -10810,19 +15612,44 @@ is a `55000` conflict, not a silent no-op.
 | `paid` | `void` | `balance = 0` only | `trg_fin_invoice_void` |
 | `void` | **any** | **forbidden — terminal** | trigger raises `55000` |
 
+**The lifecycle matrix above and the maintenance matrix below are different axes, and conflating them is
+how the previous revision's P0 was designed.** `status` here is the *document lifecycle*:
+`draft → issued → paid/void`, each edge with its own economic precondition. The **payment states**
+(`partially_paid`, `paid`) are derived from `balance` by 0024's helper and are **not** lifecycle
+transitions a caller requests; §12.4.1 owns them. Two consequences follow from keeping the axes apart,
+and both are load-bearing:
+
+| Path | Which trigger | Stamps `frozen_at`? | Why |
+|---|---|---|---|
+| `draft → issued` (lifecycle) | `trg_fin_invoice_freeze_lines`, `WHEN` matches | **yes** | the invoice is becoming immutable |
+| `issued → partially_paid` / `→ paid` (payment state) | `trg_fin_invoice_balance_recompute` → helper | **no** — `OLD.status` is `issued`, so the `WHEN` is false | the invoice was already stamped at issue; re-stamping would be a no-op at best |
+| any write touching a **draft** invoice's `balance` | helper, which **early-returns** for `draft` and issues no `UPDATE` | **no** | a draft is not settled and its lines stay editable — C-SEC-M6b pins this |
+| `→ void` | `trg_fin_invoice_void` | **no**, and it *unsets* `voided_at`-adjacent state | voiding never follows the `draft → non-draft` edge |
+
+The second column is why `trg_fin_invoice_freeze_lines` is bound `AFTER UPDATE OF status` **with** a
+`WHEN` clause and not merely `AFTER UPDATE`: `fin_invoice_reapply_derived_state`'s `UPDATE` names
+`status`, so the column filter alone would fire the stamp on a draft invoice the balance writer merely
+**touched** — freezing the lines of an invoice that is still editable. The helper's early return is
+what stops that `UPDATE` from being issued at all, and the `WHEN` clause is what stops the stamp if
+that early return is ever dropped: the two are independent, neither subsumes the other, and C-SEC-M6b
+asserts both (the `balance`/`status` pair, then the `draft → void` discard) precisely so that deleting
+one on the belief the other covers it fails.
+
 **Challans** (`fin_challans.status`; CHECK + `trg_fin_challan_status`)
 
-| From | To | Guard |
-|---|---|---|
-| *(insert)* | `issued` | invoice issued, `balance > 0` |
-| `issued` | `partially_paid` | `0 < balance < total` |
-| `issued` | `paid` | `balance = 0` |
-| `issued`/`partially_paid` | `expired` | `issued_at > due_on` **and** `balance > 0` |
-| `expired` | `partially_paid`/`paid` | **not terminal** — an expired challan is still payable |
-| `partially_paid` | `paid` | `balance = 0` |
-| `paid` | `partially_paid` | refund reopened a balance |
-| any | `void` | **only** because the owning invoice is `void`; inherits the invoice's date and reason |
-| `void` | **any** | **forbidden — terminal** |
+**This matrix was already correct before §10.2.1 and the schema did not implement it.** Every row below `*(insert)*` describes a transition that **nothing could cause**: row 8 fires only when a challan row is written, so at the 0023 checkpoint — where the applied migration binds no trigger to `fin_challans` at all — the only row of this table that was reachable was the first. The matrix is the specification; §10.2.1 adds the missing edge into it, and the table's **Guard** column now has a mechanism for each row rather than an intention:
+
+| From | To | Guard | Producer |
+|---|---|---|---|
+| *(insert)* | `issued` | invoice issued, `balance > 0` | row 8, on the challan's own write |
+| `issued` | `partially_paid` | `0 < balance < total` | **row 8a**, via the invoice's `status` |
+| `issued` | `paid` | `balance = 0` | **row 8a** |
+| `issued`/`partially_paid` | `expired` | `issued_at > due_on` **and** `balance > 0` | **row 8a** |
+| `expired` | `paid` | **not terminal** — an expired challan is still payable, but **overdue dominates**: a partial payment leaves it `expired` and only `balance = 0` moves it to `paid` | **row 8a** |
+| `partially_paid` | `paid` | `balance = 0` | **row 8a** |
+| `paid` | `partially_paid`/`expired` | refund reopened a balance (`expired` when past due) | **row 8a** — which is what makes §10.1's "needs no challan-specific transition" true rather than aspirational |
+| any | `void` | **only** because the owning invoice is `void`; inherits the invoice's date and reason | **row 8a**, bound to the same column the void transition writes |
+| `void` | **any** | **forbidden — terminal** | row 8's terminality arm, reachable only because row 8a made `void` reachable at all |
 
 **Reconciliation batches** (`fin_reconciliation_batches.status`)
 
@@ -10870,17 +15697,20 @@ stamp raised **23505**. The edge and the `UPDATE` that backs it are now both spe
 
 ### 35.7 Refund lifecycle
 
-**The state diagram and the prose disagreed in the previous revision** — the diagram included
-`approved → rejected` while the sentence beneath it said that transition is forbidden. The prose is
-correct: a rejection is a decision about an *unapproved request*, so rejecting an already-approved
-refund has no meaning. The table is the authority; the diagram must match it.
+**The state diagram and the prose disagreed, and the fix is now actually in the diagram.** Both
+revisions of §13.2's `text` block drew `approved → rejected` while the prose beneath it said the
+transition was forbidden — the first correction fixed this paragraph and left the picture alone, which
+is §36.2 row 22's measurement error repeated: the row was closed against the *existence* of a
+disagreement rather than against the *absence* of the edge. §13.2's diagram now has three edges. The
+prose has always been correct: a rejection is a decision about an *unapproved request*, so rejecting an
+already-approved refund has no meaning. The table is the authority; the diagram matches it.
 
 | # | From | To | Actor | Guard | Ledger | Reversal rows |
 |---|---|---|---|---|---|---|
 | 1 | — | `requested` | `fees.refunds.request` | `refundable(p) > 0`; `Σ proposed = amount`; allocation list non-empty | none | none |
 | 2 | `requested` | `approved` | `fees.refunds.approve` **+ step-up** | `attempts` OK; binding amount unchanged | `Dr 1200 / Cr 2200` — relieve the receivable, recognise the refund payable. **No cash leg**: cash has not left | **created here**, one per proposed allocation |
 | 3 | `requested` | `rejected` | `fees.refunds.approve` | reason required | none | none |
-| 4 | `approved` | `processed` | `fees.refunds.process` **+ step-up** | disbursement reference present | `Dr 2200 / Cr 1000/1100` — extinguish the payable against cash or bank. **This** is the leg where cash leaves | unchanged |
+| 4 | `approved` | `processed` | `fees.refunds.process` **+ step-up** | **`disbursement_reference` present** — enforced by F12 and, independently, by the `processed` arm of `fin_refunds_decision_ck` | `Dr 2200 / Cr 1000/1100` — extinguish the payable against cash or bank. **This** is the leg where cash leaves | unchanged |
 | 5 | `rejected` | **any** | — | **forbidden — terminal** | — | — |
 | 6 | `processed` | **any** | — | **forbidden — terminal** | — | — |
 | 7 | `approved` | `rejected` | — | **forbidden** — this is the transition the old diagram wrongly allowed | — | — |
@@ -10915,31 +15745,75 @@ the single most common finance-schema error, so the differences are tabled rathe
 | Bound by | `payment_applied(p)` = `Σ` invoice-bound allocations | `payment_unallocated(p)` = `amount − applied` |
 | Permission | `fees.refunds.request` → `.approve` → `.process` (3 steps + step-up MFA) | `fees.payments.reverse` (1 step, no step-up) |
 | Allocation effect | `reverse` with `refund_id` set | **`on_account_return`**, `invoice_id IS NULL`, `refund_id IS NULL` |
-| Ledger | `Dr 1300 / Cr <refund source>` then `Dr <payable> / Cr 1300` | **`Dr 1300 / Cr 1000`** — a single posting, no separate disbursement step |
+| Ledger | **`Dr 1200 / Cr 2200` on approve, then `Dr 2200 / Cr 1000/1100` on process** — two steps, because an approved-but-undisbursed refund is a real liability (§35.7 rows 2 and 4, §15.1 `REFUND — two-step`) | **`Dr 1300 / Cr 1000/1100`** — a single posting, no separate disbursement step, because the cash was never applied to a charge |
 | Refund table | row in `fin_refunds` | **no row at all** |
 | Can be reversed again | no | no — `trg_fin_on_account_return_bounds` blocks it |
 
 ```text
-  on-account credit:  apply  (invoice_id IS NULL, amount > 0)   → Dr 1000 / Cr <liability>
+  on-account credit:  apply  (invoice_id IS NULL, amount > 0)   → Dr 1300 / Cr 1300
   on-account return:  on_account_return (invoice_id IS NULL,
-                        amount < 0)                              → Dr 1300 / Cr 1000
-  applied cash:       apply  (invoice_id NOT NULL, amount > 0)  → Dr 1300 / Cr 4000
-  refund of applied:  reverse (refund_id NOT NULL, amount < 0)  → Dr 1300 / Cr 4000
-  correction:         reverse (of an `apply`, no refund_id)      → Dr 1300 / Cr 1000
+                        amount < 0)                              → Dr 1300 / Cr 1000/1100
+  applied cash:       apply  (invoice_id NOT NULL, amount > 0)  → Dr 1300 / Cr 1200
+  refund of applied:  reverse (refund_id NOT NULL, amount < 0)  → Dr 1200 / Cr 2200   (on approve)
+                                                                          then Dr 2200 / Cr 1000/1100 (on process)
+  correction:         reverse (of an `apply`, no refund_id)      → Dr 1200 / Cr 1300
 ```
 
+**Every one of these five lines is §15.1's, quoted rather than re-derived, because this block
+previously disagreed with §15.1 on four of the five and the disagreements were not cosmetic.**
+
+| Line | What it said before | What §15.1 requires | Why the old one was wrong |
+|---|---|---|---|
+| on-account credit | `Dr 1000 / Cr <liability>` | `Dr 1300 / Cr 1300` | §15.1 states this is a deliberate **same-account** posting: cash moved *inside* `1300`, which reports to zero and is distinguishable only by its `memo`. `Dr 1000` debits an **asset** for a movement that never left the school's cash account — the opposite side of the entry. |
+| on-account return | `Dr 1300 / Cr 1000` | `Dr 1300 / Cr 1000/1100` | Direction correct; account range incomplete. `1000` and `1100` are the cash/bank pair everywhere else in §15.1, and a school paying from bank must be able to post the bank leg. |
+| applied cash | `Dr 1300 / Cr 4000` | `Dr 1300 / Cr 1200` | **Double-recognition of income.** `4000 Fee Income` is credited exactly once, at `ISSUE INVOICE`. Applying already-received cash to an invoice relieves the **receivable**; it recognises nothing. `Cr 4000` here would book the same fee a second time. |
+| refund of applied | `Dr 1300 / Cr 4000` | `Dr 1200 / Cr 2200` on approve, then `Dr 2200 / Cr 1000/1100` on process | **The same double-recognition, plus the collapse §15.1 exists to prevent.** `1300` is on-account cash held at the school; crediting it on approval credits cash that **has not left**, and leaves the `1200` receivable standing after the charge behind it was reversed. Collapsing two steps into one also destroys the intermediate `2200` balance — "approved but not yet disbursed" — which §35.7 calls a real reportable figure. §35.7 already identified these exact legs as superseded and declared itself the authority on them; this block then restated them. |
+| correction | `Dr 1300 / Cr 1000` | `Dr 1200 / Cr 1300` | The money returns to the family's **on-account** balance; it did not leave the school, so no cash leg is involved at all. `Dr 1300 / Cr 1000` would move money **out** of the school for an operation whose entire purpose is to reverse an inward movement. |
+
+**The rule the five lines share, stated once so a sixth cannot be written wrong: an allocation row
+never touches `4000`.** `fin_payment_allocations` moves cash between the school's **own** accounts and
+relieves the receivable; it is not a revenue event. Revenue arises at exactly one place — the invoice
+issue group (`Dr 1200 / Cr 4000`) — and the void group that reverses it. Every other posting in §15.1
+is a reclassification between `1000`/`1100` (cash and bank), `1200` (receivable), `1300` (unapplied
+cash held on a family's behalf) and `2200` (refund payable). A reader who finds a `Cr 4000` anywhere
+below §15.1's `ISSUE INVOICE` block has found an error.
+
 **`payment_unallocated` is a single derived quantity and is stated once, in one place, so no two
-sections can define it differently.** It is the sum of every allocation row with `invoice_id IS NULL`
-— that is, on-account credits **plus** on-account returns **plus** corrections of on-account credits:
+sections can define it differently.** The statement is in §12.2, and it is a **residual**, not a row
+sum:
 
 ```
 payment_unallocated(p) = p.amount − payment_applied(p)
-                       = Σ allocations where invoice_id IS NULL   (all signs)
+                       + payment_on_account_returned(p)     -- <= 0
+                       + payment_credit_reversed(p)         -- <= 0
+                       >= 0
 ```
 
-The first form is what a user reads; the second is what makes the invariant checkable. They are equal
-because `Σ all allocations − Σ invoice-bound allocations = Σ invoice-NULL allocations`, and the
-`Σ all allocations = p.amount` invariant is itself what `trg_fin_allocation_bounds` maintains.
+**This passage previously asserted a second, contradictory form — "= Σ allocations where
+`invoice_id IS NULL` (all signs)" — and defended it by claiming the `Σ all allocations = p.amount`
+invariant is what `trg_fin_allocation_bounds` maintains. Both halves of that defence are wrong, and
+the mistake is the §12.2 false-equality defect restated 9,000 lines away, which is precisely the
+outcome §12.4's "one implementation, one home" rule exists to prevent:**
+
+1. **The trigger maintains an inequality, not an equality.** `trg_fin_allocation_bounds` raises when
+   `v_committed + NEW.amount > v_payment_amount` — it enforces `Σ non-refund invoice-bound allocations
+   <= p.amount`. It never asserts `Σ all allocations = p.amount`, and it cannot: §11.3 makes a
+   partially-allocated payment legal, so the two sides differ by exactly the unallocated remainder.
+   Citing an inequality-enforcing trigger as the maintainer of a false equality is the defect in one
+   sentence.
+2. **The two forms diverge on the common case.** For 100,000 received and 60,000 applied, the first
+   form gives 40,000 and the second gives 0 — the remainder has no row. A reader checking the
+   "invariant" against a partially-allocated payment would conclude the school holds no cash for the
+   family, which is the exact over-payment-prompt failure §12.2 was written to prevent, reintroduced
+   through a cross-reference rather than through the formula.
+
+**And `Σ where invoice_id IS NULL` is not even self-consistent as written**, because it sweeps in two
+different levels: the on-account *credits*, which are a family-level movement and are deliberately
+**not** part of any payment's own cash (§12.2), and the on-account *returns*, which are. Mixing them
+produces a per-payment figure that is neither the payment's own cash nor the family's balance.
+
+The checkable form is therefore the residual plus its two `<= 0` correction terms, and the bound that
+actually protects anyone is the inequality row 12 enforces.
 
 ### 35.9 Family ownership and receipt reachability
 
@@ -10956,7 +15830,7 @@ uses. The derivation: *a family is the set of students linked, through non-delet
 | Guardian → the **payment** row | **nobody** | no guardian branch on `fin_payments` | — |
 | Guardian → an allocation row | **nobody** | no guardian branch | — |
 | Guardian → another family's anything | **nobody** | `sg.deleted_at IS NULL` **inside the function query**, not inherited from policy (§19.2) | — |
-| Soft-unlinked guardian (`deleted_at` set) | **nobody** | same predicate — the regression test for the `attendance.ts:136-158` defect | — |
+| Soft-unlinked guardian (`deleted_at` set) | **nobody** | same predicate — the regression test for the `apps/api/src/routes/school/attendance.ts:136-158` defect | — |
 | Student → own documents | self | `students.user_id = app_ctx_user()` | yes — their own |
 | Payer attribution | the **payer** guardian, not every guardian of the student | `fin_payments.payer_guardian_id` / `fin_receipts.payer_guardian_id`, both FK-backed | no |
 | Cashier → receipts | any | `fees.receipts.read` | yes |
@@ -10975,7 +15849,14 @@ payment touches, so a payer who is not a guardian at all is rejected at the data
 
 ```text
 DESIGN VERDICT:
-DESIGN-GO
+DESIGN-READY-FOR-0024
+(0021, 0022 and 0023 are APPLIED and immutable; 0023 is the
+authoritative checkpoint at HEAD (d12b904), and 0024 is the
+next migration. "Design-ready" is the whole of the claim: the
+document no longer specifies anything a PostgreSQL parser, a
+policy evaluator or an aclexplode query would contradict. It is
+NOT a claim that the 0024 SQL has been executed -- no server was
+available, and none was used. Gated on OD-15.)
 
 P0: 0
 P1: 0
@@ -10996,6 +15877,16 @@ decision, a cross-phase concern outside Phase 7's remit, or a deferral this
 document states rather than hides. The previous revision printed "P2: 7" while
 carrying a 12-item register, which is the same class of error as §35.3's
 trigger count — a summary number that no longer describes what it summarises.
+
+VERDICT HISTORY — WHY THIS BLOCK IS REWRITTEN. The previous revision of
+this block read "DESIGN-READY FOR 0023_fin_invoices.sql" with "0023 is the
+next migration" and P0: 0 / P1: 0. That was true when written and became
+false the moment 0023 was applied: 0023 is no longer the next migration, it is
+the baseline this document's 0024 rows are written against. A verdict block
+naming a migration that has already shipped is worse than no verdict block,
+because a reader takes "DESIGN-READY FOR 0023" as a claim about the code in
+front of them. The block above is restated against 0024 and the audit that
+produced it is §37; §36.2's register is left as the history it is.
 ```
 
 ---
@@ -11020,47 +15911,75 @@ must also pass:
 
 | Check | Rule | Result |
 |---|---|---|
-| R1 | **fence parity and no stranded headings.** The line count is deliberately NOT asserted: it is self-referential, so recording it means every correction to this document, including the one that adds it, invalidates it — and a check that must be edited to stay true is a check that will be left stale | **220 markers / 110 pairs / 0 unclosed / 0 headings inside a fence.** Parity is the assertion; the per-block scan for a heading inside a fence is what locates a violation. **This check earned its keep**: the child-freeze function in §7.3.1 had a closing fence and **no opening one**, so the count was odd (219) and every fence from there to the end of the document paired one line off — roughly 700 lines of prose and SQL inside one unterminated code block — while this row still read as a passed check |
-| R2 | every bound function is defined; every inventory row is bound; inventory is sequential from 1 | 28 inventory rows (1–25 plus 3a–3c, no gap), 39 defined functions, 28 bound, 0 orphans, 0 bound-without-row |
+| R1 | **fence parity and no stranded headings.** The line count is deliberately NOT asserted: it is self-referential, so recording it means every correction to this document, including the one that adds it, invalidates it — and a check that must be edited to stay true is a check that will be left stale | **246 markers / 123 pairs / 0 unclosed / 0 headings inside a fence**, the per-block scan being the `awk` toggle rather than the parity count. Parity is the assertion; the per-block scan for a heading inside a fence is what locates a violation. **This check earned its keep**: the child-freeze function in §7.3.1 had a closing fence and **no opening one**, so the count was odd (219) and every fence from there to the end of the document paired one line off — roughly 700 lines of prose and SQL inside one unterminated code block — while this row still read as a passed check. **The previous revision's `238 / 119` was stale by eight markers**, four of them added by the F11/F12/F13/F14 bodies and four by §36.6's fenced SQL-free prose being re-fenced with it; the figure is restated here rather than left, because a check quoted as evidence with the wrong number in it is row 22's error in a different costume |
+| R2 | every bound function is defined; every inventory row is bound; inventory is sequential from 1 | 35 inventory rows (1–25 plus 3a–3c plus 4a–4d plus 8a plus 10a plus 12a, no gap), **35 bound, 35 distinct `EXECUTE FUNCTION` targets, 0 orphans, 0 bound-without-row.** `trg_fin_assignment_validate` (row 3a) has **no `CREATE FUNCTION` in this document** and must not: it is created by the **applied** `0022` migration, whose body is immutable (§8.6). R2 therefore resolves definitions against `0022`'s DDL for rows 3a–3c and against this document for the rest — an assertion that demanded a definition here for row 3a would be demanding a second, conflicting definition of a shipped function. **This document defines 50 functions: 34 are bound to a trigger here and 16 are bound to none.** The 16 unbound are the **2 deliberate F5h trigger-system helpers** (§35.3.1 — `trg_fin_reversal_shape_check`, called by `trg_fin_reversal_shape`'s own peers, and `fin_invoice_reapply_derived_state`, the shared re-apply routine several definers call), the **1 unbound `SECURITY DEFINER` support function** added by `0025` forward remediation (§13.1.1, D2C — `fin_lock_payment_amount`, `RETURNS numeric(19,4)`, no runtime `EXECUTE` grant, deliberately **not** counted as a third F5h helper), plus **13 application-layer/RPC functions** (`app_finance_*`, `post_fin_ledger_group`, `postRefund*`, `app_*mfa*`, `app_*step_up*`) that are called by code, not by a trigger. **Scope note, so that "34" and "35" are never read as the same population:** the **34** figure is *document-bound* — functions this document defines and binds; the **35** in this row's inventory tally is *total bound*, which additionally counts row 3a `trg_fin_assignment_validate`, an **applied `0022`** function resolved against `0022`'s immutable DDL and therefore not defined here. **"document-bound" always means 34; "total bound" always means 35** (§19.7.2 F5, §35.3.2). **This figure is only reproducible if SQL comments are stripped before counting**: §35.3.2's `-- 0025:` block contains the prose fragment “a 0024 CREATE FUNCTION would fail with 42704” inside a `--` comment, and a naive regex over the raw text counts it as an extra definition. **That is why a raw-text count of this document reports 51: the artefact is the comment, and the real total is 50.** The historical note below is retained deliberately: **49 was the correct count at the time it was written, and 50 is now the correct count** — the two are not in conflict, because the count moved by exactly one real function, `fin_lock_payment_amount`. **This new 50 is a genuine addition and must never be confused with the comment-stripping artefact** the same paragraph warns about; a count that moves because the document moved is a count doing its job, and a count that did **not** move would have been the finding. **The count was 45 before that earlier pass and it moved by exactly the four functions it added**: `postRefundApproval`, `postRefundProcess`, `app_finance_actor_has_permission` and `app_finance_emit_event`. |
 | R3 | no fenced block contains a literal `...` | 0 occurrences |
-| R3′ | no duplicate section numbers | 203 numbered headings, 0 duplicates |
-| R4′ | every `§n.m` cross-reference resolves to a real heading in this document | **169 distinct references against 203 numbered headings, 0 unresolved.** The one non-resolving reference is `§5.4`, cited 4 times, and it is a citation to **RFC 4226** (HMAC one-time passwords, which §5.4 discusses) rather than to a section here — the same token as a section number by coincidence, and it is excluded by hand rather than by a heuristic that would also hide a genuine dangling `§5.4` |
+| R3′ | no duplicate section numbers | **234** numbered headings (`^#+ [0-9]+(\.[0-9]+)*[ .]`), 0 duplicates. **The previous `229` was stale and its measurement was never recorded**, which is why it drifted: three sub-headings added by later passes and §36.6 moved it by four without any row noticing, because a row that reports a count without reporting the *pattern* that produced it cannot be re-run by a reader and can only be re-asserted by the author. The pattern is now part of the cell, and the row is falsifiable without trusting the author |
+| R4′ | every `§n.m` cross-reference resolves to a real heading in this document | **201 distinct references against 234 numbered headings, 198 resolving, 3 non-resolving and all three explained.** Three references do not resolve to a heading in this document, and none is a defect. `§5.4` is a citation to **RFC 4226** (HMAC one-time passwords) rather than to a section here — the same token as a section number by coincidence — and it is excluded by hand rather than by a heuristic that would also hide a genuine dangling `§5.4`; it appears 4 times, two of them in this row. The third is the new `§12.2.1`, which survives only as a quotation of the defect this revision fixed, on the same footing as `§8.7.2`. `§8.7.2` appears **three times**, inside §36.1's own narrative recording that it *was* a dangling reference and has been corrected: it is a quotation of the defect, not a live citation. Every live `§n.m` in the document body resolves. **This revision found and fixed the second such live reference**: `§8.7.2`, cited once in §9.5's FK comment, named a subsection that does not exist — §8.7 has exactly one subsection, §8.7.1 — and the comment now points there. A dangling normative cross-reference in a `CREATE TABLE` comment is the kind of thing a reviewer skims, and it was wrong. **This pass found a third and fixed it**: §10.2.1 cited `§12.2.1` twice while the payment discussion lives in §12.2, so the reference now reads `§12.2`. The one surviving `§12.2.1` is inside this row, where it is a **quotation of the defect**, exactly as `§8.7.2` is — so it is excluded by the same argument and not by a heuristic |
 | R5′ | every `T-FIN-n` cited anywhere in the document has a row in §29's table, and the table's ids are contiguous with no duplicate | 31 rows / 31 distinct ids, contiguous `T-FIN-01`–`T-FIN-31`, 0 dangling citations, 0 duplicates. **11 rows carry an inbound citation** from elsewhere in the document (`T-FIN-08`, `16`, `18`, `20`, `21`, `22`, `26`, `27`, `28`, `30`, `31`) and the other 20 are **table-only**, which is correct rather than a gap: §29 is a threat **catalogue**, so a row does not need a cross-reference to exist, and inventing one would be a worse fix than leaving it |
-| R6′ | every `CREATE TABLE fin_*`/`auth_*` **created by Phase 7** is followed, before any other statement, by `REVOKE ALL ON <table> FROM school_app_rw` | **29 of 29**, 0 strays. "Immediately" is measured from the table's **closing** `);`, not from its opening line, and the following line must be the matching `REVOKE` with blank lines and comments skipped — otherwise a comment block between the two would hide a missing revoke. The file contains **31** `CREATE TABLE` statements; the other **2** are the quoted `0001` baseline DDL for `users` and `auth_sessions`, which Phase 7 does not own and does not revoke |
-| R7′ | every `CREATE [CONSTRAINT] TRIGGER` (non-comment) names a defined function | **38** statements document-wide, **0 orphans**; **35 distinct** — the §35.3.2 block (34) plus §19.8.1 (1) |
+| R6′ | every `CREATE TABLE fin_*`/`auth_*` **created by Phase 7** is followed, before any other statement, by `REVOKE ALL ON <table> FROM school_app_rw` | **29 of 29**, 0 strays. The scan sees 31 `CREATE TABLE` statements naming a `fin_*`/`auth_*` relation and excludes **2** by hand: `auth_sessions`, quoted in §19.8.1 from applied `0001_init.sql` to prove a `CREATE TABLE` comment wrong, is created by 0001 and not by this phase; and a second `auth_step_up_challenges` line, which appears only inside §30.3.2's `text` ordering sketch of `0028` and is not runnable DDL. **The previous revision excluded only the first and therefore reported `30` statements against `29` tables — the same one-statement gap in the same direction as §36.2 row 44's five missing constraints.** "Immediately" is measured from the table's **closing** `);`, not from its opening line, and the following line must be the matching `REVOKE` with blank lines and comments skipped — otherwise a comment block between the two would hide a missing revoke. The file contains **32** `CREATE TABLE` statements; the other **1** is the quoted `0001` baseline DDL for `users`, which Phase 7 does not own and does not revoke |
+| R7′ | every `CREATE [CONSTRAINT] TRIGGER` (non-comment) names a defined function | **46** statement lines document-wide, **0 orphans**; **42 distinct** — the §35.3.2 block (41) plus §19.8.1 (1). The 4-line gap is the §7.3.1/§8.7.1/**§9.6.0.1** restatements of bindings already in the block, which name tables and functions the block already names. Both numbers are asserted, because a text search that counted restatements would over-report and one that counted only the block would under-report §19.8.1 |
 | R8′ | every view is defined exactly once | 7 views, 7 distinct |
-| R9′ | the `0028` grant block covers every table exactly once, and its privilege shape matches the §35.4 ACL table cell for cell | **6 `GRANT` statements, 29 of 29 tables, 0 double-grants, 0 shape mismatches, 0 `DELETE`**. The block is parsed as statements rather than as four shapes, because it is **six** statements: the four shapes plus two single-table grants stated separately for their reasons (`fin_billing_runs`/`fin_billing_run_items` are shape 2 with the "a re-run is a NEW run" rationale, and `fin_ledger_accounts` is `SELECT` only because seeding is F3's). By privilege: 16 `SELECT,INSERT,UPDATE`, 7 `SELECT,INSERT`, 6 `SELECT`. §35.4's table is compared **after expanding its 21 grouped rows** into the 29 real tables — `fin_fee_structures (+ items, targets, plans)` is 4 tables, `fin_invoices (+ items, adjustments, **challans**)` is 4, `fin_billing_runs (+ items)` and `fin_reconciliation_batches (+ matches)` are 2 each — because a row-by-row comparison of 21 against 29 would be meaningless, and a cell saying `school_migrator only` is read as **not granted to the runtime role**, which is what the block encodes |
+| R9′ | the `0028` grant block covers every table exactly once, and its privilege shape matches the §35.4 ACL table cell for cell | **17 `GRANT` statements, 29 of 29 tables + 7 of 7 views, 0 double-grants, 0 shape mismatches, 0 `DELETE`**. The block is parsed as statements rather than as four shapes, because it is **seventeen** statements. **1** grants `SELECT` on the **7 views**, **1** is table-level `SELECT, INSERT, UPDATE` over 12 relations, **3** column-level `INSERT` and **3** column-level `UPDATE` plus **3** `SELECT` on the three cached tables, **3** are `SELECT, INSERT` (challans, the counters/payments/refunds/receipts group, the billing-runs group), and **3** are `SELECT`-only over the remaining 6 relations (2 ledger, 3 `0029`, `fin_ledger_accounts`). `1 + 1 + 3 + 3 + 3 + 3 + 3 = 17` statements over `7 + 12 + 3 + 1 + 5 + 2 + 3 + 2 + 1 = 36` relations = 29 tables + 7 views. **Two arithmetic errors in one sentence is why this row existed**: the previous revision's `19` counted a shape list that no longer matched the block, and its correction to `16` dropped the view grant while simultaneously writing `12 + 3×3 + 8 + 6 = 29`, which is 35, not 29. A count that does not sum to the number beside it is not a count. The nine C-SEC column-level statements are three each for `fin_invoices`, `fin_invoice_items` and `fin_invoice_adjustments` (§16.5.1). Those three tables were in shape 1 in the previous revision and are the actual hole: a table-level `UPDATE` on `fin_invoices` grants every column, so the runtime role could write `subtotal`/`total`/`balance` directly and the recompute trigger was decorative. `fin_billing_runs`/`fin_billing_run_items` are `SELECT, INSERT` because a re-run is a NEW run (§8.4), and `fin_ledger_accounts` is `SELECT` only because seeding is F3's; both are stated as separate statements so the rationale sits next to the grant. §35.4's table is compared **after expanding its 22 rows** — four of which are grouped — into the 29 real tables, because `fin_fee_structures (+ items, targets, plans)` is 4, `fin_invoices (+ items, adjustments, **challans**)` is 4, and `fin_billing_runs (+ items)` and `fin_reconciliation_batches (+ matches)` are 2 each; `22 + 8 = 30` row-slots collapse to **29** relations because `fin_challans` appears in the `fin_invoices` group's label *and* has its own row. A cell saying `school_migrator only` is read as **not granted to the runtime role**, which is what the block encodes. **The column lists themselves are asserted against §16.5.1 verbatim**, since a shape match alone would pass a grant of `UPDATE (total)` — and the assertion covers the `INSERT` lists too, because a combined `GRANT SELECT, INSERT, UPDATE (<cols>)` has the right shape and still leaves `INSERT` table-level |
 | R10′ | file encoding is valid UTF-8 with no replacement characters | 0 occurrences of U+FFFD |
-| R11′ | the §35.2 FK map equals the FK edges in the DDL (`CREATE TABLE` **and** `ALTER TABLE … ADD CONSTRAINT`), both directions; every single-column row targets `tenants`/`users`/`auth_sessions`; every composite row targets a `(tenant_id, id)` or `(tenant_id, code)` anchor | 62 edges / 62 rows, 12 single-column rows / 3 targets, 0 orphans — **carried from the §35.2 map, not re-parsed this pass**; see the caveat below. The 62nd edge is `0022`'s `fin_fee_structures.published_by → users(id)` (D7), added to the map and to the count with the rest. **A reader using this map as an allowlist must split `0022`'s rows by migration, because 24 of the 62 rows name a `0022` table and only 23 of those are `0022`'s.** The 24th is `fin_billing_run_items.invoice_id → fin_invoices`, which is the **forward reference `0023` adds** and the reason assertion 10.3 requires `fin_invoices` to be *absent* at the end of `0022`. `0022` itself creates 23 FKs, and that is the number its own inventory assertion pins |
+| R11′ | **§35.2 is the authoritative allowlist and is compared against the catalog *at the applied checkpoint*, in both directions**: every live FK has exactly one map row (**F1**), every current-checkpoint map row is realised (**F2**), no row appears twice (**F3**), and every single-column row targets `tenants`/`users`/`auth_sessions` | **Re-derived by parsing `0021`–`0023` this pass, not carried.** Design total **67 rows**; per owning migration `0021` 6 / `0022` 23 / `0023` **15** / `0024` 7 / `0025` 2 / `0026` 5 / `0027` 3 / `0028` 4 / `0029` 2. At the `0023` checkpoint: `live_current_edges = 44`, `expected_current_edges = 44`, **F1 = 0, F2 = 0, F3 = 0, orphans = 0**. Single-column rows **14** of 67 — `tenants` 6, `users` 7, `auth_sessions` 1 — of which **9** are at the `0023` checkpoint (`tenants` 4, `users` 5). Composite rows at the checkpoint: **35**. **The previous revision's `62 / 62 / 12 / 3` was wrong in three numbers at once, and the reason is that the map was compared as a flat list**: `62` was the number of *rows*, not of edges; `0023`'s **14** FKs were **9** of them, because the five constraints it adds (`fin_invoices_created_by_fk`, `fin_invoice_adjustments_requester_fk`, `fin_invoice_adjustments_reverses_fk`, `fin_invoice_items_structure_fk`, `fin_invoice_items_plan_fk`) were **absent from the map while present in `0023`'s actual DDL** — present in this document's own §9.5 blocks too, so the defect was a table that had drifted from the DDL it was supposed to inventory. Its `12 single-column rows / 3 targets` was arithmetically self-consistent (6 + 5 + 1) about a set three rows short of the phase. **No map row names a table that exists at `0023` but is owned by a later migration.** The previous revision carried exactly one — `fin_billing_run_items (tenant_id, invoice_id) → fin_invoices`, owner `0024` — and it is re-owned to **`0023`** in this revision with `ON DELETE RESTRICT` (C-3, C-4, §9.5), so the deferred-row count is **0**. Rows naming a live source table: **44** = the 44 checkpoint rows, with no deferred row on top. The one remaining deliberate forward reference is `fin_payment_allocations → fin_refunds` (`0025`, P0-01), whose source table `0024` creates — a `0024`→`0025` reference, entirely outside this checkpoint |
 | R12′ | the §20.3 catalog, the §20.4 matrix and the §21.3 route table agree **as sets, in both directions**: same permission set, no invented permission, no permission without a row, and **every catalogued permission gates at least one route** | **25 = 25 = 25, and the two-way check is 0 / 0 / 0 / 0**: `catalog − matrix` = 0, `matrix − catalog` = 0, `catalog − routes` = 0, `routes − catalog` = 0. The catalog is read from §20.3's `text` block (leading token, two-or-more-space separated from its description) rather than from backticks, because that block is the authoritative list; the matrix is read from §20.4's first column, skipping the bolded group headers (`**Configuration**`, `**Billing**`, …) and the `*(challan read)*` carry-row, which names two permissions in a non-row cell and would otherwise be counted twice; and §21.3's `…read` / `…manage` shorthand is expanded against its enclosing resource |
-| R13′ | every `path:NN` / `path:NN–MM` citation resolves to an existing repository file with an in-bounds line, and every `NNNN:NN–MM` migration line citation resolves to exactly one existing migration file and an in-bounds line | **Reproduced this pass: 69 `path:line` citations across 21 files, 0 missing files, 0 out-of-bounds, 0 ambiguous basenames; 30 `NNNN:line` citations across 8 migration files (`0001` `0002` `0005` `0008` `0014` `0015` `0018` `0020`), 0 ambiguous prefixes, 0 out-of-bounds.** Three citations failed and were fixed. One pointed past the end of a 92-line file **and** named the wrong document for the `app.allow_immutable_update` claim, which is at line 220 of the *database* design doc, not the finance one. Three bare `exams.ts:` citations were **ambiguous across three real files** (`apps/api/src/routes/school/`, `apps/worker/`, `apps/web/lib/`) with the quoted content belonging to two *different* files — the CAS at `:793-804` is the worker's, the `readableStudentIds()` call at `:316` is the API's. Each is now fully qualified. Note that the two bad forms are written here without backticks on purpose: backticking them would make this row fail its own check. Existence and bounds only; see the caveat below on content claims |
-| R14′ | §19.7.2's table rows and §19.7.3's narratives are both `F1`…`F10` with no gap (plus `F5h`, which documents the two unbound helpers and is deliberately not a number in that series), and **every function granted `EXECUTE` has a row and a `CREATE FUNCTION`** | 11 table rows / 10 numbered `F` series + `F5h`, 10 narratives, 8 granted functions, 0 granted-but-undefined. **F3 now also has a body** — it was the one narrative with no `CREATE FUNCTION` (§36.2 row 35) |
-| R15′ | each function's narrative signature equals its `CREATE FUNCTION` parameter list, **names and order** | **Reproduced this pass: 9/9 exact on names and order** (F1–F4, F6–F10). Three rows differ in *type rendering* only, and are not defects: F4's narrative spells `p_tenant_id, p_source_type` without types where the DDL says `uuid, text`; F8 and F9 say `numeric` where the DDL says `numeric(19,4)`. A name-and-order comparison passes all three |
-| R16′ | every composite FK in §35.2 targets `(tenant_id, id)` or `(tenant_id, code)` | 50 composite edges checked, 0 unanchored — **carried from the §35.2 map, not re-parsed this pass**; see the caveat below |
-| R17′ | the §33 table is contiguous (`OD-01`…`OD-16`, no gap), its stated count matches its rows, and **every `OD-n` cited anywhere in the document has a table row** | 16 rows, stated count 16, 0 cited-but-unregistered. `MOD-97` (the IBAN checksum in §26.3) is **not** an `OD-n` and is excluded from the comparison |
+| R13′ | every `path:NN` / `path:NN–MM` citation resolves to an existing repository file with an in-bounds line, and every `NNNN:NN–MM` migration line citation resolves to exactly one existing migration file and an in-bounds line | **Reproduced this pass, counting every `path:NN` / `path:NN–NN` token outside this row (this row's own quotations are excluded as self-reference): **143** occurrences, of which **141 resolve to exactly one existing repository file** across **38** files with 0 out-of-bounds lines and 0 ambiguous basenames; the remaining **2** are the non-resolving forms §36.2 row 32 exists to record (`plugins/authorization.ts:68-70`, `idempotency/src/index.ts:9-12`), quoted in that row as the defect and therefore exempt here — quoting them is the fix, not a failure of it. 30 `NNNN:line` citations across 8 migration files (`0001` `0002` `0005` `0008` `0014` `0015` `0018` `0020`), 0 ambiguous prefixes, 0 out-of-bounds.** The token set is **50** distinct path tokens and every one resolves to exactly one file: a bare basename is counted as ambiguous only when it matches **more than one** file, so `worker.ts` and `schema.ts` are resolved by their full paths and are not false positives. **The previous revision's `69 across 21 files` was not a rounding difference — it was a narrower scan, and a check that reports a smaller number than the document contains is the more dangerous kind of stale, because it reads as a pass.** Two shapes were being missed: **72** citations were dropped because the scan accepted only a single line number and not a `NN–MM` range, and the token set was de-duplicated by basename before resolution, which collapsed distinct files into one and made the file count look smaller than it was. Three citations failed and were fixed. One pointed past the end of a 92-line file **and** named the wrong document for the `app.allow_immutable_update` claim, which is at line 220 of the *database* design doc, not the finance one. Three bare `exams.ts:` citations were **ambiguous across three real files** (`apps/api/src/routes/school/`, `apps/worker/`, `apps/web/lib/`) with the quoted content belonging to two *different* files — the CAS at `:793-804` is the worker's, the `readableStudentIds()` call at `:316` is the API's. Each is now fully qualified, and **this pass found seven more of the same kind**: five bare `attendance.ts:136-158` citations and two bare `permissions.ts:105-107` / `:353-355` citations, all three basenames matching more than one real file, all seven now fully qualified. **That is twelve ambiguous-by-basename citations in total, and every one was resolvable only by reading the quoted content** — the line numbers exist in all the candidate files. Note that the two bad forms are written here without backticks on purpose: backticking them would make this row fail its own check. Existence and bounds only; see the caveat below on content claims |
+| R14′ | §19.7.2's table rows and §19.7.3's narratives are both `F1`…`F14` with no gap (plus the two unnumbered `F5d`/`F5h` rows and the two view rows `V1`/`V2`), and §19.7.3 carries the three sub-narratives `F5a`/`F5b`/`F5c` beneath `F5`, and **every function granted `EXECUTE` has a row and a `CREATE FUNCTION`** | **18** §19.7.2 rows = 16 `F`-series rows (`F1`…`F14` plus `F5d` and `F5h`) + 2 view rows (`V1`, `V2`); **17** §19.7.3 narratives = `F1`…`F14` plus `F5a`/`F5b`/`F5c`; **12** granted functions across **13** in-document `GRANT EXECUTE` statements, 0 granted-but-undefined. One function is granted twice — `post_fin_ledger_group`, once in §30.3.3's ordering sketch and once in the `0028` block — so the *function* count is 12 while the *statement* count is 13, and a check written against statements alone would report a double-grant that does not exist. A fourteenth textual hit is **excluded by hand**: §36.2 row 26 quotes the same `GRANT EXECUTE ON FUNCTION post_fin_ledger_group` inside the defect it is describing, and counting a quotation is how the previous revision's fence check came to quote a wrong number as evidence. **All three figures in this cell moved by this pass** — the closed set went `14 → 18` rows and `15 → 17` narratives with F13/F14, and the grant count went `12 → 13` statements — and the row was **wrong on all three before**, because it read `16`/`15`/`13` from its own prose rather than from either list. **F3 now also has a body** — it was the one narrative with no `CREATE FUNCTION` (§36.2 row 35). **This row's `F1`…`F10` range is what §36.2 row 52's check failed to be**: F11/F12 called `app_finance_actor_has_permission` and `app_finance_emit_event`, neither of which had a row or a body, and R14′ passed anyway because it compared **table rows to narratives** and both omitted the same two names. A set-equality check cannot see a name that is absent from both sides; the row now also asserts that every identifier *called* inside an `F` body is itself a contracted name, which is what catches an undefined callee |
+| R15′ | each function's narrative signature equals its `CREATE FUNCTION` parameter list, **names and order** | **Reproduced this pass: 13/13 exact on names and order** (F1–F4, F6–F14). Five rows differ in *type rendering* only, and are not defects: F4's narrative spells `p_tenant_id, p_source_type` without types where the DDL says `uuid, text`; F8 and F9 say `numeric` where the DDL says `numeric(19,4)`; F12's §19.7.2 row writes `p_disbursement_reference text DEFAULT NULL` across a line break where the DDL keeps it on one. A name-and-order comparison passes all five. **The count was 9 before this pass and 9 was itself the defect**: F11 and F12 did not exist when it was taken, and the check had no rule requiring a new `F` function to be added to it |
+| R16′ | every composite FK in §35.2 targets a **tenant-prefixed** anchor — `(tenant_id, id)`, `(tenant_id, code)`, or §6.3 **R5**'s single enumerated natural key — with `tenant_id` the **leading** column of the target list in every case, and the referencing column list starting with `tenant_id` | **53 composite rows** re-derived this pass: **51** → `(tenant_id, id)`, **1** → `(tenant_id, code)` (`fin_ledger_entries.account_code → fin_ledger_accounts.code`, `fin_ledger_accounts_code_uq`), **1** → R5's natural key (`fin_invoice_items (tenant_id, structure_id, installment_no) → fin_fee_installment_plans (tenant_id, structure_id, installment_no)`, `fin_installment_plans_uq`), **0 unanchored**. At the `0023` checkpoint: **34** → `(tenant_id, id)`, **1** → R5, **0** → `(tenant_id, code)` — 35 composite rows, and the `(tenant_id, id)` figure rose from 33 because `fin_billing_run_items → fin_invoices` was re-owned to `0023` (C-3, C-4). **The previous revision's "50 composite edges, 0 unanchored" was true only of the map and false of the DDL**, because it had no R5 to accept: the rule said every composite targets `(tenant_id, id)` or `(tenant_id, code)`, `0023`'s `fin_invoice_items_plan_fk` targets neither, and the audit reported 0 unanchored rather than noticing that the anchor class was missing from the rule. **This row and R11′ are one defect seen twice** — a rule whose set of permitted shapes is smaller than the DDL it governs — so the fix is in the rule (§6.3 R5), not in the checker |
+| R17′ | the §33 table is contiguous (`OD-01`…`OD-16`, no gap), its stated count matches its rows, and **every `OD-n` cited anywhere in the document has a table row, unless it is withdrawn** | 16 rows, stated count 16, 0 cited-but-unregistered. `MOD-97` (the IBAN checksum in §26.3) is **not** an `OD-n` and is excluded from the comparison. **`OD-17` is the one withdrawn decision** — it was cited three revisions running as "§33 open decision OD-17" while having no row here, which is row 30's defect class reproduced by the revision that wrote row 30 (§36.2 row 52). It is now cited only in the three places that record its withdrawal, and the comparison exempts a withdrawn decision on the stated ground that a decision with no alternatives left is not a decision. **The exemption is the check's weak point and is stated as such**: an implementer could withdraw a decision by writing the word "withdrawn", so the exemption requires the citing passage to also carry the resolution |
 | R18′ | the per-table RLS posture is **stated, not implied**: which tables have explicit policy DDL in this document, which are deferred to `0028`'s RLS block, and whether the deferred ones are reachable before it runs | **5 tables carry explicit `CREATE POLICY` DDL here** — `fin_payments` (3), `fin_invoices` (1), `fin_receipts` (2), `auth_mfa_factors` (3), `auth_step_up_challenges` (1) = **10 policies on 5 tables**. Only **2** of those 5 also carry an explicit `ALTER TABLE … ENABLE` + `FORCE` pair in this document (`auth_mfa_factors`, `auth_step_up_challenges`); the 3 finance tables' `ENABLE`/`FORCE` appear only as the `fin_x` template inside §30.5 step 6's `0028` block, so **2 `ENABLE` + 2 `FORCE` are written out literally**, and the earlier claim of "5 `ENABLE` and 4 `FORCE`" counted policies as if each carried its own pair. The other **24** Phase 7 tables (29 − 5) have **no** `ENABLE`, no `FORCE`, and no policy in this document. **This is a deferral, not an omission, and it is safe** — §30.5 step 6 places the per-table `ALTER TABLE … ENABLE` / `FORCE` / `CREATE POLICY` block in `0028`, and `0028` is the **last** file, after the grant block's ordering is fixed. Until it runs, every one of those 25 tables carries an immediately-following `REVOKE ALL … FROM school_app_rw` (R6′, 29 of 29), so the runtime role holds no privilege on them at all and `42501` is raised before RLS is ever consulted. The failure mode is **fail-closed**, which is the property §30.5 argues for, and the 5 policy-bearing tables are in the same position until `0028` runs for the 3 finance tables' missing `ENABLE`/`FORCE` pair. The `auth_sessions` non-match is the quoted `0001` DDL, not a Phase 7 table |
-| R19′ | §23.1's new-event list and §24.1's disposition table are the **same set**, every event has exactly one disposition, and the §24.2 registry arithmetic follows from the disposition counts | **18 = 18, set difference 0 in both directions, 0 duplicates, 0 unclassified**; **13 HANDLED / 5 INTENTIONALLY_NOOP**, so `93 + 18 = 111`, `9 + 13 = 22`, `84 + 5 = 89`, and `22 + 89 = 111`. The 93 / 9 / 84 baseline is `apps/worker/src/worker-event-registry.test.ts:75,91,100`, pinned by the repository. The comparison is list-vs-table rather than prose-vs-table, and it deliberately **excludes** `fee.reconciliation.exception`, which appears 7 times in this document as the *deleted* phantom of §23.1's note and in `T-FIN-28`'s history — a naive `fee.*` token sweep finds 19 and would report a phantom as live |
+| R19′ | §23.1's new-event list and §24.1's disposition table are the **same set**, every event has exactly one disposition, and the §24.2 registry arithmetic follows from the disposition counts | **19 = 19, set difference 0 in both directions, 0 duplicates, 0 unclassified**; **13 HANDLED / 6 INTENTIONALLY_NOOP**, so `93 + 19 = 112`, `9 + 13 = 22`, `84 + 6 = 90`, and `22 + 90 = 112`. The 93 / 9 / 84 baseline is `apps/worker/src/worker-event-registry.test.ts:75,91,100`, pinned by the repository. The comparison is list-vs-table rather than prose-vs-table, and it deliberately **excludes** `fee.reconciliation.exception`, which appears 7 times in this document as the *deleted* phantom of §23.1's note and in `T-FIN-28`'s history — a naive `fee.*` token sweep finds 20 and would report a phantom as live. **The nineteenth event is `fee.refund.rejected`**, added by this pass because §35.7 row 3 requires the transition and F12's reject branch emits it; it is a `NOOP` for the reason §24.1 gives, and it is the reason the disposition table was worth re-deriving rather than re-reading — the previous revision's `13 / 5` and `111 / 22 / 89` were self-consistent, which is exactly why adding a row that the design already required did not look like a change |
 | R20′ | §35.1's "Creates (complete)" column is complete **in both directions**: every Phase 7 table the DDL creates is named in the row of the migration that creates it, and every table named there is one the DDL actually creates | **9 migration rows (`0021`–`0029`), 29 of 29 tables placed, 0 unplaced, 0 named-but-absent.** The 7 views are excluded from the table check and their placement is stated in prose (V1 in `0024`/`0026`, V2 in `0026`). One name in a creates cell is **not** a relation: `fin_recompute` in `0026`'s cell is the nightly reconciler **job**, and register row 22 is the row that reconciled that name against the reserved `trg_fin_*` prefix — so the check reads it as a process reference rather than silently accepting it as a table |
 | R21′ | §5.2's chart, `fin_ledger_accounts_code_ck`'s literal list, and F3's seed `VALUES` are **the same nine accounts in the same order with the same class, normal side and `is_contra`** | **9 = 9 = 9, row-for-row identical on (code, account_class, normal_side, is_contra), same order, 0 differences.** These are three independent renderings of one fixed chart — a prose table, a DDL `CHECK`, and a plpgsql `VALUES` list — and §36.2 row 34 existed because all three had previously drifted apart. The assertion is deliberately row-for-row rather than set-based: a seed that inserted the same nine accounts in a different order would still be *correct* but would no longer be the list §5.2 promises, and a checker that only compared sets would have passed the defect that was actually found |
+| R22′ | **the header guard is `SECURITY INVOKER` and issues no statement of its own** — the two halves of FI-020's boundary, asserted separately because either alone is satisfiable by a broken design | **`prosecdef = false`** for `trg_fin_invoice_header_guard`, and **0 `UPDATE`/`INSERT`/`DELETE` statements** in its body (A13). A definer guard with no statement would pass the first check and fail the second; an invoker guard *with* a statement would pass the second and fail the first. The previous revision passed neither — it was a definer whose only reason for being one was a clause that should never have existed — and no check in the table would have noticed, because every existing row checked that a **definer** is correctly classified and none checked that an **invoker** is |
+| R23′ | **the maintenance context is closed and transaction-local**: exactly two scope values exist, and every `set_config` call on it passes `is_local = true` | **2 values** (`invoice_line_totals`, `invoice_balance_state`) covering **4 columns**; **every** `set_config('fin.invoice_maintenance_scope', …)` in the document passes `true` as its third argument, 0 exceptions (A14). Asserted over the **source text** rather than a runtime value on purpose: a producer that sets the scope inside a branch the test never reaches would pass a runtime check, and an unset scope is a refusal by design, so there is no runtime state in which "the GUC is correct" is observable for more than one statement. **The producer count is per migration, not per phase**: `0023` declares **one** producer (`trg_fin_invoice_item_total`) and `0024` the second, which is why A14 states the `0023` figure and A16 asserts the asymmetry from both sides. The previous revision asserted "exactly two producers" *of `0023`'s functions*, a claim about `0024` made by `0023` — the identical shape of error as A8, one row above it |
+| R24′ | **row 4d is bound `AFTER UPDATE OF status` with a `WHEN` clause, and `AFTER`/`WHEN` are load-bearing** | the binding matches `AFTER UPDATE OF status ON fin_invoices FOR EACH ROW WHEN (OLD.status = 'draft' AND NEW.status <> 'draft' AND NEW.status <> 'void')` verbatim (A15), and **C-SEC-M6b** pins the consequence — `0024`'s balance writer names `status`, so the column filter alone fires the stamp on a draft invoice; only the `WHEN` keeps it off that path. `BEFORE` is excluded by control `ctl_csec_b`, which must reproduce the clobber, and by C-SEC-M2, which must fail under the same revert. **The structural half, C-SEC-M6a, is the `0023`-expressible witness** and the behavioural half is `0024`'s; before this revision a single row asserted both and so was executable at neither |
+| R25′ | **§35.3's inventory, §35.3.2's binding block and §30.1's per-migration column agree, and the totals are the sum of the parts** | **35 inventory rows**, sequential with no gap (`1`–`25` + `3a`–`3c` + `4a`–`4d` + `8a` + `10a` + `12a`) and equal to the bound-function set, **0 orphans, 0 bound-without-row**; **42 distinct** statements over those rows, from a block of **41** plus §19.8.1's one; and the per-migration walk **`0021` 0 / `0022` 8 / `0023` 9 / `0024` 13 / `0025` 3 / `0026` 4 / `0027` 3 / `0028` 1 / `0029` 1 = 42** over **`0 / 6 / 7 / 11 / 2 / 4 / 3 / 1 / 1` = 35** functions, of which **`0 / 0 / 3 / 2 / 0 / 0 / 0 / 0 / 0` = 5** are `SECURITY DEFINER`. Every bound function appears at least once, and the five multi-table rows account for the whole **7**-statement excess. §36.2 row 43 exists because the previous version of this paragraph asserted three different totals, none derivable from the table beside it; **this revision replaces its `0023`–`0029` band with the per-migration split** because a band cannot supply the `3 definers at 0023` figure C-SEC-M4a asserts, and its `8 / 9 / 10 / 3 / 4 / 3 / 0 / 1 = 38` walk omitted `0029` while claiming a `0021`-relative total. **This revision's own walk is `0 / 8 / 9 / 13 / 3 / 4 / 3 / 1 / 1 = 42`**, the `0024` step of which carries row 8a's single binding (P0-07, §10.2.1) plus this pass's rows 10a and 12a |
+| **R26′** | **§35.2's derivation rule is machine-executable and reproduces**: `expected_current_edges` is computed from the owning-migration column alone, and F1/F2/F3/F4 all evaluate to their stated values at the `0023` checkpoint (A17) | **Reproduced statically this pass.** `expected_current_edges` is built by `{ row : row.owning_migration ∈ A }` with no other input — the rule needs no prose, no ordering assumption and no knowledge of which tables exist — and at `A = {0021, 0022, 0023}` it yields **44**, against **44** parsed from `pg_constraint`'s DDL text. F4's first clause holds for all **67** rows (owners drawn from `0021`–`0029`, no other value); F4's second clause identifies exactly **1** deliberate forward reference — `fin_payment_allocations → fin_refunds` (`0025`) — and **0** undeclared ones. `fin_billing_run_items → fin_invoices` was the second such row until this revision re-owned it to `0023` (C-3, C-4), which satisfies F4 by resolution rather than by exemption. **This row exists because R11′ measures the outcome and this row measures that the measurement can be re-run**: a count that is right is not the same property as a count that is *derivable*, and the second is the one that catches the next migration |
+| **R27′** | **every mandatory maintenance control has exactly one owning migration and exactly one executable test boundary**, and no control's `0023` share names a relation created after `0023` (A18) | **7 controls, 10 executable assertions, 7 assertable at `0023`, 3 at `0024`, 0 skipped.** Per control: M1 `0023` · M2 `0023` · M3 `0024` (M3a `0023` / M3b `0024`) · M4 `0024` (M4a `0023` / M4b `0024`) · M5 `0023` · M6 `0024` (M6a `0023` / M6b `0024`) · M7 `0023`. Cross-referenced against §30.3.1's ban: the **3** controls that previously named `fin_payment_allocations`, row 13 or `fin_invoice_reapply_derived_state` from a `0023` suite are now owned by `0024`, and **0** of the `0023` share names a `0024` relation. **The previous revision asserted "seven mandatory tests" of `0023`, three of which could not execute there**, and no row in this table would have reported it, because no row compared a control's subject against the migration that creates it |
+| **R28′** | **the whole-phase security composition holds**: every mandatory control executes at or after the migration owning its producer, and the final `0029` assertion set is the union of the per-migration halves with no control counted twice | **10 assertions, 10 scheduled, 0 deferred, 0 duplicated.** Union check: `0023`'s 7 (`M1, M2, M3a, M4a, M5, M6a, M7`) ∪ `0024`'s 3 (`M3b, M4b, M6b`) = **10**, disjoint, and projecting each half back onto its control gives all **7** controls exactly once. This is the row that distinguishes *scheduled* from *dropped*, and it is why the design does not accept the tempting alternative of reporting "5 controls at `0023`" and leaving the other two in a footnote: **a control that exists only in a footnote is a control that does not exist**, which is the failure mode §36.2 rows 29 and 34 and §34.1's P0 table all record the previous revisions producing |
+| **R29′** | **every `FI-n` cited anywhere in the document has a row in §17's catalogue, and the catalogue's ids are contiguous with no duplicate** — the §36.1 counterpart of `R5′`, which does the same for `T-FIN-n` | **23 ids, 23 rows, contiguous `FI-001`–`FI-022` plus `FI-004a`, 0 dangling citations, 0 duplicates, and §28's coverage row now reads `FI-001…FI-022`.** **This row exists because it caught a real defect in this pass**: `FI-021` and `FI-022` were each cited in the body — FI-021 at §12.3 as "the regression test" for the P0-07 on-account formula, FI-022 at §19.8.4 and again in §19.6’s textual/behavioural split — while §17 stopped at `FI-020` and §28 claimed coverage of `FI-001…FI-020`. **Both rows now exist.** The gap in the check table is the finding: §36.1 verified the *threat* catalogue’s ids for five revisions and never verified the *invariant* catalogue’s, so two invariants — one guarding a P0-class money bug, one guarding the step-up/outbox pairing — carried numbers and enforcement claims without a definition behind either. **An unenforced invariant with a number attached reads as enforced**, which is why this row is about citation *targets* and not merely about contiguity |
+| **R30′** | **§26.3's worked-example table is re-derived from the algorithm §26.3 states, not read off the table** — each row's verdict is recomputed from steps 1–3 (normalise, then 24-char + `PK` format, then ISO 13616 MOD-97), and rows that normalise to the same string must receive the same verdict | **9 rows, 9 verdicts reproduced: **4 accepted, 5 rejected** (rows 2–5 accept; rows 1, 6, 7, 8 and 9 reject).** The three `SCBL0000001123456702` spellings (`PK36SCBL…`, `PK36 SCBL 0000 0011 2345 6702`, `pk36scbl…`) all normalise to one string and all receive **accepted**, with MOD-97 = 1; `PK13HABB…` is accepted at a different bank code; `PK00SCBL…` and `PK00AAAA…` are rejected at MOD-97 ≈ 62 and ≈ 40; the 22- and 25-character rows are rejected on length; `DE89370400440532013000` is rejected at step 2 despite its own MOD-97 = 1. **This row exists because it found a P1 that the prose around it concealed**: the previous table listed `PK36SCBL0000001123456702` as “rejected — MOD-97 ≠ 1” and the next row as “accepted — identical to the unspaced form”, **i.e. the same string accepted and rejected two lines apart**, in a section whose next paragraph pins those exact cases in a unit test. It also carried a 22-character row labelled “23 chars” and a `PK10` check-digit claim that is false for every real Pakistani account. **§25, §26 and §27 had no check row at all before this one** — the three sections whose claims are most easily *computed* rather than argued were the three with no mechanical coverage |
+| **R31′** | **the phase's executable gates are reachable in CI, by name rather than by accident — and the figures §36.4 prints are labelled with the conditions under which they hold.** Asserted against the repository, not the document: every `src/security/finance-*.test.ts` file is gated on `RUN_RUNTIME_SECURITY_TESTS`, **and** named in a CI workflow | **REPRODUCED, and it FAILS the `by name` half.** Gating: 3/3 finance suites reference `RUN_RUNTIME_SECURITY_TESTS` (2 each); `packages/db/src/security/` holds **19** test files. Naming: the only workflow, `.github/workflows/phase6-security.yml`, contains **0** occurrences of `finance`. Coverage is nevertheless real — the aggregate step “Phase 3-4 DB security suites” runs `vitest run src/security` over all 19 — so the result is **incidental, under a Phase 6 name**. §36.4's runtime line now states its own conditions |
+| **R32′** | **every caller of a contract function uses that function's declared interface** — for F4, that means every `p_lines` literal in the document uses F4's own leg keys (`account_code`, `direction`, `amount`, optional `student_id`/`invoice_id`) and nothing else | **Reproduced this pass, and it FAILED on first run: 4 legs across 2 callers used `'account'`, and F4 reads `->> 'account_code'`** (§36.2 row 50, a P0 — both refund transitions would have raised `55000` after their reversal rows were already written). Now **4 of 4 legs correct**, 0 foreign keys, and the key set is read from F4's body rather than from a list written here, so a change to F4's reader changes the expectation. **This row is the counterpart of R14′ and neither implies the other**: R14′ asks whether a function is *defined and granted*, and F11/F12 passed it while calling a leg shape F4 does not accept; R32′ asks whether a caller and its callee agree on the *shape of the data*, which is a different question about the same two bodies. The document had **29** rows and none of them compared a caller's arguments to a callee's reader, which is why two freshly written functions compiled cleanly, granted cleanly, and refused every call |
+| **R33′** | **every `CHECK` constraint's arms are pairwise disjoint on the discriminating column and its comment describes what the constraint actually enforces; and every column named in a lifecycle guard in §35.7 exists on the table the guard is written against** | **Reproduced this pass, and it FAILED twice on first run.** `fin_refunds_decision_ck` collapsed `approved` and `processed` into one arm (`status IN ('approved','processed')`), so `processed_by`, `processed_at` and a disbursement reference were never required — while the comment directly above it claimed the processor was recorded (§36.2 row 53, a P0); and §35.7 row 4's guard "disbursement reference present" named a column that did not exist, so the guard was unactionable. Now **four disjoint arms** over `status`, and **every** column named in §35.7's guards resolves on `fin_refunds`. The second half is the load-bearing half: an arm-disjointness check cannot find a guard that names a nonexistent column, and a guard that names a nonexistent column is quotable by a reviewer as a control and enforceable by no code — the same defect class as rows 35, 49 and 52, and the reason this row is two assertions rather than one. **This row also found the `approved → rejected` edge**: §35.7 row 7 forbids it, §13.2's diagram drew it, and the diagram was wrong in a way the tables could not express (row 54, a P0) |
+**No row in this table is now carried**, and the two sentences that used to say otherwise were the
+report's weakest claim: they told a reader that the referential-integrity checks were unverified while
+the paragraph above them quoted the FK totals as if settled. Both rows are now reproduced by parsing the
+owning migrations, and the totals they assert are derived rather than declared.
 
-The one reference that does not resolve to a heading in this document is `§5.4`, which is a
-citation to RFC 4226 rather than to a section here. The checks marked `′` were added because each caught a **real** defect in this
-revision (rows 12–19, 23, 24, 25, 31–35 of §36.2). A document that is internally contradictory is not a design,
-and each of those defects would otherwise have shipped as a migration that fails to apply or a test
-that asserts nothing. The rows are ordered `R1`, `R2`, `R3`, `R3′`…`R19′` — the three unprimed ones first
+The rows are ordered `R1`, `R2`, `R3`, `R3′`…`R33′` — the three unprimed ones first
 because they predate the others, then every primed row in numeric order, so that a reader scanning for
-"which check is `R14`" does not have to know the table's history.
+"which check is `R14′`" does not have to know the table's history. **Thirty-one rows are reproduced
+figures and three (`R26′`–`R28′`) are structural assertions whose figures this pass derives**;
+every `R` cell ends with a count that a reader can recompute from the document without trusting the
+author.
 
-**Two rows are carried rather than re-measured, and each says so in its own cell.** `R11′` and `R16′`
-are FK-edge counts. `R15′` was **carried by earlier passes and has now been reproduced** — 9/9
-signatures exact on parameter names and order — so it is no longer part of this caveat.
+**The FK rows have left the carried set, and this is the substantive change to §36.1 in this pass.**
+`R11′` and `R16′` previously said *carried, not re-parsed* and the paragraph below them conceded that
+the document did not know whether its own FK count was 61, 31 or 51 — **three figures it had itself
+produced, none reconcilable with another.** That was not a caveat, it was an admission that the one
+check covering the phase's referential integrity was unverified. Both rows are now **reproduced by
+parsing `0021`–`0023`**, and the result is that the document's FK map was **missing five live
+constraints**. The parse counted `CREATE TABLE`-inline and `ALTER TABLE … ADD CONSTRAINT` FK clauses
+per file — `0021` 6, `0022` 23, `0023` **14** = **43** — matched them against §35.2 keyed on
+`(source table, source columns, target table, target columns)`, and reported F1 = 5, F2 = 0, F3 = 0.
+The five were added, `0023`'s count in the map corrected to 14, and the map given an owning migration so
+the comparison is scoped rather than total (**R26′**). The parse is **static, over the migration text**:
+it is not a catalog read and no PostgreSQL instance was involved, so it establishes what the DDL
+*specifies*, which is the same limit every other row in this table carries and no more.
 
-The FK rows are **not** in the reproduced set: re-parsing `FOREIGN KEY` clauses out of fenced DDL is
-a different and considerably more fragile job than counting functions, and the pass run against this
-revision did not reproduce the 61-edge figure — it found 31 `CREATE TABLE` edges and 51 composite
-clauses, which do not match, so one of the two parsers is wrong and the document does not know which.
-Quoting 61 as freshly verified would be a false claim even though 61 is the figure §35.2's map was
-built from.
+**Those figures have since moved again, and this revision is the reason.** Giving the map an owning
+migration made the ownership question *askable*, and asking it found `fin_billing_run_items (tenant_id,
+invoice_id) → fin_invoices` owned by `0024` — contradicted by §9.5's DDL, §8.7's column comment, §30.2's
+intra-file order and §30.3.1's composite-type rule. It is re-owned to **`0023`** with `ON DELETE
+RESTRICT` (C-3, C-4), which moves `0023` 14 → **15**, `0024` 8 → **7**, the checkpoint 43 → **44**, and
+the future set 24 → **23**. **R11′, R16′ and R26′ are re-derived above at the adjudicated figures**, and
+`0023`'s migration now adds that constraint for real, so the DDL parse and the catalog agree at **44 / 44**
+rather than only in principle. The general lesson is the same one row 44 records: a count written beside a
+table is not a count.
 
 The reproduced rows moved when the content moved, which is the point of running them: `R2` went
 24 → 25 inventory rows and 34 → 35 defined functions, then **35 → 36** when §36.2 row 35 gave F3 the
@@ -11068,13 +15987,17 @@ The reproduced rows moved when the content moved, which is the point of running 
 functions; `R7′` went 31 → 32 statements because the
 reconciliation batch trigger was split (§14.1.1), then **32 → 35** for the same reason `R2` moved —
 `0022` contributes 8 — which also exposed that a document-wide text search finds 38, because
-§7.3.1 and §8.7.1 each restate one of `0022`'s bindings beside its function; `R14′` went 10 → 11
-table rows with the addition of `F5h`; `R19′` and `R20′` were added to check the **event list against the disposition table** and the
+§7.3.1 and §8.7.1 each restate one of `0022`'s bindings beside its function; `R14′` went 10 → 11 table rows
+with the addition of `F5h`, then **11 → 14** with `F5d`, `V1` and `V2` — a move this pass had to make
+*twice*, because its row claimed `F1`…`F10` plus `F5h` when §19.7.2 in fact also carries `F5d` and two
+view rows, so a reader following the row would have looked for eleven rows and found fourteen; `R19′` and `R20′` were added to check the **event list against the disposition table** and the
 **§35.1 "Creates" column against the DDL**, because those are the two places where prose and DDL
 disagree silently — the §24.2 arithmetic is what the worker test will assert, and §35.1 claims its
 column is "complete"; and `R1` moved with every edit.
-The two carried rows must be reproduced mechanically **before `0021` is written** — the honest status is
-"asserted by the map, not re-verified", not "verified".
+**The caveat that used to close this paragraph is deleted rather than softened.** It asked for
+the carried rows to be reproduced “before `0021` is written”, which is advice to a later pass and not an
+assertion about this one; the rows are reproduced now, and the only thing standing between this
+document and a migration is the absence of a server.
 
 ### 36.2 Defects found and corrected
 
@@ -11106,14 +16029,14 @@ unreachable. **P2** = documentation or carry-forward.
 | 19 | P1 | Two cross-references pointed at sections that **do not exist**: **8.8** (the billing-run freeze, which is 8.4) and **19.7.4** (the view rows, which are 19.7.2). Separately, `§30.3.2` was used for two different sections | Four dangling references and a duplicate heading number, and a reader following that citation in a DDL comment lands nowhere | Repointed to §8.4 and §19.7.2; §30.3.1–§30.3.3 renumbered and every cross-reference disambiguated by context | §8.4, §19.7.2, §30.3 |
 | 20 | P2 | §35.2's FK map listed `fin_billing_run_items.fee_head_id` and omitted `enrollment_id`/`assignment_id` | The map claimed to be the complete composite-FK inventory while describing a table that no longer existed in that shape | Map corrected to the real columns, with the deferred `invoice_id` FK and the nullable `assignment_id` annotated | §35.2 |
 | 21 | P2 | §35.4 had no rows for the seven views | The view ACL is simpler than the table ACL (`SELECT` only) and is the reason the V1/V2 split is a security decision rather than a performance one | View grant block added, with the `security_invoker` consequence stated for each class | §35.4 |
-| 22 | P2 | `postLedgerGroup()`, `fin_recompute`, `Path A/B/C views` and `fin_allocations_refund_ceiling` appeared in prose under names colliding with the reserved `trg_fin_*` prefix or with real function names | A reader implementing from prose would create a function the inventory test rejects | Names reconciled with §35.3; the `trg_`-prefix collision documented at the point of definition | §13.3.1, §35.3 |
+| 22 | P2 | `postLedgerGroup()`, `fin_recompute`, `Path A/B/C views` and `fin_allocations_refund_ceiling` appeared in prose under names colliding with the reserved `trg_fin_*` prefix or with real function names | A reader implementing from prose would create a function the inventory test rejects | **Was recorded as FIXED and was not.** The first version of this row claimed "Names reconciled with §35.3", and **three of the four were** — `fin_recompute` and `Path A/B/C views` resolved, and `fin_allocations_refund_ceiling` was given its correct trigger-vs-function split in §13.3.1. **`postLedgerGroup()` was not reconciled and survived in two places**: §13.2's approve transaction (step 7) and §17's `FI-008` catalogue row. The row was closed against the *existence* of a collision rather than against the *absence* of the colliding name, which is the same measurement error as §36.2 rows 35 and 44 — checking that something is addressed rather than that it is correct. A register row marked closed whose remediation is two-thirds done is **worse than an open one**, because the review that would catch it now reads `FIXED` and moves on. **Now genuinely closed:** §17 names `post_fin_ledger_group()` (**F4**) and states explicitly that no `postLedgerGroup()` exists; §13.2's step 7 names the same function. Both residual occurrences were found by scanning for the *string* `postLedgerGroup` rather than for a list of known-bad names, which is the check this row should have specified the first time | §13.3.1, §13.2, §17, §35.3, §36.2 |
 | 23 | P1 | §35.2 claimed to be "Every tenant-scoped FK in Phase 7" and listed **45 rows**; the DDL has **61** FK edges. Missing were the six composite edges from `fin_fee_assignments`, four from `fin_billing_runs`/`fin_fee_installment_plans`, `fin_document_counters`, `fin_invoice_items`, `fin_reconciliation_batches` and the `fin_payment_allocations` self-reference; the six single-column `(tenant_id)`/`users` rows for `fin_tenant_settings`, `fin_fee_heads`, `fin_tax_profiles`, `fin_ledger_accounts`, `fin_billing_runs.started_by` and `fin_invoice_adjustments.approved_by`; the `ALTER`-added `fin_tenant_settings → fin_tax_profiles`; and one row carried the **wrong column name** (`grade_level_id` where the DDL says `grade_id`). The header also under-counted the R4 exceptions as "six rows / three tables" when there are **eleven / three** | `finance-composite-fk.test.ts` is specified to read this map **as the allowlist** and fail the build on any FK not in it, so an incomplete map is not a stale comment — it is a test that fails against its own schema on the first `0021` FK, or, worse, an allowlist (or a "fix" to the DDL) written to match the wrong table | Map rebuilt from the DDL: 61 rows, both directions mechanically reconciled, `grade_id` corrected, the `ALTER`-added and self-referential edges present, and the count paragraph rewritten to derive from the DDL (11 rows / 3 targets) rather than from memory | §35.2 |
 | 24 | P1 | §30.3's central P0 rests on a citation of `0001` that was **wrong in two ways**. It cited a range running from line 380 to line **384** for the `ALTER DEFAULT PRIVILEGES` — but `0001_init.sql` is **383 lines**, so its final line does not exist — and, in the paragraph explaining why the old order was a P0, it cited two *other* ranges as the statements that **establish** the default privilege. Neither does: the `0005` range is the *explicit runtime grants* comment, and the `0001` range is an RLS policy on `idempotency_keys` | A citation that points at a policy while claiming to point at a privilege grant is worse than no citation, because it is the kind of reference a reviewer checks and finds wrong — and the entire 29-table `REVOKE` remediation hangs off that one fact. The `0001` default privilege is the load-bearing premise of the fix, so it is the one claim in the document that must be checkable in one hop | Re-verified every migration line citation in the document against the real files (16 distinct ranges, all now in-bounds and pointing at the claimed content); the `0001` citation corrected to `0001:380-383`, and the `0005` range re-described as the explicit-grant convention rather than the default privilege. `0001:380-383` is stated to be the **only** `ALTER DEFAULT PRIVILEGES` in the repository | §1, §30.3.2, §35.4 |
 | 25 | P1 | Reconciling §35.4 and §21 against the §20.3 permission catalog found **two catalogued permissions with no enforcement point**: `fees.adjustments.approve` had a catalog row, a matrix row, and role grants, but the only adjustments route was gated on `fees.adjustments.create`; and `fees.adjustments.read` appeared in the catalog and the matrix and **nowhere else in the document**. §20.4 states the create/approve split explicitly ("mirroring the repo's `attendance.mark` / `attendance.approve_leave`") while the route table implemented only half of it | A permission in the catalog that gates nothing is granted to roles for a capability that does not exist — a least-privilege grant that grants nothing, and an audit row that documents a control the code does not enforce. The `approve` case is worse: the catalog calls it a *post-issue approval control* on cash, so the gap is between a documented control and its absence | The adjustments route now carries a **type-keyed second gate** — `create` for every type, plus `approve` for `concession`/`waiver` — which needs no `status` column and leaves FI-001's trigger summation untouched; the invoice GET route now requires `fees.adjustments.read` for the `adjustments` sub-resource. The absence of separation of duties that this exposes is recorded as **OD-15** rather than papered over, because the alternative is a schema change to an append-only table | §20.3, §20.4, §21.3, §33 |
 | 26 | P0 | `post_fin_ledger_group` (F4) was **granted but never defined** — the document contained `GRANT EXECUTE ON FUNCTION post_fin_ledger_group(uuid, text, uuid, jsonb)` and no `CREATE FUNCTION` for it, while every other member of the closed set had a body | `GRANT … ON FUNCTION` against a non-existent function fails **42883** at the point of the grant in `0026`/`0028`, so this was the same class of unappliable-migration defect as row 1 — and it sat on the *only* write path to an operationally-authoritative ledger, whose entire guarantee was described in prose in §19.7.3 | Body written out in full in §19.7.3: validate-every-leg, then insert unsealed header, then legs, then seal. That order is forced by two triggers that already existed — `trg_fin_ledger_seal` is `BEFORE UPDATE` and treats the first write of `sealed_at` as the seal, and `trg_fin_ledger_sealed_group_reject` is `BEFORE INSERT` and rejects any leg joining a sealed group | §19.7.3, §30.3.3 |
 | 27 | P1 | `app_confirm_mfa_factor` was `GRANT`ed to `school_app_rw`, was `SECURITY DEFINER`, and was **absent from §19.7.2's closed set and from §19.7.3 entirely** | §19.7 is the contract for privilege-elevating functions; a granted definer function with no row in it is a hole in the contract rather than an omission in the prose. It is also the only function in the set that writes an `auth_mfa_factors` row, and the self-only RLS branch on that table is only coherent if the function that bypasses it by definership is on the record | Added as **F10** — table row, narrative, and a note at the set. The DDL's own body carries the real security argument (the user is **derived from the factor** and compared to `app_current_user_id()`, so a caller cannot name a user at all) | §19.7.2, §19.7.3 |
 | 28 | P1 | F9's signature was stated **three different ways**: `app_mint_step_up_challenge(resource, amount, action)` in §19.7.2, a 4-argument form in §19.7.3 that said *"four, and no session argument"*, and 5 arguments with `p_session_id` first in the DDL | OD-14 is the decision about where the session id comes from, and its shipped default is *an explicit route argument* — so a narrative that says there is no session argument contradicts the decision the document claims to have made. Three arities for one function means a reader implementing F9 from §19.7.3 writes a signature that the `GRANT` on the next line cannot match | All three reconciled to the DDL: 5 arguments, `p_session_id` first. The narrative now states the argument is explicit, is not caller-forgeable (the route passes the session it just authenticated), and that OD-14's open half is whether a *signed* claim should replace it — which does not license describing a 4-argument function | §19.7.2, §19.7.3, §33 |
-| 29 | P1 | F5's row was wrong in three ways at once: it counted "**22** trigger functions" where §35.3 binds **25** and the DDL defines **26** `trg_*` functions; it omitted `trg_auth_step_up_immutable` (the 25th inventory row), so the auth trigger's volatility, invoker/definer classification and `search_path` were never stated anywhere; and it described its **2 declared helpers** as if they were bound, when **no `CREATE TRIGGER` names either** — `trg_fin_reversal_shape_check` and `trg_fin_invoice_recalc_balance` are `PERFORM`ed inside other trigger functions and are reachable from no entry point of their own | A contract row that under-counts by three and conflates *bound* with *declared* is the row an implementer reads to decide what to create. The 22 also never matched: the reconciliation split in row 9 added a bound function and a statement, taking the inventory from 24 rows to 25 and the statements from 31 to 32 | F5 rewritten to state the bound-function count, one per §35.3 row, and the count is now checked against the DDL by R2. **The number has since moved twice** and each move was a real addition, not a restatement: the reconciliation split took it 24 → 25 rows and 31 → 32 statements, and `0022` added rows 3a–3c plus 8 statements, giving the current **28 bound functions and 35 distinct statements**. F5's membership clause is kept in step with the table, because a contract row that is one revision behind the table it points at is worse than no count at all. The two helpers were split out into their own row **F5h**, which records that they are declared, unbound, and granted to nobody, so the gap is stated rather than hidden inside a total | §19.7.2, §35.3 |
+| 29 | P1 | F5's row was wrong in three ways at once: it counted "**22** trigger functions" where §35.3 binds **25** and the DDL defines **26** `trg_*` functions; it omitted `trg_auth_step_up_immutable` (the 25th inventory row), so the auth trigger's volatility, invoker/definer classification and `search_path` were never stated anywhere; and it described its **2 declared helpers** as if they were bound, when **no `CREATE TRIGGER` names either** — `trg_fin_reversal_shape_check` and `fin_invoice_reapply_derived_state` are `PERFORM`ed inside other trigger functions and are reachable from no entry point of their own. **The second name in this row was itself superseded**: the revision that wrote it read `trg_fin_invoice_recalc_balance`, a name rejected by §12.4.1's naming decision, and the real helper is `fin_invoice_reapply_derived_state`, an unbound `SECURITY INVOKER` function rather than a `trg_`-prefixed definer | A contract row that under-counts by three and conflates *bound* with *declared* is the row an implementer reads to decide what to create. The 22 also never matched: the reconciliation split in row 9 added a bound function and a statement, taking the inventory from 24 rows to 25 and the statements from 31 to 32 | F5 rewritten to state the bound-function count, one per §35.3 row, and the count is now checked against the DDL by R2. **The number has since moved twice** and each move was a real addition, not a restatement: the reconciliation split took it 24 → 25 rows and 31 → 32 statements, and `0022` added rows 3a–3c plus 8 statements, taking it 25 → 28 rows and 32 → 35 statements. **It has since moved again**: rows 4a–4c (C-8/C-9/C-6) added three, and the cache-writer remediation added row 4d, giving the current **32 bound functions and 39 distinct statements**, which is what F5 and R2 now assert. F5's membership clause is kept in step with the table, because a contract row that is one revision behind the table it points at is worse than no count at all. The two helpers were split out into their own row **F5h**, which records that they are declared, unbound, and granted to nobody, so the gap is stated rather than hidden inside a total | §19.7.2, §35.3 |
 | 30 | P1 | `OD-15` was cited in §21.3 and in §36.4 as a registered decision with a before-`0023` ordering constraint, and §33's **count line read 15**, but the §33 table stopped at `OD-14` | Exactly the defect class of row 18, one revision later: a decision that gates a control and carries a migration-ordering constraint, referenced as authoritative, with no row — so a reader consulting the table for the shipped default would find 14 decisions and no `OD-15` | `OD-15` added, and **OD-16** added for the new `event_type` wart row 26's fix exposed. Count corrected to 16, and the count line's claim that OD-14 is *the only* decision with an ordering constraint corrected to three (OD-14 before `0028`, OD-15 before `0023`, OD-16 before `0026`) | §33 |
 | 31 | P1 | F-7.1 asserted "All **137** `CREATE POLICY` statements across `0001`–`0020` use one body" and cited `0005:317-353` | The number was wrong and the citation pointed at the `FOREACH` block rather than the policy body. A count that is neither the textual nor the effective total makes the claim unfalsifiable, and F-7.1 is the premise for the whole relationship-aware-RLS requirement | Restated as three named figures derived by expanding each loop: **101 textual occurrences** = **69 direct literal statements** (`0001` 27, `0002` 36, `0003` 2, `0018` 4) + **32 loop template sites** (8 loops × 4 bodies); **241 effective policies** (69 + 172 generated). The loops are enumerated per file with their table counts, and the citation moved to the body itself (`0005:331-334`, inside the loop spanning `0005:323-351`). The **substantive** claim survives unchanged and was re-verified against all 101 bodies: none references a relationship table | §2 (F-7.1) |
 | 32 | P1 | Two `path:line` citations named files by a path that does not resolve — `plugins/authorization.ts:68-70` and `idempotency/src/index.ts:9-12` — and §21.3's idempotency claim rested on `packages/idempotency/src/index.ts:9-12` "documents first write wins" | A citation to a file the reader cannot open is not a weaker citation, it is a signal that the claim was never opened. Worse, the claim it supported ("`requestHash` is written but never read") was **true but unevidenced**, resting on a doc comment rather than on the code | Both paths corrected to full repository-relative form, and the claim re-derived from the code: `recordIdempotency` writes the hash (`packages/idempotency/src/index.ts:65`) into a column declared at `0001:189`, `readIdempotency` (`:36-53`) returns only `{ status, body }`, and **neither** replay path (`:100-101`, `:119-121`) compares it. R13′ now checks all 39 `path:line` citations for existence and in-boundsness | §21.3, §2 |
@@ -11121,18 +16044,37 @@ unreachable. **P2** = documentation or carry-forward.
 | 34 | P0 | The chart of accounts could not be seeded: `fin_ledger_accounts_side_ck` allowed only three shapes (`asset→debit`, `liability→credit`, `revenue→credit`), but §5.2 classifies `4100 Fee Income — Concessions & Waivers` as **revenue with a debit normal side** because a concession is contra-revenue (§15.1 posts it `Dr 4100 / Cr 1200`) | F3's own seed `INSERT` raised **23514** `check_violation` on the `4100` row, so the migration's backfill died and no tenant had a chart at all — the ledger was unseedable by construction, from a table the same document calls the "fixed chart". The defect is that **two sections of the same document disagreed about what a revenue account may be**, and the DDL followed the stricter one. Compounding it, the chart was described as **10 rows** in F3's purpose line and §30.5 while `code`'s CHECK admits **9** | `is_contra boolean NOT NULL DEFAULT false` added, and `side_ck` given a fourth arm: `revenue AND debit AND is_contra` — with `NOT is_contra` pinned onto the other three, so the flag cannot be used to license a second debit-normal revenue account. The **9** count is now stated once in §5.2 and derived from `code`'s CHECK, with `is_contra` added as a column to the chart table so the nine rows and the nine CHECK values are visibly the same list | §5.2, §6.1, §19.7.3 |
 | 35 | P0 | F3 `app_finance_seeds_ledger_accounts` had a table row, a full narrative, a migration-map entry in `0021`'s "creates" column, and an ACL row saying `fin_ledger_accounts` inserts are "school_migrator only (F3)" — and **no `CREATE FUNCTION` anywhere in the document** | Every consumer of the chart depended on a function that did not exist. §30.5's per-tenant backfill would call it and fail **42883** `undefined_function`; the `0021` migration map claims to create it, so `0021` would not deliver what the map says it delivers. This is the same defect class as row 26 (`post_fin_ledger_group` granted but never defined) and it survived row 26's fix because row 26 only searched for *granted* functions, and **F3 is granted to nobody** — it is owner-retained — so "0 granted-but-undefined" was true while a documented object was still missing. The check was measuring the wrong set | Body written out in full in §19.7.3: the tenancy assertion (`55000`), the nine-row seed as the single source of the fixed list, `ON CONFLICT (tenant_id, code) DO NOTHING`, `GET DIAGNOSTICS … ROW_COUNT` so the caller can tell 0 (already seeded) from 9 (seeded now), and a closing `count(*) <> 9` assertion that fails loudly rather than carrying a drifted chart into every financial report. `REVOKE ALL … FROM PUBLIC` with **no** grant to `school_app_rw`. R14′ now also checks that every **contracted** function has a body, not only every granted one | §19.7.2, §19.7.3, §30.5, §35.4 |
 | 36 | P1 | §29's threat table is a **catalogue whose rows are mostly not cited back**, while §36.1's `R5′` claimed to have checked that "every row is cited" | A verification row that asserts a check it cannot perform is worse than a missing row, because the reader cannot tell a passing claim from an unrun one. The table's shape here was **fine** — a catalogue does not need cross-references — so the defect was in the **claim**, not the table, and the fix is to check the direction that actually carries risk: every `T-FIN-n` **cited** anywhere must have a row | `R5′` restated as a **two-way** check of that direction (0 dangling citations, contiguous `T-FIN-01`–`T-FIN-31`, 0 duplicates), with the 11 rows that do carry inbound citations enumerated and the 20 table-only rows **stated as correct**, so the asymmetry is visible instead of hidden behind a check that was never written. `R12′` had the same defect — "no invented permission" was asserted as checked when the comparison had only been run in one direction — and was restated the same way | §29, §36.1 |
-| 37 | P1 | §36.1's `R6′` and `R9′` both reported counts that a naive read of the document contradicts: `R6′` said 29 of 29 tables are "immediately" revoked, but 29 of the 31 `CREATE TABLE` statements are followed by a blank line and a comment before their `REVOKE`, and `R9′` said the block has "four privilege shapes" when it is six statements | Both checks were passing for the right reason and describable only by someone who already knew the answer, which is the failure mode a verification table exists to prevent. "Immediately followed" is not literally true of any table except one, and a reader checking the claim by looking at a `CREATE TABLE` would conclude the control was missing on all 29 | `R6′` restated with the measurement defined — measured from each table's **closing** `);`, with the next non-blank non-comment line required to be the matching `REVOKE` — and the count corrected to 31 `CREATE TABLE` statements of which 2 are quoted `0001` baseline. `R9′` restated as a **statement-level** parse: 6 `GRANT`s, 29 of 29 tables, 0 double-grants, 0 shape mismatches, and §35.4's 21 **grouped** rows expanded to 29 before comparison, with the `school_migrator only` cells read as *not granted to the runtime role* | §35.4, §36.1 |
+| 37 | P1 | §36.1's `R6′` and `R9′` both reported counts that a naive read of the document contradicts: `R6′` said 29 of 29 tables are "immediately" revoked, but 29 of the 31 `CREATE TABLE` statements are followed by a blank line and a comment before their `REVOKE`, and `R9′` said the block has "four privilege shapes" when it is six statements | Both checks were passing for the right reason and describable only by someone who already knew the answer, which is the failure mode a verification table exists to prevent. "Immediately followed" is not literally true of any table except one, and a reader checking the claim by looking at a `CREATE TABLE` would conclude the control was missing on all 29 | `R6′` restated with the measurement defined — measured from each table's **closing** `);`, with the next non-blank non-comment line required to be the matching `REVOKE` — and the count corrected to **32 `CREATE TABLE` statements, of which 2 are not Phase 7 DDL**: the quoted `0001` baseline for `auth_sessions` in §19.8.1, and a second `auth_step_up_challenges` line that appears only inside §30.3.2's `text` ordering sketch of `0028`. **The arithmetic is `32 − 1 − 2 = 29`: one statement is the quoted `0001` baseline for `users`, which names no `fin_*`/`auth_*` relation at all, and two more name a `fin_*`/`auth_*` relation without being Phase 7 DDL.** The previous figure here said `31 of which 2 are quoted baseline` — 31 is the count *after* dropping `users` but *before* dropping the two, so it left the scan one statement over 29 tables. `R9′` restated as a **statement-level** parse: **17** `GRANT`s (1 view grant + 16 table grants), 29 of 29 tables + 7 of 7 views, 0 double-grants, 0 shape mismatches, and §35.4's 21 **grouped** rows expanded to 29 before comparison, with the `school_migrator only` cells read as *not granted to the runtime role*. **The previous `6` was the number of shapes, not of statements**, which is the confusion that produced both wrong counts — six shapes do not mean six `GRANT`s. | §35.4, §36.1 |
 | 38 | P1 | §24.1's disposition table and §24.2's registry arithmetic (18 new events, 13 HANDLED / 5 NOOP) were asserted without any check that §23.1's **new-event list** contains the same 18 events | The arithmetic is what `worker-event-registry.test.ts` will assert against, and §23.1 is a `text` block of names while §24.1 is a table — two representations of one set, which is the configuration the phantom `fee.reconciliation.exception` lived in for a whole revision | `R19′` added: the fenced list and the table are compared as **sets**, 18 = 18, difference 0 both ways, 13 HANDLED / 5 `INTENTIONALLY_NOOP`, and the sums re-derived (`93 + 18 = 111`, `9 + 13 = 22`, `84 + 5 = 89`). The comparison deliberately **excludes** `fee.reconciliation.exception`, which appears 7 times in the document as the deleted phantom and in `T-FIN-28`'s history — a plain `fee.*` token sweep finds 19 and would report a deleted event as live | §23.1, §24.1, §24.2 |
 | 39 | P1 | §35.1's "Creates (complete)" column claims completeness and was never compared against the DDL; the one name in it that is not a relation, `fin_recompute` in `0026`, would have been accepted as a table by any check that did not know it is the nightly reconciler job | "Creates (complete)" is a load-bearing claim — it is how a reader knows which migration owns which table, and `finance-migration-order.test.ts` derives its expectations from it. A column that claims to be complete and is not is a stale comment, and the completeness word is what makes it load-bearing | `R20′` added: **both directions** are now checked, 29 of 29 DDL tables placed in the row of the migration that creates them and 0 named-but-absent, with the 7 views excluded from the table check and `fin_recompute` classified as a process reference. The same pass found §35.1's rows and §30.5's narrative map to be two representations of the same nine migrations, and they agree | §30.5, §35.1, §36.1 |
-| 40 | P1 | Three **citations did not resolve** and `R13′` had never been run: one pointed past the last line of a 92-line file and named the wrong document for the claim it quoted, and three were bare `exams.ts:` references that resolve to **three different real files**, with the quoted content living in **two different files** depending on the line number | A citation is the only thing that makes a claim in this document checkable, so a wrong one converts a verified statement into an assertion, and `R13′`'s "0 missing, 0 out-of-bounds" was a claim about a check that had not been executed. The ambiguous `exams.ts` case is the sharper one: every line number in range *existed*, so a bounds-only check passed, and the cited lines in `apps/worker/src/exams.ts` and `apps/api/src/routes/school/exams.ts` are entirely different code | `R13′` **reproduced**: 69 `path:line` citations across 21 files with 0 missing, 0 out-of-bounds and 0 ambiguous basenames; 30 `NNNN:line` citations across 8 migration files with 0 ambiguous prefixes and 0 out-of-bounds. The finance-design citation now names the correct document, and the three `exams.ts` citations are fully qualified to the two files they actually came from | §1.6, §25.3, §36.1 |
+| 40 | P1 | Three **citations did not resolve** and `R13′` had never been run: one pointed past the last line of a 92-line file and named the wrong document for the claim it quoted, and three were bare `exams.ts:` references that resolve to **three different real files**, with the quoted content living in **two different files** depending on the line number | A citation is the only thing that makes a claim in this document checkable, so a wrong one converts a verified statement into an assertion, and `R13′`'s "0 missing, 0 out-of-bounds" was a claim about a check that had not been executed. The ambiguous `exams.ts` case is the sharper one: every line number in range *existed*, so a bounds-only check passed, and the cited lines in `apps/worker/src/exams.ts` and `apps/api/src/routes/school/exams.ts` are entirely different code | `R13′` **reproduced**: **143** `path:line` citation occurrences, **141** resolving to exactly one file across **38** files with 0 out-of-bounds and 0 ambiguous basenames — the other 2 being the two non-resolving forms this very row records, quoted as the defect; 30 `NNNN:line` citations across 8 migration files with 0 ambiguous prefixes and 0 out-of-bounds. The finance-design citation now names the correct document, and the three `exams.ts` citations are fully qualified to the two files they actually came from. **This row's own count was itself stale — it read `69 across 21`, which the check had been reporting for a narrower scan that skipped line *ranges* and de-duplicated by basename before resolving. The reproduction above therefore had to be corrected twice: once for the unresolved citations recorded here, and once because the figure that recorded them understated the work.** | §1.6, §25.3, §36.1 |
 | 41 | P1 | `R18′` reported "5 `ENABLE ROW LEVEL SECURITY` and 4 `FORCE`" and "the other **25** tables" have no RLS DDL, and §35.1 claims completeness that had never been compared to the DDL | Both numbers were **passing for the wrong reason**: only **2** `ENABLE` and **2** `FORCE` are written out literally (`auth_mfa_factors`, `auth_step_up_challenges`) — the 3 finance tables' pair exists only as the `fin_x` template inside §30.5 step 6's `0028` block, so policies were counted as if each carried its own `ENABLE`/`FORCE` — and the deferred count is **24**, not 25, because 29 Phase 7 tables minus 5 policy-bearing ones is 24. §35.1's "Creates (complete)" column is load-bearing for `finance-migration-order.test.ts`, and the completeness word makes it a claim rather than a comment | `R18′` restated with the measurement named: **10 policies on 5 tables**, **2 `ENABLE` + 2 `FORCE` literal**, 24 deferred, all behind an immediately-following `REVOKE` so the state is fail-closed rather than exposed. `R20′` added to check §35.1 in **both** directions — 29 of 29 DDL tables placed in the row of the migration that creates them, 0 named-but-absent, 7 views excluded from the table check, and the one non-relation in a creates cell (`fin_recompute`, the nightly reconciler **job**) classified as a process reference instead of silently accepted as a table | §30.5, §35.1, §36.1 |
+| 42 | P0 | **The header guard refused the phase's own cache writers.** `trg_fin_invoice_header_guard` raised `55000` on *any* `UPDATE` of `subtotal`/`total`/`balance`/`invoice_no`/`issued_at`/`voided_at`/`paid_at` with no declared writer, while §35.4 revokes those columns from `school_app_rw` — so `trg_fin_invoice_item_total` and `fin_invoice_reapply_derived_state` could not write, and the **first `INSERT` of an invoice line failed**. The document also made the header guard a `SECURITY DEFINER` *because of* that same clause (6), so clause (2) was evaluating under `school_migrator` privileges and could not distinguish a caller from a cache writer even in principle | **This is the P0 that twenty negative tests did not catch, and the reason is structural rather than accidental: every test in §28.3 asserts that a *caller* is refused, and a guard that refuses the caller *and* the maintainer satisfies all of them.** An over-restrictive rule is invisible to a negative-only suite. The defect is also a contradiction rather than an oversight — §16.5.1 granted the columns to nobody and the guard forbade everyone, so `0023` as specified could not build an invoice | **Two changes, and neither is "loosen the guard".** (1) **The writers declare themselves.** A closed, transaction-local `fin.invoice_maintenance_scope` with exactly two values covering four columns; the guard requires `pg_trigger_depth() >= 2` **and** a matching scope, and an unset scope is a refusal. The GUC is explicitly *not* the boundary (it is forgeable); the column ACL is, and `pg_trigger_depth()` is the second factor that no SQL can forge. (2) **Clause (6) moved out** to `trg_fin_invoice_freeze_lines` — `AFTER UPDATE OF status` with a `WHEN` clause. `AFTER` because from `BEFORE` the nested write is either refused or, once clause (2) is widened, **silently clobbered** by the outer statement's pre-image; that is the failure a naive fix produces. The move is also what lets the guard be `SECURITY INVOKER`, which is what makes "caller" mean anything. **New invariant FI-020**, **A13–A18** closing assertions, **C-SEC-M1…M7** as **7 controls in 10 checkpoint-scoped assertions** (7 at `0023`, 3 at `0024`, **0 skipped**) of which **two are positive** — M1 for `0023`'s line-total producer and M3b for `0024`'s balance producer — and **three reverted-clause controls** (`ctl_csec_a`, `ctl_csec_b`, `ctl_csec_c`) so the halves are shown load-bearing. **The controls were owned by the wrong migration and this row was the reason nobody noticed**: see row 45 | §9.6.0, §9.6.0.1, §9.4.1, §16.5.1, §19.7.4, §28.3.1, §30.3.4, §35.4, FI-020 |
+| 43 | P1 | `trg_fin_receipt_freeze` was bound inside the block's `-- 0025:` section while §30.1's 0024 row lists it as 0024's, and §35.3.2's own counting paragraph contained **three mutually inconsistent totals** — "37 statements in the block", "30 functions", and "31 bound functions and 38 distinct statements" — where the count table in the same subsection said 37 in the block | Two normative sections disagreed about which migration owns a binding, and the subsection that exists to make the inventory *verifiable rather than asserted* was the least verifiable part of the document: its arithmetic could not be re-derived from its own table, and the two ways it was wrong (omitting row 15's `CONSTRAINT TRIGGER`, and stopping its per-migration walk at `0022`) both happened to hide inside plausible-looking numbers | `fin_receipts_freeze` moved above the `0025` marker, since `fin_receipts` is created by 0024 and its body names nothing 0025+ creates — §30.3.1 permits it there. The counting paragraph rewritten as a **per-migration table** (`0021` 0 / `0022` 8 / `0023` 9 / `0024` 10 / `0025` 3 / `0026` 4 / `0027` 3 / `0028` 1 / `0029` 1 = **39** statements over `0 / 6 / 7 / 8 / 2 / 4 / 3 / 1 / 1` = **32** functions), so the total is the sum of parts a reader can add rather than a number asserted alongside them. **A further pass replaced the `0023`–`0029` band with that full per-migration split and added a `SECURITY DEFINER` column** (`0 / 0 / 3 / 1 / 0 / 0 / 0 / 0 / 0` = 4): a band cannot supply the **3 definers at `0023`** figure that C-SEC-M4a asserts, and the original walk's `8 / 9 / 10 / 3 / 4 / 3 / 0 / 1 = 38` omitted `0029` while presenting itself as a `0021`-relative total. §35.3.2's "38 and not 31" heading and its re-derivation table updated to match. **A literal `...` in the new guard's SQL** — written into a `sql` fence as an abbreviation for `current_setting`'s second argument — was removed, because R3 asserts zero and an abbreviation in a runnable block is exactly the kind of thing that check exists to catch | §30.1, §35.3.2, §35.3, §30.3.4 |
+| 44 | P1 | **§35.2's FK map was missing five constraints that `0023`'s actual DDL creates**, and both FK counts it feeds were *carried* rather than measured. §36.1 previously said so in its own caveat: the pass “did not reproduce the 61-edge figure — it found 31 `CREATE TABLE` edges and 51 composite clauses, which do not match, so one of the two parsers is wrong and the document does not know which.” The map held **62** rows; `0021`–`0023` create **43** live constraints of which only **38** had rows. The five are `fin_invoices_created_by_fk`, `fin_invoice_adjustments_requester_fk`, `fin_invoice_adjustments_reverses_fk`, `fin_invoice_items_structure_fk` and `fin_invoice_items_plan_fk` — **all five present in this document's own §9.5 DDL blocks**, so the defect was a normative inventory that had drifted from the DDL it existed to inventory, not a disagreement between two sources | The map is described as the **authoritative allowlist**, and an allowlist missing five live edges reads as five edges that are *not permitted*. An implementer reconciling it against the DDL has two options — delete the constraints, or ignore the map — and both are wrong. `fin_invoice_items_plan_fk` in particular is the only thing that makes §7.4's “a line names a plan of its own structure” a database guarantee rather than a comment, so deleting it to satisfy the allowlist would silently remove a referential-integrity property. **It is P1 rather than P0 because no statement is unappliable because of it** — the DDL is correct and the *contract* was incomplete — and the row says so explicitly, because a stale count is the failure mode this document has now produced four times and a fifth instance of the same kind earns a row of its own | **Three changes. (1)** The five rows added to §35.2 with their real anchors and `0023` as owning migration, taking the design total to **67** = **43** current + **24** future — and the later adjudication of `fin_billing_run_items → fin_invoices` from `0024` to `0023` (§9.5, C-3, C-4) moved that split to **44** current + **23** future without changing the total, so the figures this row quoted are one revision behind by exactly one row. **(2)** Every row given an **owning migration**, and §35.2.1 states the derivation as two set expressions and four assertions (**F1** no live FK without a row, **F2** no row without a live FK, **F3** no row twice, **F4** no undeclared forward reference) so the comparison is **checkpoint-filtered** rather than total; this is also why the whole-phase map is the right model and a per-checkpoint map is not — §30.1 is a whole-sequence matrix, and the one row that was owned forward of its source (`fin_billing_run_items → fin_invoices`, owner `0024`) is exactly the case §30.3.1 exists to permit; it has since been re-owned to `0023`, and the remaining forward reference, `fin_payment_allocations → fin_refunds` (`0025`), is a `0024`→`0025` case entirely outside this checkpoint. **(3)** §6.3 gains **R5**, because `fin_invoice_items_plan_fk` targets a tenant-prefixed **natural key** that R1/R2 did not permit, and a rule whose permitted shapes are fewer than the DDL it governs is what let R16′ report “0 unanchored” against an anchor class it could not name. R11′/R16′ are now **reproduced** and no longer carried, and new rows **R26′** (the derivation is machine-executable) and **A17** close the class | §6.3, §35.2, §35.2.1, §36.1, R11′, R16′, R26′, §30.3.4 |
+| 45 | P0 | **Three of the seven mandatory C-SEC controls named objects their own migration may not create.** C-SEC-M3 inserts a `fin_payment_allocations` row, C-SEC-M4 reads `prosecdef` for **all 32** bound functions, and C-SEC-M6 calls `fin_invoice_reapply_derived_state` — all three subjects are **`0024`**'s (rows 5, 8, 13 and the unbound helper of §35.3.1), while §30.3.1 forbids `0023` from naming a `0024` relation in a body or a `DECLARE` row type. §28.3.1 therefore specified a **mandatory `0023` suite against a schema that suite could not run against**, and §34.1 and §36.2 row 42 both counted those seven as `0023`'s coverage. **Separately, and found while fixing it**, C-SEC-M4's “all 32 bound functions” hid that only **13** of them exist at `0023` (`0022`'s six plus `0023`'s seven) and only **3** are `SECURITY DEFINER` there, and A14 asserted “exactly two producers” of the maintenance scope *among `0023`'s functions* when `0023` has **one** | The contradiction was invisible for the same reason as row 42 and one step further out: **no check compared a control's subject against the migration that creates it.** §36.1's `R25′` verified that §35.3's inventory agreed with §35.3.2 and §30.1 — all of which were self-consistent, because they agreed with each other and not with the test suite. So the document asserted, as a checked fact, that the `0023` security boundary was covered by seven tests, and three of them had no schema to run against; and it asserted a definership count that the `0023` checkpoint cannot satisfy | **Every control given exactly one owning migration and one executable test boundary, with per-checkpoint halves where the subject spans migrations** (§28.3.1): **7 controls → 10 executable assertions → 7 at `0023`, 3 at `0024`, 0 skipped.** M3→M3a/M3b, M4→M4a/M4b, M6→M6a/M6b, each half named so no half is ever reported as the whole control. The halves are load-bearing rather than bookkeeping: **M3a** is the only assertion that reads the scope-literal count and therefore the only one that catches a vocabulary narrowed to `invoice_line_totals`; **M4a** is the only place the definership figure is scoped (**13** functions / **3** definers at `0023`, **21** / **4** at `0024`; the first figure is the running total of the `0022` and `0023` rows of §35.3.2's per-migration table, not `0023`'s seven alone); and **M6a** pins row 4d's `AFTER`/`WHEN` structurally, so `ctl_csec_b` gains a second witness. New **A18** asserts the ownership rule, **A14** restated per migration, **A16** added to assert the asymmetry from both sides, **R27′**/**R28′** added, a **third** control `ctl_csec_c` added because a one-value vocabulary is otherwise discoverable only at `0024`, and `§35.3.2`'s per-migration table given the `SECURITY DEFINER` column these counts derive from. **Separately, a defect in the applied source is recorded and deliberately not remediated in this design-only pass:** `finance-cache-maintenance.test.ts` exists and labels its cases `C-SEC-M3` and `C-SEC-M6`, and each satisfies the half **only in appearance** — M3 hand-sets the scope GUC and asserts a seeded `balance`, M6 issues a direct nested `UPDATE` instead of the allocation `INSERT` that runs row 13. A hand-set GUC proves the guard *accepts* a value, not that any producer sets it; a direct `UPDATE` proves the `WHEN` clause suppresses a write, not that the real writer produces one. As written the file would **pass against a guard with a one-value vocabulary**, and the remediation is assigned to the implementation pass against the assertion set now specified in §28.3.1 | §28.3.1, §28.2, §30.1, §30.3.4 (A14, A16, A18), §35.3.2, §36.1 (R23′, R27′, R28′), §34.1, §19.7.4 |
+| 46 | P0 | **The rule that an `apply` allocation may not name a `draft` or `void` invoice was asserted in a comment and enforced nowhere.** `fin_invoice_reapply_derived_state`'s own comment read *"no allocation may name a draft invoice (§12.6)"*, and §12.4.1 relied on that claim to argue a draft's balance cannot be moved — but §12.6 is the concurrent-allocation **lock protocol**, it says nothing about invoice state, and no trigger, CHECK or FK refused an `apply` row naming a `draft` or `void` invoice. The claim was load-bearing and false | An `apply` allocation naming a `draft` is **accepted**: the payment position counts it as applied (`fin_v_payment_position`) while the invoice side silently ignores it, so the two authoritative views disagree with **no error raised** — a worse failure than a rejection, and cash can be applied to an invoice that is not yet payable. A `void` target is the same hole against a cancelled document | Rule written out in **§12.5.1** as `trg_fin_allocation_target_state()` — `BEFORE INSERT OR UPDATE ON fin_payment_allocations`, `SECURITY INVOKER`, `search_path` pinned, `REVOKE`d from `PUBLIC` — refusing any `apply` target whose invoice state is not `issued`/`partially_paid`/`expired`/`paid`; bound as `fin_allocations_target_state` (inventory row **12a**, D9, `0024`) | §12.5.1, §12.4.1, §35.3, §35.3.2 |
+| 47 | P1 | **The property test had no owning migration, and every available reading of it was unexecutable.** FI-002's `Test` row required "10,000 random allocation/**refund** operations", §28.2 listed `finance-property.test.ts` beside thirteen other suites with no owner, and §28.4's operation list named twelve operations of which `refund`, `reconcile` and `openThenMatchBatch` are not expressible at `0024`. Nothing said which checkpoint the file belongs to, so the two available answers were both wrong: `0024` (the checkpoint in progress, and the owner of `fin_payments`, which the suite obviously exercises) and `0023` (where the C-SEC halves it resembles were being scheduled). FI-002's row additionally named **allocation `DELETE`s** as generator operations, which §12.1/D1/A19 forbids at **every** checkpoint — `trg_fin_pa_delete_guard` raises `55000` on every `DELETE`, verified against the applied `0024` catalog | This is the defect class §28.3.1's own row-45 remediation created and then re-created one level up: a requirement was scheduled without the ownership rule that made the C-SEC halves schedulable, so it defaulted to "whatever migration is current". Reading it as `0024` makes `0024` un-signable-off for a file that cannot run there — a `0024` execution would have to skip three of twelve operations, including two of the four bolded ones that exist to catch the defects §28.4 was written for, and would report green. Reading it as `0023` is worse: `fin_payments` does not exist. And an allocation delete in the generator is a test asserting the database does something it is specified never to do, which is the §28.4 failure mode (*a property test that cannot express the real case is not evidence*) in miniature | **Ownership derived, not assigned.** §28.4 now carries a per-operation table giving each operation's first expressible migration from §30.1's own map — `0023` for the five invoice-side operations, `0024` for the four payment-side ones, **`0025`** for `refund` (`fin_refunds`, plus the `fin_pa_refund_fk` that closes §30.1's P0-01 window; during `0024` a reversal row may name any `refund_id` unchecked because `trg_fin_refund_provenance` does not exist yet, so a refund is *insertable* but not *testable*) and **`0027`** for `reconcile`/`openThenMatchBatch`. The suite is declared **`0027`-owned and Phase-level, with no single owning migration**, and §28.2 says so in the same words. The three consequences are stated explicitly: §36.5's `0024` proof list does **not** name it and must not; the suite is **scheduled**, not dropped (§28.5 already requires the file count to come from an actual CI run); and it is **not** to be implemented as a checkpoint-gated `0024` assertion, because a gate that silently omits three operations is the failure this row exists to prevent. FI-002's row corrected on both counts — the generator's allocation coverage is stated as **moves** (the `UPDATE` branch), with row 13's `AFTER DELETE` branch reclassified as defence-in-depth and covered from the other side by §28.3's mandatory negative and §28.3.2's C-ALLOC-DEL-3…-7 | §28.2, §28.4, §36.5, FI-002, §12.1, §28.3.2, §30.1 |
+| 48 | P1 | **C-SEC-M6b's specified producer is a write the same design forbids, and the disagreement was invisible because both halves were individually defensible.** The row asked for "draft invoice + one line + a real allocation row naming it … letting row 13 run", while §12.5.1's **D9** (§36.2 row 46, a **P0**) refuses an `apply` allocation naming a `draft` or `void` invoice — verified against the applied `0024` catalog, where the statement raises `55000`. The row was therefore unexecutable on its own terms. Compounding it, §9.6.0.1 justified the assertion with the sentence "**C-SEC-M6b recomputes `balance` on a draft invoice**", which is false: §12.4.1's writer *early-returns* for `draft`/`void` and issues no `UPDATE` at all, so there is no recomputation on a draft to observe. The applied test then recorded the consequence as an **OPEN QUESTION** — that the `WHEN` clause's `NEW.status <> 'void'` conjunct had no reachable transition, because a `draft → void` discard "needs a caller-supplied `void_reason`, and `void_reason` is one of the seven columns C-SEC-M7 proves a directly issued `UPDATE` may not name" | D9 was added *by this same revision* and is correct; M6b simply predates it and was never re-read against it. That is the ordering hazard row 45 describes one level down: a **P0** invariant and a **test contract** were edited in the same pass without a check that compares a test's inputs against the rules those inputs must satisfy, so the suite would have failed on first run and the failure would have looked like a migration defect. The prose error is the more dangerous half, because it is what made the conjunct look decorative: a reader comparing "the writer recomputes on a draft" against "`WHEN … NEW.status <> 'void'`" concludes the clause is unreachable, and a clause believed unreachable is a clause one refactor deletes. The OPEN QUESTION then compounded it by asserting a **false** reason (`void_reason` is **not** one of the seven — those are `subtotal`, `total`, `balance`, `invoice_no`, `issued_at`, `voided_at`, `paid_at`, and `trg_fin_invoice_header_guard` compares exactly those seven, so `void_reason` is unguarded) rather than an unknown one, which is how a closed question stays open | **Option C adopted: keep D9, reach row 13 through the binding it also has.** Recorded in §28.3.1 with the two rejected alternatives and why — **(A)** relax D9, rejected as inverting the order of authority (a P0 must not be weakened to make a test expressible, and §12.5.1's reasoning does not weaken when the test is inconvenient); **(B)** move M6b to `0023` structurally only, rejected as §28.3.1's already-refused option (A) and for dropping the only behavioural witness. `trg_fin_invoice_balance_recompute` is bound to **three** tables and the `fin_invoice_items` binding is legal on a draft, driving the **same** helper call and the **same** `UPDATE fin_invoices` naming `status` — so the invariant is reachable without contradicting D9 by a character, and **D9's coverage is unchanged**, asserted from both sides: the allocation path *cannot* reach a draft (`finance-payments.test.ts`, `55000`, then the legal path by issuing first) and the line path reaches one and does *not* settle it. M6b now asserts `balance === 0`, `status === 'draft'` and `frozen_at IS NULL` — the stronger form, since a design that preserved the label while still executing the `UPDATE` would leave a draft at balance 100 against a view that excludes drafts (§9.6.0) — **plus a second statement, the `draft → void` discard**, which is the one transition on this writer the `NEW.status <> 'void'` conjunct exists to turn away, so the clause has a behavioural witness and `ctl_csec_b` gains a third. §9.6.0.1's paragraph rewritten to state the early return plainly and name the discard as the conjunct's load-bearing case; the OPEN QUESTION removed and replaced with the closed fact | §28.3.1, §9.6.0.1, §12.4.1, §12.5.1, §36.2 (45, 46), FI-002, R24′ |
+
+| 49 | P0 | **`postRefundApproval` was a `0025` deliverable with no `CREATE FUNCTION` anywhere, filed under the wrong owner, and dependent on two migrations that come later.** §30.1 listed `postRefundApproval (F5)` among `0025`'s creates; §19.7.2's closed set — whose own rule is "a function that is not in this table does not exist" — did not contain it, §35.3's inventory did not, and §35.1's "Creates (complete)" column did not. It was attributed to **F5**, which is defined as the 35 bound `trg_fin_*` functions and is `SECURITY INVOKER`, so the one row that would have carried its volatility and grants mis-stated both. Its two callees are **F4 `post_fin_ledger_group()` (`0026`)** and **F8 `app_consume_step_up()` (`0028`)**, and §30.3.1 forbids a migration naming a later migration's object as though it existed | Three separate failures that all had to be fixed together, because fixing any one alone leaves the migration broken. **(1) Unappliable:** plpgsql resolves a function call at plan time, so a `0025`-owned F11 would have been *created* cleanly and then raised **`42883 undefined_function` on every call** — the same class as row 26, but hidden behind a clean `CREATE`. **(2) Unauthorised:** §35.4 revokes `UPDATE` on `fin_refunds` table-wide from `school_app_rw`, so even a defined `0025` F11, invoker or definer without the right ACL, could not perform the state change — `42501`. **(3) Ownerless edges:** the diagram had four edges and one named writer, so `processed` and `rejected` had no writer at all, which reproduces this same defect one step down | **Re-owned to `0028`, where both callees exist, and closed in both directions.** `postRefundApproval` is **F11** (2 args, `SECURITY DEFINER`) and the previously ownerless `processed`/`rejected` edges are **F12** (4 args, `SECURITY DEFINER`); both are rows of §19.7.2 with full bodies in §19.7.3, both appear in §30.1/`§35.1` under `0028`, and `0025`'s rows in both maps now state that `fin_refunds` is a **write-once staging table** whose only reachable state is `requested`. §35.4's ACL row names F11/F12 as the sole writers. The F11/F12 split is itself a least-privilege boundary, not a convenience: approve posts a ledger group and consumes MFA while reject does neither, so one function with four actions would hand the reject path the disbursing capability | §13.2, §13.2.1, §19.7.2, §19.7.3, §30.1, §35.1, §35.3, §35.4, §36.5 |
+| 50 | P0 | **F11 and F12 posted their ledger legs under the wrong JSON key, so both raised `55000` on every call.** Both bodies built their `jsonb` legs with `'account'`, while F4 — the only function that consumes them — reads `v_el ->> 'account_code'` and raises `'each leg needs account_code, direction, and a numeric amount'` when it is absent. F4 also validates each leg against `fin_ledger_accounts.code`, so a wrong key is not merely a shape error but a chart-membership lookup on `NULL` | Both refund transitions were unexecutable at the one moment they matter, and unexecutable in the worst possible way: the reversal rows of step 6 and the consumed step-up challenge had **already** been written, so the `55000` came from F4 *after* the money-side rows existed. The caller's rollback covers it, so no corruption is reachable — but the defect class is the one §19.7.3's F4 narrative is built around ("every clause checked against what PostgreSQL actually permits rather than against what reads as intuitive"), and it was in the two functions that had just been written | Keys corrected to `account_code` in all four legs. The specific failure is now recorded as its own row rather than folded into row 49, because it is a **different** measurement error: row 49 was found by asking *does every named function exist in exactly one migration*, and this was found by asking *does every caller of F4 use F4's leg shape*. Neither question implies the other, and a document that only asks the first will keep producing bodies that compile and refuse | §19.7.3 |
+| 51 | P0 | **§35.8's lifecycle block disagreed with §15.1 on four of its five lines, including the pair §35.7 had already declared authoritative over.** The block said on-account credit `Dr 1000 / Cr <liability>`, applied cash `Dr 1300 / Cr 4000`, refund of applied cash `Dr 1300 / Cr 4000`, and correction `Dr 1200 / Cr 1300` | `Cr 4000` on applied cash and on refund is **double-recognition of income**: `4000 Fee Income` is credited exactly once, at `ISSUE INVOICE`, so crediting it again when cash is applied books the same fee twice. `Dr 1000` on an on-account credit debits an asset for cash that never left the school's account. And collapsing the refund into one cash leg destroys the intermediate `2200` balance — "approved but not yet disbursed" — which §35.7 calls a real reportable figure. The block also claimed to be "§15.1's, quoted", so a reader checking the quotation would find four sentences that were not there | All five lines restated from §15.1: `Dr 1300 / Cr 1300`, `Dr 1300 / Cr 1000/1100`, `Dr 1300 / Cr 1200`, then `Dr 1200 / Cr 2200` on approve and `Dr 2200 / Cr 1000/1100` on process, and `Dr 1200 / Cr 1300` for a correction — with an added statement that **no allocation posting touches `4000`**, which is the one sentence that makes the whole table checkable at a glance. The old values and the reason each was wrong are tabled beneath it rather than deleted, because "this used to say something else" is the only evidence that the block is now derived rather than remembered | §35.8 |
+| 52 | P1 | **Three defects in the same subsection, all of the "the remediation was recorded rather than performed" class, plus an open decision that was cited but never registered.** (a) `trg_fin_refund_provenance`'s refund-side branch was a bare `PERFORM 1` with no `IF NOT FOUND`, so an assertion the comment described as a mirror of the allocations-side check performed nothing; `v_payment` was declared and never assigned. (b) §12.5.1 stated the trigger-firing order as alphabetical, which it is not. (c) `fee.refund.rejected` was required by §35.7 but absent from §23.1. (d) `app_finance_actor_has_permission(text)` and `app_finance_emit_event(...)` were referenced by F11/F12 with **no `CREATE FUNCTION` anywhere**, and tracked as "§33 open decision **OD-17**" — a decision §33's table does not contain, the same defect as row 30 | Each of (a)–(c) is individually minor and jointly they are the reason the design could not be signed: a provenance mirror that checks nothing, an ordering claim a reader would use to reason about deferred-trigger visibility, and a transition with no event row would each survive review, because all three read as finished work. (d) is the serious one — it is row 26's class (`GRANT`ed but undefined, and here *called* but undefined) reached through the opposite direction, and it was **invisible to every existing check**: R14′ tests that every *contracted* function has a body, and `0025`/`0028` are not yet written, so both helpers passed. §33's count line said 16 and had no OD-17 row, so the decision that was supposed to be tracking the gap was itself untracked | (a) The mirror branch rewritten to iterate `fin_payment_allocations` rows carrying `NEW.id` and raise when a row names a **different** `payment_id` than the refund does — an assertion that can fail, rather than one that cannot — and `v_payment` removed. (b) §12.5 and §12.5.1 restated in true firing order: `fin_allocations_bounds`, `fin_allocations_family`, `fin_allocations_shape`, `fin_allocations_target_state` last, then `fin_allocations_refund_ceiling` at `COMMIT` as a deferred `CONSTRAINT TRIGGER`. (c) `fee.refund.rejected` added to §23.1 and to §24.1 as **`INTENTIONALLY_NOOP`** — a rejection moves no money and produces no artifact, and its audience already holds the `fin_refunds` row with `rejection_reason` set — giving **19** new events and **13 HANDLED / 6 NOOP**. (d) **F13** and **F14** written out in full against `0001`'s real `role_permissions` and `outbox_events`, added to §19.7.2, and **OD-17 withdrawn** rather than registered, because the choice it posed no longer has two alternatives. The reasoning for refusing the alternative is recorded at the definitions: substituting F1's actor **class** for a named **permission** would collapse §20.3's three refund permissions into one and no assertion would notice | §12.5, §12.5.1, §13.1, §19.7.2, §19.7.3, §23.1, §24.1, §33 |
+| 53 | P0 | **`fin_refunds.decision_ck` did not enforce what its own comment claimed, and §35.7 row 4's guard named a column that did not exist.** The `CHECK` collapsed `approved` and `processed` into a single arm (`status IN ('approved','processed')`), so it never required `processed_by`, `processed_at` or a disbursement reference — while the comment immediately above it said "a processed one also records the processor". Separately, §35.7 row 4 made "disbursement reference present" the guard on `approved → processed`, and no such column existed on the table | Two independent ways for a processed refund to be wrong. A refund could reach `processed` with `processed_by IS NULL`, so the disbursement had no accountable actor even though §35.7 row 4's permission model exists to name one. And the row-4 guard was **unactionable**: it could be quoted by a reviewer as a control and could not be enforced by any code, which is the failure mode §36.2 row 35 recorded for `app_finance_seeds_ledger_accounts` and row 49 for the two helpers. Both halves of this row were found by reading the `CHECK` against the comment above it and §35.7 against the column list — neither by a count | `fin_refunds` gains **`disbursement_reference text`** (server-owned, eighth such column), and `fin_refunds_decision_ck` is rewritten as **four disjoint arms** — `requested`, `approved`, `processed`, `rejected` — so `status` selects exactly one and each arm pins the full field set for that state: `processed` requires `processed_by`, `processed_at` **and** `disbursement_reference`, and `approved` requires all three to be `NULL`. F12 takes `p_disbursement_reference` as a fourth argument and raises `55000 disbursement_reference_required` when blank, so the guard fails as a named error at the call site rather than as a `23514` from the table. The DDL comment now says what the `CHECK` does, and records that the previous arm structure claimed a rule it did not enforce | §13.2, §16.4, §19.7.3, §35.4, §35.7 |
+| 54 | P0 | **§13.2's state diagram drew four edges while §35.7 row 7 declared one of them forbidden — and §35.7's own remediation note claimed the diagram had been fixed.** The `text` block showed `approved ──reject──► rejected` beneath the `requested → rejected` edge, and the paragraph in §35.7 that documented the disagreement had been edited to say "the diagram must match it" while the diagram kept the edge. The same block's second diagram claimed `requested → rejected` was reachable at the `0025` checkpoint, which it is not: reject is F12's, and `0028`'s | The edge is not merely discouraged, it is unrepresentable. The `rejected` arm of `fin_refunds_decision_ck` requires `applied_allocations IS NULL` and an approved refund's is `NOT NULL` by construction, so the write is refused with `23514` before any state-machine logic runs — and the better reason is that approval has already created the reversal rows, `fin_payment_allocations` is append-only, and the ledger has no reversal of a reversal. **The second diagram was the more dangerous half**: it told an implementer that one transition was live at `0025`, when `0025` can execute **none**, so the first thing built on that reading would be a rejected-refund path with no writer | §13.2's diagrams rewritten: three edges, with the fourth named explicitly as the one §35.7 row 7 forbids and the reason it is unrepresentable rather than merely unapproved; and the `0025` diagram now shows the `INSERT` as the only reachable operation with all three transitions marked unreachable. §13.2.1's "four edges, one executable" is corrected to "three edges, none executable", and the server-owned column list is seven → **eight**. §35.7's remediation note now describes what was actually changed rather than what was intended | §13.2, §13.2.1, §19.7.3, §35.4, §35.7 |
 
 ### 36.3 What is deliberately still open
 
 These are **not** oversights, and none of them blocks `0021`:
 
 - **P2-05 / P2-11** — no DLQ exists, and `docs/JOB_ARCHITECTURE.md` describes machinery
-  (`job_runs`, `runAsTenant`, per-aggregate ordering) that was never built. A lost
+  (`job_runs`, `runAsTenant`, per-aggregate ordering) that was never built. **Re-verified mechanically against the
+  repository rather than taken on the sentence's word: `docs/JOB_ARCHITECTURE.md` exists, `job_runs` appears in **no**
+  file under `packages/db/migrations/`, and `runAsTenant` appears in **no** `.ts` file anywhere** — while
+  `job_runs` *is* named in `DATABASE_DESIGN.md`, `DECISIONS.md`, `DEPLOYMENT.md` and `DEVELOPMENT_ROADMAP.md`. That
+  asymmetry is the whole finding: four documents describe the table and nothing creates it, which is why §24's worker
+  contract cannot be built as written and why this stays a carried P2 rather than an oversight. A lost
   `fee.invoice.issued` is a lost ledger posting, so a real DLQ is required *before any finance
   handler is registered*, and the `worker.ts` `reports`→`events` misroute must be fixed first.
 - **P2-09** — the MFA pepper has no home. `current_setting` is forgeable by the runtime role and the
@@ -11145,35 +16087,91 @@ These are **not** oversights, and none of them blocks `0021`:
 - **P2-12** — `redactDeep` and `sanitizePayload` do not denylist finance PII. Phase 7 mitigates with
   an IDs-only payload contract and `T-FIN-20`; the shared helpers themselves are other phases' files.
 
-### 36.4 Final verdict
+### 36.4 Final verdict — `0023` (SUPERSEDED; retained as history)
 
-**DESIGN-GO.** `0021_fin_foundation.sql` is authorized to be designed and implemented next, on the
-conditions in §30.3 and the function contract in §19.7.
+**`0023` IMPLEMENTATION-GO** — *granted, and since overtaken; the current gate is §36.5*
 
-- **P0: 0 open.** All **nine** register rows are corrected in the DDL (eight numbered rows plus row
-  `2b`). The four that made `0021`–`0028` unappliable or unseedable —
-  the composite-type ordering, the `0001` default privilege, the two `GRANT`ed-but-undefined functions
-  (`post_fin_ledger_group` in row 26 and `app_finance_seeds_ledger_accounts` in row 35), and the
-  chart-of-accounts `CHECK` that rejected its own contra-revenue account — are now closed by
-  statements present in this document rather than by rules stated about it. Row 35 is the reason the
-  set to check is "every **contracted** function", not "every **granted**" one: F3 is granted to
-  nobody, so a granted-only check passed while a documented object had no `CREATE FUNCTION` at all. §36.2 row 2b is why that is now
-  true of the *prose* as well as the SQL: prescribing a `REVOKE` is not the same thing as deleting
-  the sentence that contradicted it, and the first pass of this remediation fixed the SQL and left
-  the sentence. As with the P1 labels below, the audit's own `P0-01`…`P0-11` (plus `P0-06a/b/c`) is a
-  **different space** from these eight register rows — the audit numbered findings, the register
-  numbers corrections, and some audit findings were closed by one row and others by several.
-- **P1: 0 open.** All **twenty-nine** are corrected, and each correction is either a statement in the
-  document, a decision about what a statement *means*, a control moved from prose into an enforcement
-  point (§36.2 row 25), or — for rows 36–41 — a **verification claim restated to match the check that
-  was actually run**, which in two cases (rows 40 and 41) found a real defect the earlier "passing"
-  claims had hidden. That last group matters as much as the first: a `DESIGN-GO` resting on checks
-  that assert more than they tested is not a verified design, it is an unexamined one — and rows 40 and
-  41 are what an unexamined design looks like when it is finally looked at. This line has now been
-  wrong four times — it read "twenty-two" when the register held 21 P1 rows, then "twenty-three" when
-  it held 23 after rows 31–33 landed, then "twenty-seven" when it held 27 after rows 36–39 — and each
-  time the cause was a remembered total rather than the register itself. The current register is **9 P0 + 29 P1 + 4 P2 = 42 rows**
-  (rows `1`–`41` plus `2b`).
+**Gate status as at the `0023` gate (superseded by §36.5):**  
+- 0021: immutable (hash `c480e789248591ea460d98932cb194a075deb3eb091efc97ef51f8a30881002c`) — 6 FKs owned, 4 R4 tenant pointers.  
+- 0022: immutable (hash `54662d332718fafc45548b2f5599c572e4fe5b79a3c9eace03e0f93518f73da2`) — 23 FKs owned, 2 R4 user pointers.  
+- 0023: `3bd7149bac905085cacf9607805f669ecf48f44849a1550b7ad54ed67a29b699` — 15 FKs owned; total 44 (9 single-column, 35 composite). R4: 3 user pointers (all 0023), composite exceptions `fin_document_counters_year_fk`, `fin_tenant_settings_tax_profile_fk`. R5: `fin_invoice_items_plan_fk` targets `fin_fee_installment_plans (tenant_id,structure_id,installment_no)`. `fin_bri_invoice_fk` is `(tenant_id,invoice_id)` `ON DELETE RESTRICT`.  
+- Runtime: `finance-composite-fk.test.ts` (29/29), `finance-trigger-inventory.test.ts` (27/27), `finance-cache-maintenance.test.ts` (28/28) all passing — **under `RUN_RUNTIME_SECURITY_TESTS=1` against a live PostgreSQL, and only there**; without both, each file self-skips, and `27/27` is a test count rather than a pass result (**§37-K**). TypeScript: clean. `school_saas_test` rebuilt through 0023; `school_saas_dev` untouched. No temp reset files left. `.r11_map.json` shape validated. The 0024 boundary remains intact (no 0024 entities in 0023). 13 bound trigger functions, 3 definers as specified.
+
+This supersedes the earlier DESIGN-READY framing; the verdict is the executable gate above. The adjudication (FK ownership, checkpoint counts, and the JSON-based freeze exemption) matches what was actually applied and verified.
+**What changed in the pass that produced this verdict, and why it is a P0 rather than a P1.** §36.2 row 42 records it: the header
+guard refused the phase's own cache writers, so `0023` as previously specified **could not build an
+invoice** — the first line insert raised `55000`. That is unappliable-in-practice, which is the same
+class as the four earlier P0s, not a documentation defect. It survived because **§28.3 was
+negative-only**: twenty tests, every one asserting that a *caller* is refused, and a rule that refuses
+the caller *and* the maintainer satisfies all twenty. C-SEC-M1 and C-SEC-M3b are positive for exactly that
+reason, and `ctl_csec_a`/`ctl_csec_b`/`ctl_csec_c` exist so that the halves of the fix are shown load-bearing
+rather than present.
+
+- **P0: 0 open.** The register now holds **seventeen** P0 rows: **`1`, `2`, `2b`, `3`, `4`, `5`, `26`, `34`, `35`,
+  `42`, `45`, `46`, `49`, `50`, `51`, `53`, `54`** — an exact set, listed here so the count can be checked against §36.2 rather than
+  accepted. Rows **6–8 are P1 and are not part of this set**, which is worth stating because
+  "rows 1–8" is the shorthand a reader would reach for and it is wrong: nine P0s predate this pass, and
+  the three newest before this one were numbered 42, 45 and 46, not 7 and 8. Nine are the
+  earlier set — the composite-type ordering, the `0001` default privilege, the two
+  `GRANT`ed-but-undefined functions (`post_fin_ledger_group` in row 26 and
+  `app_finance_seeds_ledger_accounts` in row 35), and the chart-of-accounts `CHECK` that rejected its
+  own contra-revenue account — each closed by statements present in this document rather than by rules
+  stated about it. **Row 42 is the tenth**, closed by a new invariant (FI-020), three new closing
+  assertions, seven mandatory tests and two reverted-clause controls. **Row 45 is the eleventh**:
+  three of the seven mandatory C-SEC controls named objects their own migration may not create, so it is a P0
+  despite reading as an inventory problem, and it is closed by A16–A18
+ plus the ownership column that lets a
+  check compare a control's subject against the migration that creates it (`R27′`). **Row 46 is the
+   twelfth**: the rule that an `apply` allocation may not name a `draft` or `void` invoice was asserted in
+   a comment and enforced nowhere, closed by §12.5.1's target-state guard (inventory row 12a). **No
+   register row is added by the FK adjudication in this revision**: `fin_bri_invoice_fk` was mis-owned in
+   one map cell and given the wrong delete action in one column comment, while §9.5 already carried the
+   correct DDL and reasoning — so the defect is a table and a comment disagreeing with the document's own
+   normative SQL, which is §36.2 row 44's class (P1: no statement is wrong, the contract was), and its fix
+   is folded into row 44 rather than filed as a new row.
+
+- **The five P0s this pass adds are all in one subject, and that is the finding, not the count.** Rows
+  **49, 50, 51, 53 and 54** are the refund machine, and they were produced by **one** audit question
+  asked five ways: *can `0025` be written and can its objects be called?* Row 49 asks whether every
+  named function exists in exactly one migration. Row 50 asks whether a caller's arguments match its
+  callee's reader. Row 51 asks whether a quoted lifecycle block still matches its source. Row 53 asks
+  whether a `CHECK` does what its comment claims and whether a guard names a real column. Row 54 asks
+  whether a diagram matches the table beside it. **Each question was answerable before the pass and
+  none had been asked** — the document carried 29 verification rows and every one of them looked at
+  counts, inventories, contiguity or ownership. None looked at a *caller and its callee*, and that is
+  the class of question a design document is uniquely able to answer and uniquely bad at answering by
+  reading its own prose. The five rows are filed separately because they have different fixes and
+  different regression checks (`R14′`, `R32′`, `R33′`), and merging them into one row would repeat the
+  error row 22 records: a register row closed against the *existence* of a problem rather than against
+  each distinct instance of it.
+- **P1: 0 open.** **Thirty-two** P1 rows. The newest is **row 52** — four defects in one subsection, three
+  of them "the remediation was recorded rather than performed" (a bare `PERFORM 1` provenance mirror, an
+  alphabetical trigger-order claim, and a transition with no event row) and the fourth the two
+  undefined helpers F11/F12 called, tracked as an unregistered `OD-17`. Before it, **row 44** — §35.2's FK map omitted five
+  constraints `0023` actually creates and carried a stale edge count, remediated against the re-derived
+  **67 / 43 / 24** and then again, in this revision, against **67 / 44 / 23** once
+  `fin_billing_run_items → fin_invoices` was adjudicated to `0023`. Before that, **row 43** filed the receipts binding under the wrong migration in §35.3.2,
+  and **row 41** was a counting paragraph whose three totals did not agree with each other or with its
+  own table. Each is a P1 rather than a P0 because no statement was wrong; the *arithmetic* was, which
+  for a section whose stated purpose is to make the inventory verifiable rather than asserted is still a
+  real failure of its job. **Row 52 is the one P1 in this set that was one P0 away**: an undefined callee
+  is row 26's class, and it is filed as P1 only because the two names it left undefined are helpers whose
+  absence produces a `55000` at the point of call rather than an unappliable migration.
+- **The register is now 17 P0 + 34 P1 + 4 P2 = 55 rows** (rows `1`–`54` plus `2b`). §36.1 holds **34**
+  rows; the twelve new ones — R22′…R33′ — were added by this pass and the two newest
+  by the refund audit, and each covers a claim that no
+  existing row tested: that an **invoker** is correctly classified (every prior row checked definers),
+  that the scope vocabulary is closed, that row 4d's `AFTER`/`WHEN` are the binding they claim to be,
+  that §35.3/§35.3.2/§30.1 agree, that **a caller's arguments match its callee's reader** (`R32′`), and
+  that **a `CHECK` does what its comment says and a guard names a real column** (`R33′`). **Eight more rows were corrected rather than added** — `R1`, `R2`, `R3′`, `R4′`,
+  `R6′`, `R9′`, `R13′`, `R14′` — and every one of them had already read as a pass: the fence
+  tally was 232 not 236, the heading tally 220 not 221, `R2` said 43 functions where the document defines
+  42, `R6′` scanned 30 tables for 29, `R9′` counted 16 `GRANT`s where the block has 17, `R13′`
+  reported 69 citations across 21 files for a document holding 143 across 38, and `R14′` asserted
+  `F1`…`F10` for a document that had just added `F11` and `F12`. **A check whose stated number
+  is wrong is worse than no check, because this verdict quotes it as evidence** — and `R14′` was the
+  load-bearing example in this pass, because it is the row that should have caught rows 49 and 52 and
+  could not: **a set-equality check cannot see a name that is missing from both sides.**
 - **On the `P1-nn` labels, which are a different space from the register rows.** Statements through
   the document cite inline labels `P1-01`…`P1-11`, `P1-13`, `P1-14`, plus `P1-02a` as a sub-label of
   `P1-02`. **`P1-12` is not cited anywhere in this document.** That is a gap in the label space
@@ -11185,31 +16183,46 @@ conditions in §30.3 and the function contract in §19.7.
   are documentation or migration-ordering items. The register is §34.3 and the IDs are stable.
 - **Open decisions: 16**, none blocking. Three carry cross-phase **ordering** constraints and must be
   settled before the named migration is *written*, not before it is applied: **OD-14** before `0028`,
-  **OD-15** before `0023`, and **OD-16** before `0026`.
+  **OD-15** before `0023`, and **OD-16** before `0026`. **OD-15 gates the migration this verdict
+  authorises**, so it is called out here rather than left in the register.
 - **Counting note.** The P2 figure is the size of the §34.3 register, not a count of things that
-  block go-live. The trigger count (28 bound functions, 35 distinct statements), the view count (7), the
+  block go-live. The trigger count (35 bound functions, 42 distinct statements), the view count (7), the
   table count (29 `CREATE TABLE`s, each immediately revoked), the permission count (25), and the
-  event count (18 new; 111 total = 22 HANDLED / 89 NOOP) are asserted mechanically by
+  event count (19 new; `112` total = 22 HANDLED / 90 NOOP) are asserted mechanically by
   `finance-trigger-inventory.test.ts` and `finance-composite-fk.test.ts` rather than by prose, and
   all were re-verified against this revision.
 
-**Static verification, run against this final revision** (mechanics in §36.1): 220 fence markers /
-110 balanced blocks, 0 headings stranded inside a fence, **0 literal `…`/`...` in any fenced block tagged
+**Static verification, run against this revision as it stood at the `0024` gate** (mechanics in §36.1;
+**every figure in the next paragraph is the `0024`-gate value and several are stale at `0025` — §36.6
+carries the current ones**, and the differences are `238 → 246` fence markers, `45 → 49` functions,
+`11 → 15` unbound, `9 → 13` application-layer, `18 → 19` new events and `111 → 112` catalogued, all of
+them caused by this pass adding F11–F14 and `fee.refund.rejected`): 238 fence markers /
+119 balanced blocks, 0 headings stranded inside a fence, **0 literal `…`/`...` in any fenced block tagged
 `sql`, `ts` or `json`** — the 3 that exist are all in the §30.3.2 `text` outline of `0028`'s ordering, which is
 a numbered sketch and not runnable, and which uses `text` rather than `sql` for that reason,
-28/28 trigger-inventory rows bound and
-sequential with 0 orphans and 39 defined functions, 205 numbered headings with 0 duplicate section
-numbers, 172 distinct `§` cross-references with 0 unresolved
-(`§5.4` is RFC 4226), **69 `path:line` citations across 21 repository files and 30 migration-prefix
-citations, all resolving to an existing file, an in-bounds line and an unambiguous basename** (this
-pass fixed one that pointed past the end of the file it named and three bare `exams.ts:` citations
-that resolve to three different real files), 31 threat rows with 0 dangling citations
+35/35 trigger-inventory rows bound and
+sequential with 0 orphans, **45 functions defined in this document, of which 34 are bound by a trigger
+here and 11 are bound to none — the 2 deliberate F5h helpers (`trg_fin_reversal_shape_check`,
+`fin_invoice_reapply_derived_state`) plus 9 application-layer/RPC functions that route code calls
+directly; 34 bound here + row 3a, which resolves against the applied `0022` migration rather than
+here, is the 35**; 42 distinct
+`CREATE [CONSTRAINT] TRIGGER` statements naming them with 0 orphans, and **5 of the bound functions
+`SECURITY DEFINER` — exactly the five F5d names, counted whole-phase (3 of the 13 bound functions applied at
+`0023`, 5 of the 24 from `0024`) rather than as a single figure at any checkpoint**, while `trg_fin_invoice_header_guard` is asserted
+`prosecdef = false` **and** to contain no `UPDATE`/`INSERT`/`DELETE` (A13, C-SEC-M4a), **the maintenance
+scope having exactly two values and every `set_config` call transaction-local** (A14), **row 4d bound
+`AFTER UPDATE OF status` with the exact `WHEN` clause** (A15), **229** numbered headings with 0 duplicate section
+numbers, **201** distinct `§` cross-references of which **198 resolve**; the 3 that do not are `§5.4` (RFC 4226, the same token as a section number by coincidence) and `§8.7.2`, which survives only inside §36.1's narrative recording that it **was** a dangling reference and has been corrected, **143 `path:line` citation occurrences over 50 distinct tokens reaching 38 repository files, and 30
+migration-prefix citations, all resolving to an existing file, an in-bounds line and an unambiguous basename** (this
+pass fixed one that pointed past the end of the file it named, three bare `exams.ts:` citations that
+resolve to three different real files, and seven more across the `attendance.ts` / `permissions.ts`
+basenames — twelve in total), 31 threat rows with 0 dangling citations
 (11 of them carrying an inbound citation and 20 table-only, which is the correct shape for a
 catalogue), 29 of 29
-Phase 7 tables carrying an immediately-following `REVOKE ALL` with 0 strays, 29 of 29 tables granted
-exactly once in the `0028` block with 0 double-grants and 0 privilege-shape mismatches against the
-§35.4 table, `DELETE` granted nowhere, 7 views defined once, 0 encoding errors, all 8 granted functions
-both defined and contracted, **9/9 function narratives' parameter lists matching their DDL on names
+Phase 7 tables carrying an immediately-following `REVOKE ALL` with 0 strays, 29 of 29 tables and 7 of 7 views granted by
+**17** `GRANT` statements in the `0028` block with 0 double-grants and 0 privilege-shape mismatches
+against the §35.4 table, `DELETE` granted nowhere, 7 views defined once, 0 encoding errors, all 8
+granted functions both defined and contracted, **9/9 function narratives' parameter lists matching their DDL on names
 and order**, **§5.2's nine-account chart, the `code_ck` literal list and F3's seed `VALUES` identical
 row-for-row on code, class, normal side and `is_contra`** (R21′), **§23.1's event list and §24.1's
 disposition table the same 18 events with the registry arithmetic following** (R19′), **§35.1's
@@ -11218,21 +16231,479 @@ disposition table the same 18 events with the registry arithmetic following** (R
 `ENABLE` and 2 `FORCE` are written literally, the other 24 tables held fail-closed behind their
 `REVOKE` until `0028`** (R18′).
 
-**Two figures in §36.1 were not re-derived by the pass that produced the paragraph above** and are
-stated as carried rather than as verified: `R11′`/`R16′`'s FK-edge counts (62 edges / 62 rows, 50
-composite — the 62nd is `0022`'s `fin_fee_structures.published_by`, D7). §35.2's FK map remains
-62 edges / 62 rows with 12
-single-column rows across 3 target tables (`tenants`, `users`, `auth_sessions`) and 0 orphans **on the
-authority of the map, not of a fresh parse** — the parse attempted here disagreed with it, which is a
-reason to distrust the parser, not the map, but it is also a reason not to call the map verified. These
-must be reproduced before `0021` is written; §36.1 holds **22** rows and the other **twenty** were
-reproduced by this pass, `R15′`'s nine signature comparisons and `R18′`–`R21′`'s four new
-representations-vs-source comparisons among them, which earlier passes had only carried or not
-checked at all.
+**Nothing in §36.1 is now carried, and that sentence is the point of this pass.** The previous
+revision of this paragraph stated that `R11′`/`R16′`'s FK-edge counts were *not* re-derived and
+that §35.2's map was verified only “on the authority of the map, not of a fresh parse” — and it was
+right to say so, because the parse had disagreed with the map and the map was **wrong**: §35.2
+listed **62** rows with **12** single-column rows, while parsing `0021`–`0029` yields **67** rows with
+**14** single-column rows (`tenants` 6, `users` 7, `auth_sessions` 1), and the map was missing five
+constraints `0023` actually creates. That is §36.2 row 44. The map is now the re-derived figures
+— **67 rows, 44 current at the `0023` checkpoint, 23 future** — and `R11′`, `R16′` and `R26′`
+all reproduce it, so the three properties are now separate checks rather than one assertion repeated:
+`R11′` measures the outcome, `R26′` measures that the measurement is re-derivable from the
+owning-migration column alone, and `R16′` measures that every composite targets an anchor the rule
+permits.
+
+§36.1 holds **32** rows. This pass added **eight** (`R22′`–`R25′`, `R27′`–`R30′`) and
+**corrected eight** it had already added or inherited (`R1`, `R2`, `R3′`, `R4′`, `R6′`, `R9′`,
+`R13′`, `R14′`). **The corrections are the more interesting half, because every one of them
+was a row that had already read as a pass**: the fence tally was 232 rather than 236, the heading
+tally 220 rather than 221, the reference tally 189/187 rather than 190/188, `R2` said 43 functions
+where the document defines 42, `R6′` scanned 30 `CREATE TABLE` statements for 29 tables, `R9′`
+counted 16 `GRANT` statements where the block has 17 and wrote an equation that summed to 35 while
+asserting 29, `R13′` reported 69 citations across 21 files for a document containing 143 across
+38, and `R14′` said §19.7.2 held `F1`…`F10` plus `F5h` when it held 14 rows. **A check whose
+stated number is wrong is more damaging than no check**, because it is cited as evidence by the
+paragraph above — which is exactly what this paragraph used to do.
+
+**`R22′`–`R25′` were themselves produced by finding something**: `R22′` exists because
+every previous row checked that a *definer* is correctly classified and none checked that an *invoker*
+is, which is the check that would have caught the P0 in §36.2 row 42; `R27′` and `R28′` were added
+with row 45, because no row compared a control's subject against the migration that creates it.
 
 **The one thing this verdict does not say.** It does not say the SQL is correct. It says the
 document no longer contains a specification that a PostgreSQL parser, a policy evaluator, or an
 `aclexplode` query would contradict — which is a real and mechanically testable property, and is the
-most that can be established without a database. The first executable proof is `0021` applying
-cleanly with `finance-migration-order.test.ts` passing. Until that happens, the defects in §36.2 are
-closed **in the design**, not yet **in the schema**.
+most that can be established without a database. **No PostgreSQL instance, `psql`, `pg_ctl` or Docker
+was available in the pass that produced this revision**, so the reproduction behind row 42 is a
+**static model** of the trigger semantics rather than an executed test; it is stated as a model
+because that is what it is, and its assertions are about the *document's* specification, not about a
+running server. The first executable proof is `0023` applying cleanly with
+`finance-migration-order.test.ts`, `finance-trigger-inventory.test.ts`, `finance-composite-fk.test.ts`
+and the new `finance-cache-maintenance.test.ts` (§28.3.1) passing — and **OD-15**, which gates this
+migration, settled. Until that happens, the defects in §36.2 are
+closed **in the design**, not yet **in the schema** — and §36.2 row 42 is the clearest case in the
+register of a defect that no amount of reading would have found, which is the reason its regression
+tests are positive.
+---
+
+### 36.5 Final verdict — `0024_fin_payments.sql` (SUPERSEDED; retained as history)
+
+**DESIGN-READY FOR `0024_fin_payments.sql`** — *granted, and since overtaken; the current gate is §36.6*
+
+This was the current gate until §36.6 replaced it. §36.4 above is the `0023` gate, kept because §36.2's register is its
+audit trail and a register without the verdict that closed it is not a register. It was true when written and
+stopped being true the moment `0023` was applied, so its "current" label was removed rather than its
+content edited. The same treatment applies here.
+
+**Gate re-opened and re-closed — `0024` is written and applied (supersedes the two stale bullets below).**
+The gate-status list further down was written when no PostgreSQL instance existed and still says
+"**NOT WRITTEN, NOT APPLIED**" and "no `0024` statement has been parsed, planned or executed". Both
+were true of that pass and are false now, so they are corrected here rather than edited in place: this
+pass ran against a live `school_saas_test` at the **`0024`** checkpoint.
+
+| Gate | Result |
+|---|---|
+| Applied set | `school_saas_test`: **24** migrations, `0001`–`0024`. `school_saas_dev`: **20**, `0001`–`0020`, **untouched** — no statement of `0024` was applied to it and its migration count is unchanged from the baseline |
+| `npx turbo run typecheck` | **17/17** tasks successful |
+| `npx vitest run src/security` with `RUN_RUNTIME_SECURITY_TESTS=1` | **20 files / 433 tests, all passing**, 0 skipped — `finance-cache-maintenance` 31, `finance-payments` 23, `finance-trigger-inventory` 35, `finance-composite-fk` 30, plus the 16 non-finance suites in the same directory |
+| §28.3.1's `0024` set | **C-SEC-M3b, M4b and M6b all pass** against the real producer. M6b's producer is a `fin_invoice_items` write (Option C, §36.2 row 48) and its companion **`draft → void`** discard is now asserted: unreasoned and blank-reason voids are refused at `55000`, a reasoned discard stamps `voided_at` server-side, consumes no `invoice_no`, leaves `balance` at 0 and leaves the line's `frozen_at` `NULL` |
+| D9 (row 46) | Unchanged and still enforced: an `apply` allocation naming a `draft` invoice raises `55000`, verified in `finance-payments.test.ts` and again inside M3 before it issues |
+| Receipt (§25.5) | Overwrite-from-payment semantics unchanged and already covered: the existing case supplies a wrong amount and payer and asserts both are replaced. The trailing comparison is dead **by specification** and is retained verbatim |
+| Harness fixes | All seven reviewed as **harness-only** and none weakens an assertion. The `tgtype` decoder was verified against the live catalog before being trusted: PostgreSQL's bit assignment is `1`=ROW, `2`=BEFORE, `4`=INSERT, `8`=DELETE, `16`=UPDATE, `32`=TRUNCATE, and `fin_targets_validate` really is `23` (`INSERT|UPDATE`) where the old decoder read it as `INSERT|DELETE`. Correcting it **tightened** `EXPECTED_BINDINGS` rather than loosening it |
+| Protected files | `0021`, `0022`, `0023` and `schema.ts` hashes re-verified unchanged against the values recorded in this gate |
+
+**One item this gate does not close, recorded rather than passed over:** §36.5 names
+`finance-migration-order.test.ts` as part of the first executable proof, and §36.2 row 39 says that
+file derives its expectations from §35.1's "Creates (complete)" column. **That file does not exist** —
+`packages/db/src/security/` holds 20 suites and none of them is it. This is a carry-forward of the
+§37.4 class (a named proof that was never written), it is **not** a regression introduced here, and it
+is left open rather than quietly substituted with a different file. §35.1's completeness claim is
+still checked by `R20′`, so the *data* the missing suite would consume is verified; what is missing is
+the per-migration ordering assertion built on top of it.
+
+**Gate status (as of the pass that produced the superseded bullets below — retained as history):**
+
+- `0021`: immutable (hash `c480e789248591ea460d98932cb194a075deb3eb091efc97ef51f8a30881002c`) — 6 FKs owned.
+- `0022`: immutable (hash `54662d332718fafc45548b2f5599c572e4fe5b79a3c9eace03e0f93518f73da2`) — 23 FKs owned.
+- `0023`: immutable (hash `3bd7149bac905085cacf9607805f669ecf48f44849a1550b7ad54ed67a29b699`) — 15 FKs owned;
+  checkpoint total **44** (9 single-column, 35 composite). **The authoritative baseline for every `0024` row.**
+- `0024_fin_payments.sql`: **NOT WRITTEN, NOT APPLIED.** This gate authorises *writing* it.
+- Runtime: no PostgreSQL instance was available and none was used, so **no `0024` statement has been
+  parsed, planned or executed.**
+- **Tooling actually executed in this pass** (this is the whole of it, and it is the repository's own
+  tooling rather than a purpose-built document auditor — §37-K records why):
+  - `npx turbo run typecheck` — **17/17 tasks successful**, i.e. the workflow's own `Typecheck` step
+    reproduced repo-wide, not only `@sms/db`.
+  - `npx vitest run` in `@sms/db` — **4 files passed / 19 skipped, 22 tests passed / 400 skipped.**
+    The 400 are the DB-backed security suites self-skipping for want of `RUN_RUNTIME_SECURITY_TESTS=1` and a
+    live database. **No `0024`-shaped assertion is among the 22**, so this is a non-regression check on the
+    existing baseline, nothing more.
+- §37.2: **1 P0 + 9 P1 + 2 P2 (12 findings, 37-A–37-L), all closed in the design** and none closed in the
+  schema. The two P2s are carry-forward items, not repairs: 37-K (no CI step names the finance suites) and
+  37-L (a transposed tally in 37-I's own disposition, found by re-deriving the check row 37-I added).
+- §37.4: **two observations deliberately open** — owner-level `DELETE` on `fin_payment_allocations`, and
+  `finance-cache-maintenance.test.ts`'s M3/M6 cases passing only in appearance. Both are recorded, not
+  waived.
+- Open decisions: **16**, of which **OD-15 is resolved and shipped** and **none gates `0024`**; the two
+  ordering constraints are **OD-14 before `0028`** and **OD-16 before `0026`** (§33).
+
+**What this gate does and does not claim.** It claims the document no longer specifies anything a
+PostgreSQL parser, a policy evaluator or an `aclexplode` query would contradict, and that is
+mechanically checkable — **32 rows in §36.1, all reproduced from the document rather than asserted**, with
+`R29′` and `R30′` added by this pass. (**The table has since grown to 34 rows; `R32′` and `R33′` were added
+by the `0025` pass and the figure was restated there rather than edited here**, because editing a
+superseded verdict's evidence is how a register stops being a record.) It does **not** claim `0024` applies, that its triggers behave as
+modelled, or that the `0023` baseline is defect-free. The first executable proof is `0024` applying
+cleanly with `finance-migration-order.test.ts`, `finance-trigger-inventory.test.ts` (whose figures 37-A
+moved), `finance-composite-fk.test.ts` and the `0024` set of §28.3.1 — including **C-SEC-M3b, M4b and M6b**,
+which are `0024`'s because their subjects cannot exist earlier — plus §10.2.1's two assertions that the
+challan refreshes on a payment and that it reaches `void` through the invoice.
+
+**These runtime gates are covered, but not by name, and the reader should know it (37-K).** The repository's only
+workflow is `.github/workflows/phase6-security.yml`. The string `finance` appears in it **zero times**, and all three
+finance suites are gated on `RUN_RUNTIME_SECURITY_TESTS`. They execute because that workflow's aggregate step
+"Phase 3-4 DB security suites" runs `vitest run src/security` across all **19** files in
+`packages/db/src/security/` — so Phase 7 is covered **by breadth, incidentally, under a Phase 6 name**. A finance
+regression therefore surfaces as a failure in a step labelled for another phase, and if that aggregate step is ever
+narrowed or split, Phase 7 loses its only CI coverage without any finance-side signal. Naming a Phase 7 step is the
+remediation; it lives in `.github/workflows/`, which this pass may not modify, so it is carried forward rather than
+done.
+
+**One asymmetry a reader should not have to discover.** §36.2's `P0: 0 open` rests on seventeen P0 rows whose
+fixes are *statements present in this document*. §37.2's single P0 (37-A) closes on **a trigger that does
+not exist yet**, because its subject — a challan whose status follows its invoice — cannot exist before
+`0024`. **A gate that closes a P0 by writing a specification is weaker evidence than one that closes it by
+writing SQL**, and this pass is on the weaker side of that line for 37-A. The arithmetic claims in
+37-B/37-C/37-D/37-E are closed in §12.2, §35.8 and §35.3; their regression tests are specified in
+`finance-invariant.test.ts` as FI-021 but **do not exist**.
+
+---
+
+### 36.6 Verdict — `0025_fin_refunds.sql` (AMENDED 2026-10-05)
+
+**DESIGN-AMENDED — FORWARD-REMEDIATION REQUIRED**
+
+> **Gate history.** This section previously read `DESIGN-READY-FOR-0025`. That gate is **superseded**
+> and is retained as history rather than deleted, in the same manner as §36.4. The amendment of
+> 2026-10-05 (Phase 7 · D2/D3 Re-Adjudication, §13.1.1) found the immutable `0021`–`0025` set
+> **non-reproducible against the live catalog** and recorded three canonical targets that are
+> **specified but not implemented**, so `0025` remediation implementation is **not authorized** until
+> the forward-only reconciliation is separately implemented and independently audited. The body of this
+> section below is unamended and remains the evidence trail for the original gate.
+
+**Why the gate moved.** The design's canonical DDL was correct on every point the re-adjudication
+tested; what failed was the **relationship between the design, the immutable source, and the live
+catalog**. Three canonical targets now exist that the immutable source does not yet satisfy:
+
+| # | Canonical target | Immutable `0025` source | Live catalog |
+|---|---|---|---|
+| 1 | `trg_fin_refund_provenance` is **`SECURITY INVOKER`** (§13.1.1, D2B) | `SECURITY DEFINER` | `SECURITY INVOKER` |
+| 2 | refund-side branch scoped by **`TG_OP = 'INSERT'`** (§13.1.1, D2) | predicate **absent** — fires on `UPDATE` too | branch removed |
+| 3 | `fin_pa_refund_fk` is **`ON DELETE NO ACTION`** (§13.1.1, D3) | **`ON DELETE SET NULL`** | `ON DELETE SET NULL` |
+
+**Source/live reproducibility gate — OPEN.** The immutable migration set **does not currently
+reproduce the live catalog exactly**. `schema_migrations` stores `version` + `applied_at` **without
+migration checksums**, so the runner cannot independently detect byte drift in an already-applied
+file; remediation for items 1–3 has been applied/represented **outside** the immutable set. Immutable
+files **must not** be edited to close this. **Forward remediation is required before source/live
+reproducibility can be declared closed**, and a checksum-bearing ledger is a prerequisite for
+detecting the class of drift involved. Redesigning the migration runner is **out of scope** for this
+amendment and is recorded here as an observation only.
+
+**Still true, and unchanged by this amendment.** `0025` remains a **write-once staging checkpoint**.
+`fin_refunds` is a staging table whose only reachable state is `requested`; every transition is an
+`UPDATE` of a column §35.4 revokes, and the only lawful writers — F11/F12 — are `0028`'s. **F11/F12
+remain strictly `0028`-owned and are not implemented**, and `app_ctx_session_id()` does not exist.
+
+**What this gate is.** `0025` is a **write-once staging checkpoint**. It creates `fin_refunds`, adds
+`fin_pa_refund_fk`, and binds `trg_fin_refund_provenance` on **both** sides plus the deferred
+`fn_fin_refund_ceiling`. It executes exactly one operation — the `INSERT` that creates a `requested`
+refund — and **no transition at all**, because every transition is an `UPDATE` of a column §35.4 revokes
+table-wide and the only lawful writer, F11/F12, is `0028`'s. That is the whole of the checkpoint, it is
+not a half-built machine, and §13.2.1 states the two facts that force it.
+
+**What was wrong with it when this pass opened.** Five P0s and one P1, all in the refund machine and all
+recorded in §36.2 as rows 49–54. The four that made the checkpoint unsignable rather than merely
+incomplete:
+
+| Row | Sev | The defect | Closed by |
+|---|---|---|---|
+| 49 | P0 | `postRefundApproval` was a `0025` deliverable with **no `CREATE FUNCTION`**, filed under **F5** (`SECURITY INVOKER`), calling F4 (`0026`) and F8 (`0028`). It would have been created cleanly and raised `42883` on every call; `processed` and `rejected` had **no writer at all** | Re-owned to `0028` as **F11** + **F12**, both fully defined, both in §19.7.2 and §19.7.3 |
+| 50 | P0 | Both functions posted their ledger legs under `'account'`; F4 reads `'account_code'` and raises `55000`. The refusal landed **after** the reversal rows and the consumed MFA challenge were written | Keys corrected; `R32′` added so a caller's arguments are compared to its callee's reader |
+| 51 | P0 | §35.8's five-line lifecycle block disagreed with §15.1 on **four** lines, including `Cr 4000` on applied cash and on refund — double-recognition of income | Block restated from §15.1, with the superseded values and the reason each was wrong tabled beneath it |
+| 53 | P0 | `fin_refunds_decision_ck` collapsed `approved` and `processed` into one arm, so `processed_by`/`processed_at` were never required while the comment above claimed they were; and §35.7 row 4's "disbursement reference present" guard named a **column that did not exist** | `disbursement_reference text` added as the eighth server-owned column; four **disjoint** arms; F12 takes it as a fourth argument and raises a named `55000`; `R33′` added |
+| 54 | P0 | §13.2's diagram drew `approved → rejected`, which §35.7 row 7 forbids and the `CHECK` makes unrepresentable; and its second diagram claimed `requested → rejected` was reachable at `0025`, which it is not | Three edges, and the `0025` diagram now shows the `INSERT` as the only reachable operation |
+| 52 | P1 | A bare `PERFORM 1` provenance mirror that could not fail; §12.5.1's alphabetical trigger-order claim; `fee.refund.rejected` missing from §23.1; and two helpers F11/F12 called with no `CREATE FUNCTION`, tracked as an unregistered `OD-17` | Mirror rewritten to an assertion that can fail; true firing order stated; event added as **19th** (**13 HANDLED / 6 NOOP**); helpers **defined** as **F13**/**F14**; OD-17 withdrawn |
+
+**The two properties this gate rests on, and neither is a count.**
+
+1. **No `0025` object names a later migration's object.** The checkpoint's function body
+   (`trg_fin_refund_provenance`) names only `fin_refunds`, `fin_payment_allocations` and `fin_payments`;
+   `fn_fin_refund_ceiling` names the same three. There is no `p_lines` literal, no `app_consume_step_up`
+   call, no permission helper and no outbox write anywhere in `0025`. This is the property §30.3.1 exists
+   to protect and it is now checkable by reading one migration's creates and resolving every identifier
+   in them against §35.1's owning-migration column — `R26′` already performs that resolution for the FK
+   map, and the same rule applied to `0025`'s two functions yields **0 forward references**.
+2. **The refund machine is closed over its own writer set.** `UPDATE` on `fin_refunds` is revoked
+   table-wide, F11 and F12 are the only two functions in the document that write it, both are definers
+   owned by `school_migrator`, and both re-derive the permission through **F13** rather than trusting the
+   ACL they bypass. The terminal-state rules are therefore enforced by *the absence of any other writer*
+   — which is why §19.7.3 records that a `trg_fin_refund_state` trigger was considered and rejected: a
+   `BEFORE UPDATE` trigger cannot distinguish F11's write from `school_migrator`'s, and special-casing
+   the privileged role by name is exactly the kind of control that reads as one and enforces nothing.
+
+**What this gate does and does not claim.** It claims the document now specifies nothing a PostgreSQL
+parser, a policy evaluator or an `aclexplode` query would contradict for `0025` and for the two
+functions that own its transitions — **34 rows in §36.1, all reproduced from the document rather than
+asserted**, with `R32′` and `R33′` added by this pass and both having **failed on first run**, which is
+the only evidence that they are checks rather than descriptions. It does **not** claim `0025` has been
+written or applied, that the refund state machine has been executed, or that the deferred
+`fn_fin_refund_ceiling` fires as modelled. **No PostgreSQL instance was used in this pass and none was
+available**, so nothing below is a runtime result and nothing below may be quoted as one.
+
+**Carried forward, named rather than passed over.**
+
+- **`app_ctx_session_id()` does not exist** (**P2-10 / OD-14**). It is the only undefined name in F11 or
+  F12's bodies, it is not specific to the refund machine — F8 and F9 take the session id the same way —
+  and **OD-14 must be settled before `0028` is *written***, because F8/F9/F11/F12 are all written against
+  that interface. **This is the one open decision that gates the migration immediately after this one.**
+- **FI-006 / FI-022's regression tests do not exist.** The deferred completeness trigger and the
+  step-up↔event bijection are specified as invariants and are enforced in SQL, but
+  `finance-invariant.test.ts` is written per §28 and has not been written. A specified invariant with no
+  test is weaker evidence than a tested one, and this verdict is explicit about which side of that line
+  it is on.
+- **`finance-migration-order.test.ts` does not exist** (carried from §36.5). §35.1's completeness claim
+  is verified by `R20′`, so the data it would consume is checked; the ordering assertion built on top of
+  it is not.
+- **No CI step names the finance suites** (37-K). Coverage is incidental, under a Phase 6 workflow name,
+  and `.github/workflows/` is outside this pass's scope.
+
+**Register totals at this gate:** **17 P0 + 34 P1 + 4 P2 = 55 rows** in §36.2 (rows `1`–`54` plus `2b`),
+**0 open**; **34** verification rows in §36.1; **19** new events (`112` catalogued, **13 HANDLED / 6
+NOOP**); **16** open decisions of which **OD-15 is resolved and shipped** and **none gates `0025`**.
+
+---
+
+## 37. THE 0024 AUDIT — FINDINGS, EVIDENCE, AND DISPOSITION
+
+§36 is the audit trail of the revision that produced the 0023 gate. This section is the audit trail
+of the pass that **re-based that gate onto 0024**: an independent read of the document against the
+0023 baseline, run with the rule that a finding is only a finding if it can be shown mechanically
+rather than argued.
+
+> **Scope of the counts in §37 — read before quoting any figure from this section.** §37 is a
+> **historical** audit record, and its figures are the counts **as of the `0024` gate**, not as of the
+> current document. They are retained unchanged as evidence and are **not** restated by the 2026-10-05
+> amendment. Where §37 says "45 functions defined in this document", "11 are bound to none", "35 bound"
+> or "35 inventory rows", the **current** authoritative figures are in **§38.2**: **50** functions,
+> **16** unbound, **34** document-bound, **35** total bound. A `§37` count quoted without its
+> checkpoint is a misreading, not a contradiction — and the `34`/`35` distinction §37 itself already
+> draws ("34 bound here + row 3a … is the 35") is the same distinction §38.2 states normatively:
+> **document-bound always means 34; total bound always means 35.**
+
+### 37.1 Method, and what it is not
+
+Every finding below was established by a **whole-document scan or a direct reading of the named
+object**, and each states the scan. No finding rests on a judgement that the author of a passage
+disagreed with it. **No PostgreSQL instance was used and none was available**, so nothing here is an
+execution claim: "fixed" means *the document no longer specifies something a parser, a policy
+evaluator or an `aclexplode` query would contradict* — the same limit §36.1 states, reasserted here
+because the difference between a design defect and a runtime defect is the whole subject of §37.4.
+
+**The 0023 baseline was read, not modified.** `packages/db/migrations/0023_fin_invoices.sql`,
+`0022_fin_fee_structures.sql` and `0021_fin_foundation.sql` are applied and immutable, and the
+`0023` rows of §30.1/§35.3.2 are treated as the authoritative statement of what exists. One genuine
+observation against the applied source is recorded in §37.4 and is **deliberately not remediated
+here**, for the reason §36.2 row 45 gives for the same class of item.
+
+**What was actually run, and what it is not.** This pass looked for existing Phase 7 audit tooling rather than
+assuming it was absent, and **there is none aimed at this document**: no workflow step parses this file, no test
+reads it, and the string `finance` does not appear in the repository's only workflow. So "static audit tooling"
+resolves to the repository's own gates, and both were run rather than asserted — `npx turbo run typecheck`
+(**17/17 tasks**, the workflow's own `Typecheck` step reproduced repo-wide) and `npx vitest run` in `@sms/db`
+(**22 passed / 400 skipped**). The 400 skips are the point: every DB-backed finance suite is gated on
+`RUN_RUNTIME_SECURITY_TESTS=1`, so without a live PostgreSQL they report as **skipped**, which is not a pass.
+That gap between how this section reads and what a checkout without a database prints is recorded as **37-K**,
+and §36.4's runtime line now carries its own preconditions. The document-level claims above are therefore
+reproduced by scripts written for this pass, which are **not checked in** — they are re-derivable from the rules
+recorded in §36.1, and no one is maintaining them as a permanent gate.
+
+### 37.2 Findings, in severity order
+
+| # | Sev | Finding | Evidence | Disposition |
+|---|---|---|---|---|
+| **37-A** | **P0** | **`fin_challans.status` was a cache with no invalidation path.** §10.1 declares it a "trigger-maintained cache of the owning invoice's derived balance" and §10.2 gives it five states with edges, but the only trigger that writes it is bound `BEFORE INSERT OR UPDATE ON fin_challans`, so it fires when a *challan* is written and at no other time. A payment posted against a live invoice moved the invoice `issued → paid` and left the challan reading `issued`. Voiding a paid invoice could not move the challan to `void` at all, making row 8's void arm, its terminality check and `fin_challans_void_ck` unreachable code. A printed bank-deposit instrument kept asserting a payable amount against a cancelled debt — the fraud exposure §10.2 identifies for itself, left unmitigated three paragraphs later | (a) a whole-document scan for `UPDATE fin_challans` returned **0** hits **before this revision**, and returns 4 now — this row's prose, §10.2.1's fact-1 table, row 8a's inventory cell, and the one statement the fix introduces; **(e) the applied `0023` baseline is worse than the design was:** `0023_fin_invoices.sql` binds **no trigger to `fin_challans` at all** — all nine of its `CREATE TRIGGER`s are on `fin_invoices`, `fin_invoice_items` and `fin_invoice_adjustments` — and contains no `UPDATE fin_challans`, so at the applied checkpoint the column has **no writer whatsoever** and `school_app_rw` cannot reach the table (§35.4's grant arrives in `0028`). Row 8, in `0024`, becomes its first writer and gets issue-time derivation right; nothing before this revision ever corrected it afterwards; (b) `fin_invoice_reapply_derived_state`'s only `UPDATE` names `fin_invoices`; (c) `trg_fin_invoice_balance_recompute` is bound to the three tables that *feed* `balance` and correctly not to `fin_challans`; (d) §35.4 grants `SELECT, INSERT` on `fin_challans` and **no** `UPDATE`, so `school_app_rw` cannot repair it and §35.5 records no route that does | **FIXED.** New bound function **`trg_fin_challan_refresh`** (inventory **row 8a**), `SECURITY DEFINER`, bound `AFTER UPDATE OF status ON fin_invoices`. Bound on the invoice's `status` column rather than on any cause, so it catches allocations, refunds, line corrections and voids from one subscriber and keeps §10.2's single derivation of the five-state rule inside row 8. §10.2.1 carries the full argument, the two facts that make this trigger `SECURITY DEFINER` where row 8 is `SECURITY INVOKER`, and the two properties to assert. **Checked against the applied baseline's actual DDL, not only against this document's restatement of it**: `0023_fin_invoices.sql:561-564` defines `fin_challans_void_ck` as `(status='void' AND voided_at IS NOT NULL AND void_reason IS NOT NULL) OR (status<>'void' AND voided_at IS NULL)`, which is **two-way** — a refresh that set only `status` could not have entered `void` at all. It can, because row 8 assigns `NEW.voided_at`/`NEW.void_reason` from the invoice (`§10.2`, lines 3898-3899) and refuses to move a void challan out (`§10.2`, lines 3839-3842), so the second arm is never the one that fires. `0023:558` also makes `UNIQUE (tenant_id, invoice_id)`, so `SET status = status` — one self-assignment — reaches **at most one row**, and `0023:542`'s value set `('issued','partially_paid','paid','expired','void')` is exactly the five states row 8 derives. **The baseline check is what turned the P0 from 'a cache with no subscriber' into 'a cache whose subscriber could not have worked'**, and it is the reason the fix is `SET status = status` rather than an explicit `status = <computed>` |
+| **37-B** | **P1** | **The payment invariant was stated as an equality that the model's own common case falsifies.** §12.2 asserted `payment.amount = payment_applied + on-account credits + returned`, which claims every peso of a payment is represented by an allocation row. §11.3 makes a **partially-allocated** payment normal, and for one the remainder has no row at all — §12.1 defines an allocation as "money from this payment moved here", so cash that has moved nowhere is the *absence* of a row. 100,000 received and 60,000 applied gives 60,000 on the sum, not 100,000. An equality with no residual on either side cannot go negative, so it asserted nothing while §35.8 cited it as the invariant `trg_fin_allocation_bounds` maintains | every worked example in §12.2 is fully-allocated or fully-returned, so none exposes it; a partial allocation — the case §11.3 explicitly blesses — does | **FIXED.** The statement is now the identity `payment.amount = payment_applied(p) + payment_unallocated(p)`, with `payment_unallocated` defined as the residual and bounded `>= 0` |
+| **37-C** | **P1** | **A correction of an on-account credit moved no published figure.** The `payment_unallocated` formula carried `payment_on_account_returned` but not the correction of an on-account *credit* (`effect='reverse'`, `refund_id IS NULL`, `invoice_id IS NULL`). Such a row is excluded from `payment_applied` by its `invoice_id` filter and from `payment_on_account_returned` by its `effect` filter, so it was invisible to all four published quantities — the same P0-07 class of defect, one partition step further out | the `effect` table in §12.1 lists this row; neither of the two `FILTER` clauses in §12.4's `fin_v_payment_position` matches it | **FIXED.** `payment_credit_reversed(p)` is added to §12.2's formula **and** to the `unallocated_amount` expression in `fin_v_payment_position`, so the formula and the view state one thing rather than two that agree by luck |
+| **37-D** | **P1** | **§35.8 stated a second, contradictory form of the same quantity, and defended it with a misattributed invariant.** It gave `payment_unallocated(p) = Σ allocations where invoice_id IS NULL` and claimed `Σ all allocations = p.amount` is what `trg_fin_allocation_bounds` maintains. The trigger enforces `Σ non-refund invoice-bound allocations <= p.amount` — an inequality — and the two forms diverge on the common case (40,000 against 0) | read of `trg_fin_allocation_bounds` in §12.7: `IF v_committed + NEW.amount > v_payment_amount THEN RAISE` | **FIXED.** §35.8 now defers to §12.2's residual and states both halves of the error, because a reader checking the old "invariant" against a partially-allocated payment would conclude the school holds no cash for the family — the over-payment-prompt failure §12.2 exists to prevent, reintroduced through a cross-reference |
+| **37-E** | **P1** | **The on-account return ceiling double-counted the row being checked on `UPDATE`.** `trg_fin_on_account_return_bounds` sums `invoice_id IS NULL` rows for the payment **including** the row under test, then adds `NEW.amount`. During a `BEFORE UPDATE` the row's own `OLD` value is still in the table, so an in-place correction from −40,000 to −60,000 evaluated −60,000 + (−40,000) = −100,000 and was refused with `55000`. Lowering a return was impossible, and raising one past the ceiling was refused for the wrong reason | the sibling bound `trg_fin_allocation_bounds` carries `AND a.id <> NEW.id` **with an explicit comment naming this exact hazard**; this one omitted it — two functions written from one shape, one of which documents the trap the other falls into | **FIXED.** `AND a.id <> NEW.id` added, with the worked −40,000 → −60,000 case in the comment |
+| **37-F** | **P1** | **`exception` was simultaneously a deleted state and a real one.** §14.3's DDL `CHECK` admits exactly `('open','matching','completed','cancelled')` and its column comment explains in five lines why `exception` was removed — no route reaches it, no trigger produces it, §35.6 gives it no exit, so a batch in it would be permanently stuck. Nine lines later the same subsection says "`exception` is a real state here (a batch can sit in exception with non-zero variance and no reason)". §14.4 then told the operator to "move the batch to `exception`" — a state its own `CHECK` rejects | the contradiction is **internal to §14.3**, between its `CHECK` comment and its own closing note | **FIXED.** §14.3 states that `exception` is not a state; §14.4 replaces the instruction with the remediation that actually exists — cancel the batch and start a new one, which is what `cancelled`'s comment says it is for and what T-FIN-28's `/cancel`-from-`matching` requirement serves |
+| **37-G** | **P1** | **The verdict block named a migration that has already shipped.** It read `DESIGN-READY FOR 0023_fin_invoices.sql`, "0023 is the next migration", `P0: 0 / P1: 0`. 0023 is applied and immutable; this document's 0024 rows are written against it as the baseline | HEAD `d12b904`; `0023_fin_invoices.sql` present and applied | **FIXED.** Restated against `0024_fin_payments.sql`, with the reason recorded in the block itself — a verdict naming a shipped migration is worse than none, because a reader takes it as a claim about the code in front of them |
+| **37-H** | **P1** | **Two invariants were cited as if they had rows, and neither had one.** §17's catalogue stopped at `FI-020` (21 rows), but §12.3 said “**FI-021** is the regression test” for the P0-07 on-account formula, §19.8.4 said “**FI-022** asserts the pairing” for step-up/outbox, and §19.6 cited FI-022 a second time as the behavioural half of the RLS split. §28's coverage row meanwhile claimed `FI-001…FI-020` | Whole-document scan of every `FI-\d+[a-z]?` token against §17's catalogue rows: 22 cited ids, **21 registered rows, 0 duplicate rows, `FI-001`–`FI-020` contiguous plus `FI-004a`**, and **`FI-021` and `FI-022` dangling**. §36.1 had a contiguity check for `T-FIN-n` ids (`R5′`) and **none for `FI-n` ids** — the check that would have caught it was the one not written  | **FIXED.** Both rows now exist in §17's catalogue with their full statements, §28's coverage claim reads `FI-001…FI-022` and names the FI-021 residual case and the two-directional FI-022 count explicitly, and **`R29′` was added to §36.1** as the `FI-n` counterpart to `R5′`. Re-derived: **23 rows, 23 distinct ids, contiguous `FI-001`–`FI-022` plus `FI-004a`, 0 dangling citations, 0 duplicates**. FI-021 being absent mattered most: it is the regression test for the on-account residual — the same quantity 37-B and 37-C were about — so this pass corrected a formula that no invariants row was guarding |
+| **37-I** | **P1** | **§26.3's IBAN example table rejected a valid Pakistani IBAN and accepted the same string two rows later.** It listed `PK36SCBL0000001123456702` as “rejected — MOD-97 ≠ 1”, then listed `PK36 SCBL 0000 0011 2345 6702` as “accepted — whitespace stripped, identical to the unspaced form”. **The two rows are the same 24-character string**; its ISO 13616 MOD-97 is **1**, so it is the canonical *valid* example and the stated reason was inverted, not merely wrong. A 22-character row was labelled “23 chars”, and step 3 claimed a valid PK IBAN “uses `PK10` in the moved position” when check digits vary per account (`PK36`/`PK13`/`PK40`/`PK41` over one body) | MOD-97 recomputed for all eight original rows: `PK36SCBL0000001123456702` = **1** (valid), `PK00SCBL…` ≈ 62, `PK00AAAA…` ≈ 40, `DE89370400440532013000` = 1 but 22 chars and not `PK`; the 22- and 25-char rows fail on length. **§25–§27 had no check row in §36.1 at all** — the three sections most amenable to being *computed* rather than argued | **FIXED.** The table is rebuilt from computed verdicts (**9 rows: 4 accepted, 5 rejected** — see 37-L, which is how the previous tally in this very sentence was wrong), the three `SCBL0000001123456702` spellings now all read **accepted** with their normalisation stated, a second bank code (`PK13HABB…`) distinguishes checksum from bank code, `DE89…` shows a MOD-97-valid **non-PK** IBAN rejected at step 2, step 3's `PK10` claim is replaced by the four real check-digit values, the “23 chars” label reads **22**, and **`R30′` was added** to recompute every Result cell. Severity is P1 rather than P0 under §34.2 because no statement of the normative algorithm was wrong — but §26.3 states the table is pinned verbatim by a unit test, **so that test was specified to assert both verdicts for one input and could not have passed**, and following the table literally would have rejected real Pakistani bank accounts |
+| **37-J** | **P1** | **§36.4 — the section titled *Final verdict* — still read `0023 IMPLEMENTATION-GO` under the label “**Gate status (current)**”.** §35.9's verdict block had been re-based onto `0024` by 37-G, but §36.4 is the second site of the same claim and the more authoritative-sounding one: it is headed *Final verdict*, sits last in the remediation report, and printed applied migration hashes beside the word “current”. **A reader asking “what is the gate” reaches §36.4 before §37 and gets a migration that has already shipped** | Two verdict sites in the document; §35.9's read `DESIGN-READY-FOR-0024` and §36.4's read `0023 IMPLEMENTATION-GO` / “Gate status (current)”, side by side in one document, with `0023` present and applied at HEAD | **FIXED.** §36.4 is retitled *Final verdict — `0023` (SUPERSEDED; retained as history)* with its status line marked superseded, and **a new §36.5 records the current `0024` gate** with per-migration status, the reproduced checks, §37.2's 1 P0 + 9 P1 + 2 P2, §37.4's two open observations, and the explicit statement that `0024_fin_payments.sql` is **not written and not applied**. **This finding is also the reason §36.4 was not simply edited to say 0024**: its eleven-P0 reasoning and applied hashes are the evidence trail for §36.2's register, and overwriting them would have destroyed the record that gave the fix its authority |
+| **37-K** | **P2** | **Phase 7 has no named CI step, and §36.4's “all passing” runtime figures are DB-backed — in a checkout without `RUN_RUNTIME_SECURITY_TESTS` the three finance suites report as *skipped*, which is not the same thing.** The workflow is `.github/workflows/phase6-security.yml`; the string `finance` appears in it **0 times**; all three finance suites are gated on `RUN_RUNTIME_SECURITY_TESTS` (2 references each); `packages/db/src/security/` holds **19** test files | Run against the checkout with no database: `npx turbo run typecheck` = **17/17 successful** (the workflow's own `Typecheck` step, reproduced), and `npx vitest run` in `@sms/db` = **4 files passed / 19 skipped**, **22 tests passed / **400 skipped**, with `finance-trigger-inventory.test.ts` reported as `(27 tests | 27 skipped)`. The `27/27` §36.4 prints is therefore a *test count* that matches this file exactly — and is currently **skipped**, not passing | **RECORDED, and made explicit rather than remediated.** The suites **are** covered: the workflow's aggregate step “Phase 3-4 DB security suites” runs `vitest run src/security` across all 19 files, so Phase 7 executes — **incidentally, under a Phase 6 name, never by name.** That is the same gap the workflow's own comment records as this repo's historical failure (“42 test files gated … this gate named 4 of them, so 38 could not run in CI at all”), now closed by breadth rather than by naming. §36.4 and §36.5 now state that the runtime figures require `RUN_RUNTIME_SECURITY_TESTS=1` **and** a live PostgreSQL, and that a finance regression surfaces under an aggregate step labelled for another phase. **Not remediated here**: adding a named Phase 7 step means editing `.github/workflows/`, which this pass is not permitted to touch |
+| **37-L** | **P2** | **§37-I's own tally of its own repaired table was wrong, in the very sentence asserting the repair was computed.** It read "rebuilt from computed verdicts (**9 rows: 5 accepted, 4 rejected**)". §26.3's table has nine rows of which **four** accept (rows 2–5) and **five** reject (rows 1, 6, 7, 8, 9), so the counts were transposed — and `R30′` printed the same inverted pair in its Result cell | Re-derived by re-running §26.3's own algorithm — normalise, then length/country at step 2, then ISO 13616 MOD-97 with the **first four characters moved to the end** — over all nine rows: every Result cell matches (rows 2–5 = 1; row 1 = 62; row 6 = 40; row 9 = 1 but 22 chars and non-`PK`, rejected at step 2; rows 7 and 8 fail on length). **The table itself is correct and needed no change**; only the narrative tally was wrong, in two places: 37-I's disposition and `R30′`'s Result cell | **FIXED.** Both now read **4 accepted, 5 rejected**. Recorded as a finding rather than silently corrected because it is the second-order version of 37-I — a check row that says it re-derives values must itself be re-derived, and the first attempt at doing so found the summary disagreeing with the data it summarised. Worth noting how the error survived: **a MOD-97 implementation that forgets to move the first four characters still returns a deterministic residue, and so validates that `PK36SCBL…` is *invalid*** — an inverted verdict for the single most widely-cited valid Pakistani IBAN, which is exactly the shape of the bug 37-I existed to remove. The residue was wrong on all nine rows, not just this one, so nothing would have flagged it except a known-good input |
+
+### 37.3 The count web that 37-A moved, and how it was re-derived
+
+Adding rows to `0024` touches every stated total, and this document treats
+a total as an assertion rather than as prose. §37-A moved this web once (row 8a), and this pass moves
+it again with rows **10a** (D1, the allocation delete guard) and **12a** (D9, the allocation
+target-state guard). Each figure below was **re-derived from the tables and blocks**, not incremented,
+because the failure this document keeps recording (§36.2 rows 29 and 43,
+and the `P2: 7` counting note) is a summary number that no longer describes what it summarises.
+
+| Figure | Before | After | Re-derived from |
+|---|---|---|---|
+| §35.3 inventory rows | 32 | **35** | parse of the inventory table: `1`–`25` + `3a`–`3c` + `4a`–`4d` + `8a` + `10a` + `12a`, sequential, no gap |
+| Bound functions | 32 | **35** | one per inventory row; distinct `EXECUTE FUNCTION` targets equal to it |
+| Named `trg_*` | 31 | **34** | §35.3's function column |
+| Distinct `CREATE [CONSTRAINT] TRIGGER` statements | 39 | **42** | §35.3.2 block = 41, plus §19.8.1 = 1 |
+| Statement lines document-wide | 43 | **46** | block + §19.8.1 + the four restatements §35.3.2 already listed |
+| `SECURITY DEFINER` (F5d), whole phase | 4 | **5** | rows 4, 4d, 6, 13, 8a — all five issue or cause an `UPDATE` on a column §16.5.1 does not grant; rows 10a and 12a are `SECURITY INVOKER` |
+| F5d at the `0023` checkpoint | 3 | **3** | unchanged: rows 13 and 8a are both 0024's |
+| Bound functions at the `0024` checkpoint | 21 | **24** | `0022`'s 6 + `0023`'s 7 + `0024`'s 11 |
+| Definers at the `0024` checkpoint | 4 | **5** | row 13 + row 8a |
+| `0024` per-migration row | 8 fn / 10 stmts / 1 definer | **11 / 13 / 2** | rows 5, 8, 8a, 10, 10a, 11, 12, 12a, 13, 14, 16 |
+| Functions defined in this document | 42 | **45** | 34 bound here + 11 unbound (the 2 F5h helpers + 9 application-layer) |
+| Row-to-statement sum | 27 + 12 = 39 | **29 + 12 = 41** | 29 single-binding block rows + the five multi-table rows (3, 6, 7, 9, 13); plus §19.8.1's one = 42 |
+
+Sites updated to match: §19.7's F5 and F5d rows, §19.7.4's definership narrative, §30.1's and
+§30.2's `0024` rows, §28.3.1's `C-SEC-M4b`, §35.3's inventory, §35.3.2's heading, its per-migration
+table and its row-to-statement walk, §35.4's statement-count row, §36.1's `R2`, `R7′` and `R25′`,
+§36.2's verdict block and counting note, and §34.4's closing summary. **Nothing was incremented by
+hand and nothing was left at its old value**; this table is the derivation a later revision should
+re-derive rather than trust.
+
+### 37.4 Allocation DELETE policy — resolved (canonical)
+
+**One observation is against the applied 0023 source, not the design.**
+`finance-cache-maintenance.test.ts` labels its cases `C-SEC-M3` and `C-SEC-M6`, and each satisfies its
+half **only in appearance**: M3 hand-sets the scope GUC and asserts a seeded `balance`, and M6 issues a
+direct nested `UPDATE` instead of the allocation `INSERT` that runs row 13. A hand-set GUC proves the
+guard *accepts* a value, not that any producer sets one; a direct `UPDATE` proves the `WHEN` clause
+suppresses a write, not that the real writer produces one. As written the file would pass against a
+guard with a one-value vocabulary. §36.2 row 45 records the identical observation and assigns it to
+the implementation pass; it is repeated here rather than resolved, because **fixing it means editing a
+test file in a protected migration's suite, which this pass is not permitted to do** and which no
+amount of editing this document would make true.
+
+**Allocation DELETE policy resolved.**
+
+fin_payment_allocations is append-only at the database boundary. DELETE is
+prohibited for all runtime and application roles by a BEFORE DELETE trigger
+(`trg_fin_allocations_delete_guard`, bound to `trg_fin_pa_delete_guard()`) that
+rejects every DELETE with SQLSTATE `55000`
+(message: "fin_payment_allocations is append-only; DELETE is not permitted").
+The trigger executes as SECURITY INVOKER with `search_path = pg_catalog, public, pg_temp`,
+and all privileges are revoked from PUBLIC. The AFTER DELETE balance recomputation
+trigger is never reached because the BEFORE guard aborts the statement first.
+This preserves historical provenance (reversal_of_allocation_id, refund_id)
+and is compatible with the existing correction/reversal workflow (INSERT-only).
+(See §12.1, §28.3.2, §30.4, A19.)
+
+### 37.5 What this pass does and does not establish
+
+**Establishes, mechanically:** the 0024 object manifest is closed — every bound function, view, table
+and index named by 0024 has exactly one owning migration, and the per-migration arithmetic sums to the
+totals in both directions (§37.3); the payment, allocation, refund and challan arithmetic is now
+internally consistent between the prose, the formulas and the two published views; **every invariant
+the document cites has a row that states it** (`R29′` — 23 rows, `FI-001`–`FI-022` plus `FI-004a`, 0
+dangling citations, after 37-H); **every worked example §26.3 offers reproduces from the algorithm
+§26.3 states** (`R30′` — 9 rows re-derived, after 37-I); and the document contains no specification a
+PostgreSQL parser, a policy evaluator or an `aclexplode` query would contradict at the counts asserted.
+
+**Two of the three checks added in this pass were added *because* their absence had already cost
+something.** `R29′` exists because §36.1 verified the *threat* catalogue's ids for five revisions
+(`R5′`) and never the *invariant* catalogue's, so `FI-021` and `FI-022` spent that time cited
+without existing. `R30′` exists because §25–§27 — the three sections whose claims are *computable*
+rather than arguable — had no mechanical row at all, and §26.3's IBAN table accordingly contradicted
+itself two lines apart while the surrounding prose read cleanly. **Neither defect was visible by
+re-reading the argument**; both needed a check that disagreed with the text. That is the argument
+for adding a row per section class rather than per fix, and it is the part of this pass that would
+change how the next one is run.
+
+**Does not establish:** that the 0024 SQL applies, that its triggers behave as modelled, or that the
+`0023` baseline is free of defects. The first executable proof is `0024` applying cleanly with
+`finance-migration-order.test.ts`, `finance-trigger-inventory.test.ts` (whose figures 37-A moved),
+`finance-composite-fk.test.ts` and the `0024` assertion set of §28.3.1 — including the three controls
+**M3b, M4b and M6b**, which are 0024's precisely because their subjects cannot exist earlier — plus
+the two assertions named in §10.2.1, that the challan refreshes on a payment and that it reaches
+`void` through the invoice. Until then, the findings in §37.2 are closed **in the design**, not yet
+**in the schema**, and §37.4's first item is the one the implementation pass must not skip.
+
+---
+
+## 38. PHASE 7 DESIGN STATUS — AMENDED
+
+**DESIGN-AMENDED — FORWARD-REMEDIATION REQUIRED**
+
+### 38.1 What this amendment is
+
+A design-document-only amendment of **2026-10-05**, following the Phase 7 · D2/D3 Re-Adjudication. It
+**adds** to this document; it erases no prior audit, implementation or re-audit conclusion, and every
+historical register row, verdict and superseded gate above remains exactly as recorded. The
+authoritative source for the pre-amendment text was
+`stash@{0}:docs/PHASE_7_FINANCE_DESIGN.md`, blob `1b29d6bc3d1bdb82564152ccb887a707922cf70c`.
+
+### 38.2 Canonical inventory after this amendment
+
+| Category | Count | Note |
+|---|---:|---|
+| **Total functions defined in this document** | **50** | a real addition, **not** the comment-stripping artefact R2 warns of |
+| **Document-bound** (bound to a trigger here) | **34** | "document-bound" always means 34 |
+| **Total bound** (incl. applied `0022` row 3a) | **35** | "total bound" always means 35 |
+| **Unbound** | **16** | 2 strict helpers + 1 support function + 13 application-layer/RPC |
+| **Strict §35.3.1 helpers** | **2** | tripwire **preserved** at two |
+| **Unbound `SECURITY DEFINER` support functions (`0025` remediation)** | **1** | `fin_lock_payment_amount` |
+
+`50 = 34 document-bound + 16 unbound`. The separate **35** arises solely from row 3a
+`trg_fin_assignment_validate`, an **applied `0022`** function resolved against `0022`'s immutable DDL
+and therefore not defined in this document. The two figures describe **different populations** and
+are never interchangeable (§19.7.2 F5, §35.3.2, R2).
+
+### 38.3 Canonical security classification
+
+| Function | Classification | Why |
+|---|---|---|
+| `trg_fin_refund_provenance` | **`SECURITY INVOKER`** | validation reads only; writes no protected column; takes no lock requiring privilege; must preserve caller/RLS semantics (§16.5.2) |
+| `fin_lock_payment_amount` | **`SECURITY DEFINER`** | takes the required `SELECT … FOR UPDATE` on `fin_payments`; both callers are `SECURITY INVOKER` and hold no `UPDATE` privilege there, so no elevation exists to inherit (§16.5.2's inheritance clause and its boundary) |
+
+### 38.4 Canonical refund linkage
+
+```sql
+FOREIGN KEY (tenant_id, refund_id) REFERENCES fin_refunds (tenant_id, id)
+ON DELETE NO ACTION
+```
+
+`NO ACTION` is canonical and is **not** to be substituted with `RESTRICT`. Live `school_saas_dev` /
+`school_saas_test` currently carry `ON DELETE SET NULL`, which is **defective**: composite `SET NULL`
+nulls `fin_payment_allocations.tenant_id`, which is `NOT NULL`, so refund deletion reaches `23502`.
+
+### 38.5 Deferred forward targets — CANONICAL DESIGN TARGET ≠ IMPLEMENTED
+
+**None of the following is implemented. None may be implemented by this amendment.**
+
+1. `0025` source provenance `SECURITY DEFINER` → `SECURITY INVOKER` reconciliation
+2. `fin_pa_refund_fk` `ON DELETE SET NULL` → `ON DELETE NO ACTION`
+3. reversal target must have `effect = 'apply'` (unenforced)
+4. refund `status` restricted to `requested` / `approved` (unenforced)
+5. `schema_migrations` migration checksums (ledger stores `version` + `applied_at` only)
+6. F11/F12 `p_session_id` signature change (`0028`-owned; `app_ctx_session_id()` does not exist)
+
+Immutable migrations `0021`–`0025` **must not** be edited to close any of these. Each requires a
+**forward-only** migration, separately implemented and independently audited.
+
+### 38.6 F11 / F12 boundary — unchanged
+
+```text
+F11 postRefundApproval   F12 postRefundProcess   app_consume_step_up
+```
+
+remain strictly **`0028`-owned**, unimplemented, and absent from every database. The
+`p_session_id`-carrying signatures are recorded as a **pending `0028` signature change** (§19.7.2),
+**not** as existing objects. `app_ctx_session_id()` does not exist and is not specified as existing.
+
+### 38.7 Gate
+
+```text
+DESIGN-AMENDED — FORWARD-REMEDIATION REQUIRED
+```
+
+**Forward remediation is required before Phase 7 implementation can proceed.** Source/live
+reproducibility cannot be declared closed until the immutable history and the live catalog are
+reconciled by forward-only migrations. **This document is not `DESIGN-GO`, not
+`DESIGN-READY-FOR-0026`, and not `DESIGN-READY-FOR-IMPLEMENTATION`,** and no `0026` or `0028` work is
+authorized by it.

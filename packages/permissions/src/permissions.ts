@@ -129,6 +129,15 @@ export const PERMISSION_CATALOG: readonly Permission[] = Object.freeze([
   'exams.mark',
   'exams.publish',
   'exams.correct',
+  // Finance — refund command surface (Phase 7). Four deliberately separate
+  // capabilities: `request` files a refund, `read` sees the queue, `approve`
+  // decides approve/reject and `process` disburses. `approve` and `process` are
+  // the step-up (MFA) gated commands, and keeping them apart means the actor who
+  // authorises a refund need not be the actor who lets the cash leave.
+  'fees.refunds.request',
+  'fees.refunds.read',
+  'fees.refunds.approve',
+  'fees.refunds.process',
 ]);
 
 export const PERMISSION_SET: ReadonlySet<Permission> = new Set(PERMISSION_CATALOG);

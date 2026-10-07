@@ -18,6 +18,7 @@ import {
   time,
   numeric,
   unique,
+  char,
 } from 'drizzle-orm/pg-core';
 
 export const tenants = pgTable(
@@ -2422,25 +2423,31 @@ export const markCorrections = pgTable(
 );
 
 // ---------------------------------------------------------------------------
-// Phase 7 — finance foundation (0021) and fee structures (0022).
+// Phase 7 — finance foundation (0021), fee structures (0022), invoices and
+// challans (0023), payments and receipts (0024), refunds (0025).
 //
 // Source of truth is the migration text, not this file. This module is the
 // typed mirror; where the two could disagree, the migration wins and
 // packages/db/src/security/finance-composite-fk.test.ts catches it.
+//
+// 20 finance tables in all: the 5 of 0021, the 7 of 0022, and the 8 of
+// 0023–0025 (fin_invoices, fin_invoice_items, fin_invoice_adjustments,
+// fin_challans, fin_payments, fin_payment_allocations, fin_receipts,
+// fin_refunds).
 //
 // WHAT IS REPRESENTED EXACTLY
 //   Columns (name, type, precision/scale, nullability, default), primary keys,
 //   unique CONSTRAINTS, unique INDEXES (including the partial expression index
 //   and NULLS NOT DISTINCT), check constraints, and foreign keys with their
 //   ON DELETE action. Constraint names are the live catalog's, not invented:
-//   where 0021/0022 declared `CONSTRAINT x UNIQUE (...)` this uses `unique()`
+//   WHERE 0021–0025 declared `CONSTRAINT x UNIQUE (...)` this uses `unique()`
 //   (a pg_constraint row, as in the database); where the DDL used
 //   `CREATE UNIQUE INDEX` this uses `uniqueIndex()` (a pg_index row). The
 //   distinction is not cosmetic — the composite-FK suite reads pg_constraint,
 //   so declaring an index where the database has a constraint would be a lie.
 //
 // WHAT DRIZZLE ORM 0.38 CANNOT REPRESENT, AND IS THEREFORE NOT STATED HERE
-// These are real parts of 0021/0022. They are absent because the abstraction has
+// These are real parts of 0021–0025. They are absent because the abstraction has
 // no construct for them, NOT because they are unimportant, and none is
 // approximated by a look-alike that a reader would mistake for the real thing.
 // Each is asserted against the live catalog by
@@ -2448,19 +2455,31 @@ export const markCorrections = pgTable(
 // packages/db/src/security/finance-composite-fk.test.ts, so the gap is a
 // documented omission rather than a silent one.
 //
-//   1. TRIGGERS. All 6 functions and all 8 bindings of 0022. `pgTable` has no
-//      trigger primitive, so the §18 status graph, the §8.7.1 committed-run
-//      freeze, the §6.4 assignment pin and the target validator are invisible
-//      here. Reading this file tells you nothing about 0022's BEHAVIOUR. That is
-//      why the behavioural suite exists, and why `status` below is a plain text
-//      column with nothing stopping a caller writing 'published' on a draft.
+//   1. TRIGGERS. 26 trg_fin_* functions and 32 bindings across 0022–0025 — the
+//      6 functions and 8 bindings of 0022, then 0023's number stamp, header
+//      guard, line freeze, line-amount derivation, line/adjustment totals and
+//      approval gate, 0024's balance recompute, void stamp, challan status and
+//      refresh, the four allocation guards plus bounds and delete guard, the
+//      0025 refund provenance and refund ceiling. `pgTable` has no trigger
+//      primitive, so the §18 status graph, the §8.7.1 committed-run freeze, the
+//      §9.6.0 issue freeze, the §9.6.0 C-8 derived due_date, the §12.1
+//      reversal-shape rules and the §6.4 assignment pin are ALL invisible here.
+//      Reading this file tells you nothing about any of these tables'
+//      BEHAVIOUR. That is why the behavioural suites exist, and why `status`
+//      below is a plain text column with nothing stopping a caller writing
+//      'published' on a draft or 'paid' on an unpaid invoice.
 //   2. FUNCTION DEFINITIONS — the trg_fin_* bodies. Not relations, so not part
 //      of a schema module at all.
-//   3. GRANTS AND REVOKES. 0021/0022 create every table and then immediately
-//      `REVOKE ALL ON <t> FROM school_app_rw`. Drizzle models no ACL, so the
-//      fact that the runtime role cannot reach these tables does not appear
-//      below. Verified by the two suites above.
-//   4. ROW LEVEL SECURITY. 0021/0022 deliberately enable none and create no
+//   3. GRANTS AND REVOKES. Every one of the 20 tables below is created and then
+//      immediately `REVOKE ALL ON <t> FROM school_app_rw` (§35.4, §30.3), so
+//      nothing here is app-reachable until 0028. 0025_fin_refunds.sql grants
+//      SELECT, INSERT on fin_refunds and fin_payment_allocations and
+//      0025_privilege_remediation.sql revokes them again, so the NET state is
+//      fail-closed; §16.5.1's COLUMN-level privilege model — which is what
+//      actually makes subtotal, total and balance unwritable — is not a relation
+//      property at all. Drizzle models no ACL, so none of this appears below.
+//      Verified by the two suites above.
+//   4. ROW LEVEL SECURITY. 0021–0025 deliberately enable none and create no
 //      policy; §30.3 defers the whole RLS block to 0028. A schema module that
 //      could express RLS would still be correct to say nothing here.
 //   5. `ON DELETE SET NULL (column)`. 0021's
@@ -2472,7 +2491,17 @@ export const markCorrections = pgTable(
 //      which is the nearest action but NOT the same statement, and the
 //      difference is precisely whether tenant_id survives. The migration's
 //      version is the correct one. Recorded as a deliberate approximation, and
-//      the only such case in these 12 tables.
+//      the only such case in these 20 tables.
+//   6. DEFERRABILITY. fin_payment_allocations' fin_allocations_refund_ceiling is
+//      a `CREATE CONSTRAINT TRIGGER ... DEFERRABLE INITIALLY DEFERRED`, checked
+//      at COMMIT rather than per statement. That is limitation 1 again — it is a
+//      trigger — and it is invisible here, so nothing below states that
+//      fin_payment_allocations is validated at commit time.
+//   7. THE TWO 0024 VIEWS. fin_v_payment_position and fin_v_invoice_balance are
+//      `security_invoker = on` relations, and §12.4 makes them the AUTHORITATIVE
+//      readers for payment position and invoice balance in preference to the
+//      cached columns. A view is not a pgTable, so neither is declared here, and
+//      a reader of this file who trusts `balance` alone is trusting a cache.
 //
 // TWO THINGS THAT LOOK LIKE OVERSIGHTS AND ARE NOT
 //   * `structure_ids` is a real `uuid[]`, typed as an array rather than
@@ -3051,6 +3080,741 @@ export const finBillingRuns = pgTable(
 );
 
 /**
+ * 0023. THE INVOICE HEADER. One live invoice per (tenant, enrollment,
+ * academic_year) — the grain is §9.1.1's and it is enforced by the partial
+ * unique index below, not by prose.
+ *
+ * Read this declaration and you know almost nothing about when money becomes
+ * owed. `status` is a plain text column: §9.2's transition graph, §9.6.0 C-8's
+ * DERIVED due_date (NOT NULL with no DEFAULT, written by
+ * trg_fin_invoice_header_guard), §9.6.0's line freeze on the transition out of
+ * 'draft', and C-1/C-9.2's balance and paid_at maintenance are all triggers
+ * (limitation 1). `invoice_no` is nullable and the number is assigned by
+ * trg_fin_invoice_number, so a caller can write NULL here legitimately only
+ * for a draft.
+ */
+export const finInvoices = pgTable(
+  'fin_invoices',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    // NULL exactly in state 'draft', and permitted-but-unexpected in 'void': a
+    // draft discarded before issue never burned a counter value (§9.6.1).
+    invoiceNo: text('invoice_no'),
+    studentId: uuid('student_id').notNull(),
+    academicYearId: uuid('academic_year_id').notNull(),
+    enrollmentId: uuid('enrollment_id').notNull(),
+    // The structure that GENERATED this invoice. Nullable because an officer may
+    // compose one by hand; NOT NULL for any run-generated invoice, because
+    // fin_billing_run_items.structure_id is NOT NULL in applied 0022.
+    structureId: uuid('structure_id'),
+    status: text('status').notNull().default('draft'),
+    issuedAt: timestamp('issued_at', { withTimezone: true }),
+    // §9.6.0 C-8. NOT NULL and NO DEFAULT: the value is derived, never left to
+    // chance. Drizzle cannot express "no default", only "not null", so the
+    // declaration looks like an ordinary required column and is not one.
+    dueDate: date('due_date').notNull(),
+    // The three CACHED money columns. subtotal = lines only; total = subtotal +
+    // approved adjustments + tax; balance = total - net_applied. All three are
+    // trigger-maintained and unwritable by the runtime role (§16.5.1), and
+    // fin_v_invoice_balance is the authoritative reader (limitation 7).
+    subtotal: numeric('subtotal', { precision: 19, scale: 4 }).notNull().default('0'),
+    total: numeric('total', { precision: 19, scale: 4 }).notNull().default('0'),
+    // C-1: NO WRITER IN 0023. trg_fin_invoice_balance_recompute is created and
+    // bound by 0024, which opens with a backfill, so this is 0 on every row
+    // between the two landings. Stated rather than left to be discovered.
+    balance: numeric('balance', { precision: 19, scale: 4 }).notNull().default('0'),
+    // C-9.2. Written by 0024's balance recompute on entry to 'paid' and cleared
+    // on exit. Both directions are constrained below.
+    paidAt: timestamp('paid_at', { withTimezone: true }),
+    voidedAt: timestamp('voided_at', { withTimezone: true }),
+    voidReason: text('void_reason'),
+    // C-14. A write-once audit identity, exactly like fin_fee_structures
+    // .published_by, so RESTRICT and not SET NULL. §6.3 R4 single column
+    // because `users` is platform-global and has no tenant_id.
+    createdBy: uuid('created_by').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('fin_invoices_ten_id_uq').on(t.tenantId, t.id),
+    // C-7. Partial, so a VOIDED invoice frees its slot: §9.2.1's replacement
+    // draft needs it, and without the WHERE clause a school could never
+    // re-invoice a family whose invoice was voided. This is the constraint that
+    // makes "billing twice" a unique violation rather than a rounding difference.
+    uniqueIndex('fin_invoices_ten_enrollment_year_uq')
+      .on(t.tenantId, t.enrollmentId, t.academicYearId)
+      .where(sql`${t.status} <> 'void'`),
+    // Also partial, because a number is only meaningful once assigned.
+    uniqueIndex('fin_invoices_number_uq')
+      .on(t.tenantId, t.invoiceNo)
+      .where(sql`${t.invoiceNo} is not null`),
+    foreignKey({
+      name: 'fin_invoices_student_fk',
+      columns: [t.tenantId, t.studentId],
+      foreignColumns: [students.tenantId, students.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'fin_invoices_year_fk',
+      columns: [t.tenantId, t.academicYearId],
+      foreignColumns: [academicYears.tenantId, academicYears.id],
+    }).onDelete('restrict'),
+    // Legal only because 0021 adds `enrollments_tenant_id_uq`; 0005 shipped
+    // enrollments with no (tenant_id, id) anchor at all (P0-03).
+    foreignKey({
+      name: 'fin_invoices_enrollment_fk',
+      columns: [t.tenantId, t.enrollmentId],
+      foreignColumns: [enrollments.tenantId, enrollments.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'fin_invoices_structure_fk',
+      columns: [t.tenantId, t.structureId],
+      foreignColumns: [finFeeStructures.tenantId, finFeeStructures.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'fin_invoices_created_by_fk',
+      columns: [t.createdBy],
+      foreignColumns: [users.id],
+    }).onDelete('restrict'),
+    check(
+      'fin_invoices_status_check',
+      sql`${t.status} IN ('draft','issued','partially_paid','paid','void')`,
+    ),
+    // C-13. Stated as a CASE so 'void' is explicitly the one state in which a
+    // number is optional: a voided draft must not burn a counter value, while a
+    // voided ISSUED invoice keeps the number it was printed with.
+    check(
+      'fin_invoices_number_ck',
+      sql`CASE ${t.status}
+            WHEN 'draft' THEN ${t.invoiceNo} IS NULL
+            WHEN 'void'  THEN TRUE
+            ELSE             ${t.invoiceNo} IS NOT NULL
+          END`,
+    ),
+    check(
+      'fin_invoices_void_ck',
+      sql`(
+        (${t.status} = 'void' AND ${t.voidedAt} IS NOT NULL AND ${t.voidReason} IS NOT NULL
+                   AND length(btrim(${t.voidReason})) > 0)
+     OR (${t.status} <> 'void' AND ${t.voidedAt} IS NULL)
+      )`,
+    ),
+    // C-9.2. Both directions, deliberately. A one-armed implication would permit
+    // paid_at on a draft or a voided invoice — precisely the stale state the
+    // void trigger and the balance recompute have to clear.
+    check(
+      'fin_invoices_paid_at_ck',
+      sql`(
+        (${t.status} = 'paid'   AND ${t.paidAt} IS NOT NULL)
+     OR (${t.status} <> 'paid' AND ${t.paidAt} IS NULL)
+      )`,
+    ),
+  ],
+);
+
+/**
+ * 0023. One billable line, positive by construction.
+ *
+ * `installment_no` is NULLABLE, and that is the point: a line from a structure
+ * WITH plan rows carries the real installment_no, while a line from a plan-less
+ * structure has no installment to point at — applied 0022 says such a structure
+ * "bills as a single installment on effective_from", which is a billing
+ * convention and not a plan row. NULL lets the composite plan FK skip under
+ * MATCH SIMPLE, which is exactly the intended semantics.
+ *
+ * `amount` is written by trg_fin_invoice_item_amount (quantity x unit_amount),
+ * so no route can send a line total that disagrees with its own factors.
+ */
+export const finInvoiceItems = pgTable(
+  'fin_invoice_items',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    invoiceId: uuid('invoice_id').notNull(),
+    structureId: uuid('structure_id').notNull(),
+    installmentNo: integer('installment_no'),
+    // COPIED at issue time from the head: a published structure is frozen but a
+    // fee HEAD can be re-taxed, and an issued invoice must not change when the
+    // head does.
+    feeHeadId: uuid('fee_head_id').notNull(),
+    description: text('description').notNull(),
+    quantity: numeric('quantity', { precision: 19, scale: 4 }).notNull().default('1'),
+    unitAmount: numeric('unit_amount', { precision: 19, scale: 4 }).notNull(),
+    amount: numeric('amount', { precision: 19, scale: 4 }).notNull(),
+    taxAmount: numeric('tax_amount', { precision: 19, scale: 4 }).notNull().default('0'),
+    // Stamped by trg_fin_invoice_freeze_lines on the parent leaving 'draft'.
+    frozenAt: timestamp('frozen_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // C-7. Uniqueness is (invoice, structure, head, installment), NOT
+    // (invoice, head): two structures may legitimately charge the same head on
+    // one invoice. NULLS NOT DISTINCT is load-bearing rather than stylistic —
+    // without it the two NULLs of a plan-less structure never compare equal and
+    // the dedup role silently evaporates for exactly the case the nullable
+    // installment_no exists to serve.
+    unique('fin_invoice_items_uq')
+      .on(t.tenantId, t.invoiceId, t.structureId, t.feeHeadId, t.installmentNo)
+      .nullsNotDistinct(),
+    unique('fin_invoice_items_ten_id_uq').on(t.tenantId, t.id),
+    foreignKey({
+      name: 'fin_invoice_items_invoice_fk',
+      columns: [t.tenantId, t.invoiceId],
+      foreignColumns: [finInvoices.tenantId, finInvoices.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'fin_invoice_items_structure_fk',
+      columns: [t.tenantId, t.structureId],
+      foreignColumns: [finFeeStructures.tenantId, finFeeStructures.id],
+    }).onDelete('restrict'),
+    // fin_installment_plans_uq (tenant_id, structure_id, installment_no) is
+    // already applied in 0022, so this three-column FK needs no new anchor. It
+    // makes "this line belongs to an installment of this structure's plan" a
+    // database fact rather than an application convention.
+    foreignKey({
+      name: 'fin_invoice_items_plan_fk',
+      columns: [t.tenantId, t.structureId, t.installmentNo],
+      foreignColumns: [finFeeInstallmentPlans.tenantId, finFeeInstallmentPlans.structureId, finFeeInstallmentPlans.installmentNo],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'fin_invoice_items_head_fk',
+      columns: [t.tenantId, t.feeHeadId],
+      foreignColumns: [finFeeHeads.tenantId, finFeeHeads.id],
+    }).onDelete('restrict'),
+    check('fin_invoice_items_installment_no_check', sql`${t.installmentNo} >= 1`),
+    check('fin_invoice_items_quantity_check', sql`${t.quantity} <> 0`),
+    check('fin_invoice_items_unit_amount_check', sql`${t.unitAmount} >= 0`),
+    check(
+      'fin_invoice_items_tax_amount_check',
+      sql`${t.taxAmount} >= 0 AND ${t.taxAmount} = round(${t.taxAmount}, 2)`,
+    ),
+    // C-10 + C-17. The sign is closed at the line: zero is a mistake (delete the
+    // line), and a negative line IS an unapproved concession — which is exactly
+    // what the adjustment approval gate exists to prevent. Every reduction is an
+    // adjustment.
+    check(
+      'fin_invoice_items_amount_ck',
+      sql`${t.amount} > 0 AND ${t.amount} = round(${t.amount}, 2)`,
+    ),
+    // §16.3's paisa rule on the unit price, stated as DDL here rather than as
+    // prose that no migration ever carried.
+    check('fin_invoice_items_unit_amount_ck', sql`${t.unitAmount} = round(${t.unitAmount}, 2)`),
+  ],
+);
+
+/**
+ * 0023. A SIGNED adjustment. There is no `direction` column and there is
+ * deliberately no `type` column: the type is `adjustment_type` and the sign is
+ * the meaning. That is not cosmetic — trg_fin_invoice_item_total computes
+ * `total = subtotal + adjustments + tax` with a bare SUM, which is only correct
+ * if the sign is already in the column.
+ *
+ * §9.5's approval axis is four columns and a status rather than a rule, because
+ * "the approver is the creator" is not separation of duties.
+ */
+export const finInvoiceAdjustments = pgTable(
+  'fin_invoice_adjustments',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    invoiceId: uuid('invoice_id').notNull(),
+    adjustmentType: text('adjustment_type').notNull(),
+    amount: numeric('amount', { precision: 19, scale: 4 }).notNull(),
+    reason: text('reason').notNull(),
+    status: text('status').notNull().default('pending'),
+    requestedBy: uuid('requested_by').notNull(),
+    approvedBy: uuid('approved_by'),
+    approvedAt: timestamp('approved_at', { withTimezone: true }),
+    rejectedReason: text('rejected_reason'),
+    // §16.7 named this and §21.4 carries fee_adjustment_reversal_invalid, but no
+    // earlier DDL had it: the one thing that makes a reversal findable.
+    reversesAdjustmentId: uuid('reverses_adjustment_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('fin_invoice_adjustments_ten_id_uq').on(t.tenantId, t.id),
+    foreignKey({
+      name: 'fin_invoice_adjustments_invoice_fk',
+      columns: [t.tenantId, t.invoiceId],
+      foreignColumns: [finInvoices.tenantId, finInvoices.id],
+    }).onDelete('restrict'),
+    // Both identities RESTRICT: SET NULL is a referential UPDATE, and the audit
+    // identity of who asked for and who approved a money movement must not be
+    // erasable by deleting a user row. Deactivating the account is the route.
+    foreignKey({
+      name: 'fin_invoice_adjustments_user_fk',
+      columns: [t.approvedBy],
+      foreignColumns: [users.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'fin_invoice_adjustments_requester_fk',
+      columns: [t.requestedBy],
+      foreignColumns: [users.id],
+    }).onDelete('restrict'),
+    // Self-referential on the ordinary tenant-composite shape. RESTRICT, because
+    // an adjustment is never deleted at all — there is no DELETE privilege and no
+    // route — so this is about refusing to remove a reversal's target.
+    foreignKey({
+      name: 'fin_invoice_adjustments_reverses_fk',
+      columns: [t.tenantId, t.reversesAdjustmentId],
+      foreignColumns: [t.tenantId, t.id],
+    }).onDelete('restrict'),
+    check(
+      'fin_invoice_adjustments_adjustment_type_check',
+      sql`${t.adjustmentType} IN ('discount','concession','waiver','fine','late_fee','correction')`,
+    ),
+    check(
+      'fin_invoice_adjustments_amount_check',
+      sql`${t.amount} <> 0 AND ${t.amount} = round(${t.amount}, 2)`,
+    ),
+    check('fin_invoice_adjustments_reason_check', sql`length(btrim(${t.reason})) > 0`),
+    check(
+      'fin_invoice_adjustments_status_check',
+      sql`${t.status} IN ('pending','approved','rejected')`,
+    ),
+    // C-5. Exhaustive over the closed set: every type has exactly the signs it
+    // may carry. Without this a 'fine' could be negative — a fine that REDUCES a
+    // family's bill, wearing a fine's ledger treatment.
+    check(
+      'fin_invoice_adjustments_sign_ck',
+      sql`CASE ${t.adjustmentType}
+            WHEN 'discount'   THEN ${t.amount} < 0
+            WHEN 'concession' THEN ${t.amount} < 0
+            WHEN 'waiver'     THEN ${t.amount} < 0
+            WHEN 'fine'       THEN ${t.amount} > 0
+            WHEN 'late_fee'   THEN ${t.amount} > 0
+            WHEN 'correction' THEN TRUE
+            ELSE FALSE
+          END`,
+    ),
+    // A correction is only a reversal if it says what it reverses.
+    check(
+      'fin_invoice_adjustments_reverses_ck',
+      sql`(${t.adjustmentType} = 'correction') = (${t.reversesAdjustmentId} IS NOT NULL)`,
+    ),
+    // C-6. Three conjuncts, one per state, so there is no combination of
+    // populated and unpopulated columns describing an approval that did not
+    // happen.
+    check(
+      'fin_invoice_adjustments_approval_ck',
+      sql`CASE ${t.status}
+            WHEN 'pending'  THEN ${t.approvedBy} IS NULL
+                              AND ${t.approvedAt} IS NULL
+                              AND ${t.rejectedReason} IS NULL
+            WHEN 'approved' THEN ${t.approvedBy} IS NOT NULL
+                              AND ${t.approvedAt} IS NOT NULL
+                              AND ${t.rejectedReason} IS NULL
+            WHEN 'rejected' THEN ${t.approvedBy} IS NULL
+                              AND ${t.approvedAt} IS NULL
+                              AND ${t.rejectedReason} IS NOT NULL
+                              AND length(btrim(${t.rejectedReason})) > 0
+            ELSE FALSE
+          END`,
+    ),
+    // C-6. FOUR EYES, at the USER level rather than the role level: roles overlap
+    // by design, so a role-level separation would be unenforced, while separating
+    // the two ACTORS is a constraint the database can check.
+    check(
+      'fin_invoice_adjustments_no_self_approval_ck',
+      sql`${t.approvedBy} IS NULL OR ${t.approvedBy} <> ${t.requestedBy}`,
+    ),
+    // The FK above is satisfied by the row being inserted, so nothing else stops a
+    // row naming itself. IS DISTINCT FROM because the non-correction case leaves
+    // the column NULL and NULL must pass.
+    check(
+      'fin_invoice_adjustments_no_self_reversal_ck',
+      sql`${t.reversesAdjustmentId} IS DISTINCT FROM ${t.id}`,
+    ),
+  ],
+);
+
+/**
+ * 0023. The collection document, 1:1 with a live invoice.
+ *
+ * A challan is not a reusable payment instrument: it is a printable bank-deposit
+ * slip FOR one invoice, so a second challan against the same invoice would be a
+ * second payable document for one debt. Hence a UNIQUE constraint rather than a
+ * partial index, and hence UNIQUE (tenant_id, invoice_id).
+ *
+ * `snapshot` is what the family was actually SHOWN, frozen: recomputing a printed
+ * document from live rows means a parent's paper challan and the portal disagree
+ * the day a fee structure is corrected. `status` has no derivation in 0023 — it
+ * is 0024's trg_fin_challan_status that owns it (limitation 1).
+ */
+export const finChallans = pgTable(
+  'fin_challans',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    invoiceId: uuid('invoice_id').notNull(),
+    // Frozen at issue: the installment plan may be corrected later and a parent's
+    // printed challan must keep its date (§10.3).
+    dueOn: date('due_on').notNull(),
+    issuedAt: timestamp('issued_at', { withTimezone: true }).notNull(),
+    status: text('status').notNull(),
+    // Terminal and monotonic. The CHECK owns the value set; the trigger owns the
+    // half a CHECK cannot express, namely that OLD cannot be referenced at all.
+    voidedAt: timestamp('voided_at', { withTimezone: true }),
+    voidReason: text('void_reason'),
+    snapshot: jsonb('snapshot').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('fin_challans_ten_id_uq').on(t.tenantId, t.id),
+    unique('fin_challans_1to1_uq').on(t.tenantId, t.invoiceId),
+    foreignKey({
+      name: 'fin_challans_invoice_fk',
+      columns: [t.tenantId, t.invoiceId],
+      foreignColumns: [finInvoices.tenantId, finInvoices.id],
+    }).onDelete('restrict'),
+    check(
+      'fin_challans_status_check',
+      sql`${t.status} IN ('issued','partially_paid','paid','expired','void')`,
+    ),
+    // void is never silently representable: it needs a date and a reason, exactly
+    // as fin_invoices_void_ck does, so "void" can never be a label with no cause.
+    check(
+      'fin_challans_void_ck',
+      sql`(
+        (${t.status} = 'void' AND ${t.voidedAt} IS NOT NULL AND ${t.voidReason} IS NOT NULL)
+     OR (${t.status} <> 'void' AND ${t.voidedAt} IS NULL)
+      )`,
+    ),
+    check('fin_challans_snapshot_ck', sql`jsonb_typeof(${t.snapshot}) = 'object'`),
+  ],
+);
+
+/**
+ * 0024. Money actually received.
+ *
+ * `received_by` is NULL for provider/webhook-initiated money, which is why it is
+ * nullable — and it is NOT a foreign key, in either this table or
+ * fin_receipts.received_by: an absent identity is a fact, not an unconstrained
+ * uuid, so nothing here can name a user that does not exist or has been deleted.
+ * `idempotency_key` is what makes a provider retry safe.
+ */
+export const finPayments = pgTable(
+  'fin_payments',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    paymentNo: text('payment_no').notNull(),
+    amount: numeric('amount', { precision: 19, scale: 4 }).notNull(),
+    currency: char('currency', { length: 3 }).notNull().default('PKR'),
+    method: text('method').notNull(),
+    channel: text('channel').notNull().default('manual'),
+    provider: text('provider'),
+    providerRef: text('provider_ref'),
+    status: text('status').notNull().default('settled'),
+    payerGuardianId: uuid('payer_guardian_id').notNull(),
+    receivedAt: timestamp('received_at', { withTimezone: true }).notNull(),
+    receivedBy: uuid('received_by'),
+    idempotencyKey: text('idempotency_key').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('fin_payments_no_uq').on(t.tenantId, t.paymentNo),
+    unique('fin_payments_idem_uq').on(t.tenantId, t.idempotencyKey),
+    unique('fin_payments_ten_id_uq').on(t.tenantId, t.id),
+    foreignKey({
+      name: 'fin_payments_payer_fk',
+      columns: [t.tenantId, t.payerGuardianId],
+      foreignColumns: [guardians.tenantId, guardians.id],
+    }).onDelete('restrict'),
+    check('fin_payments_amount_check', sql`${t.amount} > 0`),
+    check(
+      'fin_payments_method_check',
+      sql`${t.method} IN ('cash','bank_transfer','cheque','card','online','easypaisa','jazzcash','raast','other')`,
+    ),
+    check(
+      'fin_payments_channel_check',
+      sql`${t.channel} IN ('manual','portal','provider')`,
+    ),
+    check('fin_payments_status_check', sql`${t.status} IN ('pending','settled','failed')`),
+    // A lifecycle transition, not a financial fact: 'pending' still needs the
+    // time it was seen.
+    check(
+      'fin_payments_transition_ck',
+      sql`${t.status} = 'settled' OR ${t.receivedAt} IS NOT NULL`,
+    ),
+    // A provider reference exists only for provider-originated money. One
+    // direction only, deliberately: a manual payment with a provider_ref typed in
+    // by a caller is not a fact the database can adjudicate.
+    check(
+      'fin_payments_provider_ck',
+      sql`(
+        (${t.channel} = 'provider' AND ${t.provider} IS NOT NULL AND ${t.providerRef} IS NOT NULL)
+     OR (${t.channel} <> 'provider')
+      )`,
+    ),
+  ],
+);
+
+/**
+ * 0025. A refund request and its decision.
+ *
+ * `proposed_allocations` is the plan and `applied_allocations` is what was
+ * actually done; both are jsonb arrays rather than rows, because 0025's whole
+ * point is that the allocation that reverses money is a row in ONE signed table
+ * and the refund is the AUTHORISATION for it, not a second place money is
+ * represented.
+ *
+ * There is no UNIQUE (tenant_id, id) CONSTRAINT: 0025 ships it as a UNIQUE INDEX,
+ * and declaring `unique()` here would invent a pg_constraint row the catalog does
+ * not have.
+ */
+export const finRefunds = pgTable(
+  'fin_refunds',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    refundNo: text('refund_no').notNull(),
+    paymentId: uuid('payment_id').notNull(),
+    amount: numeric('amount', { precision: 19, scale: 4 }).notNull(),
+    status: text('status').notNull().default('requested'),
+    reason: text('reason').notNull(),
+    proposedAllocations: jsonb('proposed_allocations').notNull(),
+    appliedAllocations: jsonb('applied_allocations'),
+    requestedBy: uuid('requested_by').notNull(),
+    requestedAt: timestamp('requested_at', { withTimezone: true }).notNull().defaultNow(),
+    decidedBy: uuid('decided_by'),
+    decidedAt: timestamp('decided_at', { withTimezone: true }),
+    processedBy: uuid('processed_by'),
+    processedAt: timestamp('processed_at', { withTimezone: true }),
+    rejectionReason: text('rejection_reason'),
+    disbursementReference: text('disbursement_reference'),
+    idempotencyKey: text('idempotency_key').notNull(),
+  },
+  (t) => [
+    unique('fin_refunds_no_uq').on(t.tenantId, t.refundNo),
+    unique('fin_refunds_idem_uq').on(t.tenantId, t.idempotencyKey),
+    // The (tenant_id, id) anchor is an INDEX in 0025, not a constraint, and it
+    // exists so 0024's fin_pa_refund_fk has something to enforce against.
+    uniqueIndex('fin_refunds_ten_id_uq').on(t.tenantId, t.id),
+    index('fin_refunds_tenant_payment_idx').on(t.tenantId, t.paymentId),
+    index('fin_refunds_tenant_status_idx').on(t.tenantId, t.status),
+    index('fin_refunds_requested_by_idx').on(t.tenantId, t.requestedBy),
+    foreignKey({
+      name: 'fin_refunds_payment_fk',
+      columns: [t.tenantId, t.paymentId],
+      foreignColumns: [finPayments.tenantId, finPayments.id],
+    }).onDelete('restrict'),
+    check('fin_refunds_amount_check', sql`${t.amount} > 0`),
+    check(
+      'fin_refunds_status_check',
+      sql`${t.status} IN ('requested','approved','rejected','processed')`,
+    ),
+    check(
+      'fin_refunds_proposed_allocations_check',
+      sql`jsonb_typeof(${t.proposedAllocations}) = 'array'`,
+    ),
+    check(
+      'fin_refunds_applied_allocations_check',
+      sql`${t.appliedAllocations} IS NULL OR jsonb_typeof(${t.appliedAllocations}) = 'array'`,
+    ),
+    // Four states, thirteen conjuncts. There is no combination of populated and
+    // unpopulated columns here that describes a decision, a disbursement or a
+    // rejection that did not happen.
+    check(
+      'fin_refunds_decision_ck',
+      sql`(
+        (${t.status} = 'requested'
+            AND ${t.decidedBy} IS NULL AND ${t.decidedAt} IS NULL
+            AND ${t.rejectionReason} IS NULL
+            AND ${t.disbursementReference} IS NULL
+            AND ${t.appliedAllocations} IS NULL)
+     OR (${t.status} = 'approved'
+            AND ${t.decidedBy} IS NOT NULL AND ${t.decidedAt} IS NOT NULL
+            AND ${t.rejectionReason} IS NULL
+            AND ${t.disbursementReference} IS NULL
+            AND ${t.appliedAllocations} IS NOT NULL)
+     OR (${t.status} = 'processed'
+            AND ${t.decidedBy} IS NOT NULL AND ${t.decidedAt} IS NOT NULL
+            AND ${t.processedBy} IS NOT NULL AND ${t.processedAt} IS NOT NULL
+            AND ${t.rejectionReason} IS NULL
+            AND ${t.disbursementReference} IS NOT NULL
+            AND ${t.appliedAllocations} IS NOT NULL)
+     OR (${t.status} = 'rejected'
+            AND ${t.decidedBy} IS NOT NULL AND ${t.decidedAt} IS NOT NULL
+            AND ${t.processedBy} IS NULL AND ${t.processedAt} IS NULL
+            AND ${t.rejectionReason} IS NOT NULL
+            AND ${t.disbursementReference} IS NULL
+            AND ${t.appliedAllocations} IS NULL)
+      )`,
+    ),
+  ],
+);
+
+/**
+ * 0024. ONE signed table, and it is the whole of the reversal mechanism.
+ *
+ * The naive design — allocations plus reversals plus refund_allocations —
+ * represents "money applied to an invoice" three times and guarantees drift.
+ * Here the three kinds of row are kept DISTINCT BY `effect` AND `refund_id`,
+ * NEVER BY AMOUNT SIGN, which is what makes payment_unallocated a non-negative
+ * quantity: both negative rows are excluded from that formula by `effect`, so a
+ * full return of a fully-unallocated payment cannot produce a negative on-account
+ * balance.
+ *
+ * All four FKs below are declared with NO ON DELETE clause, which PostgreSQL
+ * records as NO ACTION. That is the migration's declared DDL rather than an
+ * omission here, and it is the reason §12.1's rows can never be silently removed
+ * out from under the balance cache.
+ */
+export const finPaymentAllocations = pgTable(
+  'fin_payment_allocations',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    paymentId: uuid('payment_id').notNull(),
+    // NULL = an on-account movement, not a mis-typed invoice.
+    invoiceId: uuid('invoice_id'),
+    amount: numeric('amount', { precision: 19, scale: 4 }).notNull(),
+    effect: text('effect').notNull(),
+    reversalOfAllocationId: uuid('reversal_of_allocation_id'),
+    // Plain nullable column in 0024 — fin_refunds did not exist yet, so a
+    // forward reference would have failed 42P01 at that file's own transaction
+    // and stopped every migration after it. 0025 adds fin_pa_refund_fk by ALTER,
+    // and that FK is declared here.
+    refundId: uuid('refund_id'),
+    reason: text('reason').notNull(),
+    createdBy: uuid('created_by').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('fin_pa_ten_id_uq').on(t.tenantId, t.id),
+    // Two partial uniques that make reversal multiplicity explicit AND bounded:
+    // at most one correction reversal per target, at most one refund reversal per
+    // target per refund. COALESCE is deliberately avoided — the two predicates
+    // read more clearly than a coalesced key would.
+    uniqueIndex('fin_pa_one_correction_uq')
+      .on(t.tenantId, t.reversalOfAllocationId)
+      .where(sql`${t.reversalOfAllocationId} is not null and ${t.refundId} is null`),
+    uniqueIndex('fin_pa_one_reversal_per_refund_uq')
+      .on(t.tenantId, t.reversalOfAllocationId, t.refundId)
+      .where(sql`${t.reversalOfAllocationId} is not null and ${t.refundId} is not null`),
+    foreignKey({
+      name: 'fin_pa_payment_fk',
+      columns: [t.tenantId, t.paymentId],
+      foreignColumns: [finPayments.tenantId, finPayments.id],
+    }),
+    foreignKey({
+      name: 'fin_pa_invoice_fk',
+      columns: [t.tenantId, t.invoiceId],
+      foreignColumns: [finInvoices.tenantId, finInvoices.id],
+    }),
+    foreignKey({
+      name: 'fin_pa_reversal_fk',
+      columns: [t.tenantId, t.reversalOfAllocationId],
+      foreignColumns: [t.tenantId, t.id],
+    }),
+    // 0025 adds this by ALTER TABLE, and 0025_refund_fk_remediation.sql pins it
+    // to ON DELETE NO ACTION NOT DEFERRABLE. Reproduced as declared.
+    foreignKey({
+      name: 'fin_pa_refund_fk',
+      columns: [t.tenantId, t.refundId],
+      foreignColumns: [finRefunds.tenantId, finRefunds.id],
+    }),
+    check('fin_payment_allocations_amount_check', sql`${t.amount} <> 0`),
+    check(
+      'fin_payment_allocations_effect_check',
+      sql`${t.effect} IN ('apply','reverse','on_account_return')`,
+    ),
+    // Declared EXACTLY ONCE and covering all three effects.
+    check(
+      'fin_pa_effect_ck',
+      sql`(
+        (${t.effect} = 'apply'
+             AND ${t.amount} > 0
+             AND ${t.invoiceId} IS NOT NULL
+             AND ${t.reversalOfAllocationId} IS NULL
+             AND ${t.refundId} IS NULL)
+     OR (${t.effect} = 'reverse'
+             AND ${t.amount} < 0
+             AND ${t.reversalOfAllocationId} IS NOT NULL)
+     OR (${t.effect} = 'on_account_return'
+             AND ${t.amount} < 0
+             AND ${t.invoiceId} IS NULL
+             AND ${t.reversalOfAllocationId} IS NULL
+             AND ${t.refundId} IS NULL)
+      )`,
+    ),
+  ],
+);
+
+/**
+ * 0024. Issued once, immutable for life, provable against its payment.
+ *
+ * NO status COLUMN AND NO VOID. The brief contradicted itself by calling a
+ * receipt immutable AND giving it status = issued | void, and both cannot hold.
+ * What would be voided is the INTERPRETATION, not the fact: "we took 50,000 from
+ * you on 3 March" did not become untrue because an allocation was a data-entry
+ * error. A correction is a NEW receipt with version = 2 and supersedes_id set,
+ * and both versions stay retrievable and printable forever.
+ *
+ * `payer_guardian_id` is DENORMALISED from the payment on purpose: RLS on a
+ * portal document must be decidable from the row itself, and a policy that had
+ * to walk payment -> student_guardians -> student -> back to the payer on every
+ * read would be slow and would depend on a soft-delete column the reader cannot
+ * see.
+ */
+export const finReceipts = pgTable(
+  'fin_receipts',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    receiptNo: text('receipt_no').notNull(),
+    paymentId: uuid('payment_id').notNull(),
+    payerGuardianId: uuid('payer_guardian_id').notNull(),
+    // The FAMILY-ATTRIBUTABLE portion, frozen at issue. amount = p.amount would
+    // be wrong the moment a payment settles two families' invoices, and
+    // trg_fin_receipt_freeze makes today's equality a database guarantee rather
+    // than an assumption. The column is its own value so a future split-receipt
+    // feature need not redefine what a receipt is.
+    amount: numeric('amount', { precision: 19, scale: 4 }).notNull(),
+    // COPIED from the payment, not derived, exactly as the payer is.
+    currency: char('currency', { length: 3 }).notNull(),
+    method: text('method').notNull(),
+    receivedAt: timestamp('received_at', { withTimezone: true }).notNull(),
+    receivedBy: uuid('received_by'),
+    version: integer('version').notNull().default(1),
+    supersedesId: uuid('supersedes_id'),
+    // The rendered document, frozen.
+    snapshot: jsonb('snapshot').notNull(),
+    issuedAt: timestamp('issued_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('fin_receipts_no_uq').on(t.tenantId, t.receiptNo),
+    unique('fin_receipts_ten_id_uq').on(t.tenantId, t.id),
+    foreignKey({
+      name: 'fin_receipts_payment_fk',
+      columns: [t.tenantId, t.paymentId],
+      foreignColumns: [finPayments.tenantId, finPayments.id],
+    }),
+    foreignKey({
+      name: 'fin_receipts_payer_fk',
+      columns: [t.tenantId, t.payerGuardianId],
+      foreignColumns: [guardians.tenantId, guardians.id],
+    }),
+    foreignKey({
+      name: 'fin_receipts_supersedes_fk',
+      columns: [t.tenantId, t.supersedesId],
+      foreignColumns: [t.tenantId, t.id],
+    }),
+    check('fin_receipts_amount_check', sql`${t.amount} > 0`),
+    check('fin_receipts_version_check', sql`${t.version} >= 1`),
+    // v1 has no predecessor; v2+ must have one.
+    check(
+      'fin_receipts_version_ck',
+      sql`(
+        (${t.version} = 1 AND ${t.supersedesId} IS NULL)
+     OR (${t.version} > 1 AND ${t.supersedesId} IS NOT NULL)
+      )`,
+    ),
+  ],
+);
+
+/**
  * 0022. What a billing run actually charged, line by line.
  *
  * TWO properties here are not expressible in this module and are part of why the
@@ -3059,9 +3823,10 @@ export const finBillingRuns = pgTable(
  *     (tenant_id, run_id, enrollment_id), so one enrollment is billed at most
  *     once per run. That is a correctness property, not a naming detail: the PK
  *     refuses a duplicate charge before any trigger gets a chance to.
- *   * `invoice_id` is nullable and has NO foreign key here. 0023 adds the
- *     reference to fin_invoices; until it exists this is a free uuid column, and
- *     §8.7.1's write-once attachment rule is the only thing governing it.
+ *   * `invoice_id` is nullable AND has a foreign key, but only because 0023 added
+ *     fin_bri_invoice_fk by ALTER once fin_invoices existed. Before that it was a
+ *     free uuid column, and §8.7.1's write-once attachment rule — the single legal
+ *     write to a committed item — is still not visible here (limitation 1).
  *
  * trg_fin_billing_run_items_freeze freezes these rows once the run is committed,
  * and on UPDATE it reads BOTH the source and the destination run, so run_id is
@@ -3110,6 +3875,272 @@ export const finBillingRunItems = pgTable(
       columns: [t.tenantId, t.assignmentId],
       foreignColumns: [finFeeAssignments.tenantId, finFeeAssignments.id],
     }).onDelete('restrict'),
+    // 0023's forward-reference resolution. The dependency stays one-way in the
+    // other direction: nothing in 0021 or 0022 points at a 0023 table, which is
+    // what keeps 0022 applicable on its own.
+    foreignKey({
+      name: 'fin_bri_invoice_fk',
+      columns: [t.tenantId, t.invoiceId],
+      foreignColumns: [finInvoices.tenantId, finInvoices.id],
+    }).onDelete('restrict'),
     check('fin_billing_run_items_amount_check', sql`${t.amount} >= 0`),
+  ],
+);
+
+/**
+ * 0026. THE CLOSED PROVENANCE CATALOGUE. `event_type` is the only provenance
+ * token a caller supplies; `source_type`, `source_table` and the
+ * source-existence rule are all looked up here, so provenance cannot be
+ * re-stated by the caller and cannot drift from the taxonomy.
+ *
+ * Exactly ten rows are seeded, and every one names a table created at or before
+ * 0026 — that is what keeps 0026 free of a forward reference to a 0027 relation
+ * while still refusing an unverifiable source. Two consequences are worth stating
+ * because they are the reason the set has this particular shape:
+ *
+ *   * there is no `invoice.adjustment` alongside `adjustment.post`. Two
+ *     non-reversal origins on the same `fin_invoice_adjustments` row would be
+ *     two distinct keys in `fin_leg_groups_origin_uq`, and the same adjustment
+ *     could then be posted twice.
+ *   * `onaccount.return` names `fin_payment_allocations`, not `fin_payments`:
+ *     the effect lives on an allocation row with a NULL invoice.
+ *
+ * A reversal event is exactly a reversal SOURCE, so the flag and the naming
+ * convention are two statements of one fact and neither can drift from the other.
+ */
+export const finLedgerEventTypes = pgTable(
+  'fin_ledger_event_types',
+  {
+    eventType: text('event_type').primaryKey(),
+    sourceType: text('source_type').notNull(),
+    sourceTable: text('source_table').notNull(),
+    isReversal: boolean('is_reversal').notNull(),
+    sourceExists: boolean('source_exists').notNull().default(true),
+  },
+  (t) => [
+    check(
+      'fin_ledger_event_types_ck',
+      sql`(${t.isReversal} and ${t.sourceType} like '%.reversal') or (not ${t.isReversal} and ${t.sourceType} not like '%.reversal')`,
+    ),
+  ],
+);
+
+/**
+ * 0026. One balanced, immutable posting header.
+ *
+ * `source_type` is deliberately NOT a caller argument and is deliberately ABSENT
+ * from the idempotency key: `post_fin_ledger_group` derives it from
+ * `finLedgerEventTypes`, so a caller cannot mint a second origin for the same
+ * source by relabelling the provenance. Keying on a free-form `source_type`
+ * would make duplicate suppression a function of an untrusted string.
+ *
+ * A group is inserted OPEN (`sealedAt` NULL) and sealed by a later UPDATE, so the
+ * legs can be written first — the insert-then-seal order is forced by
+ * `trg_fin_ledger_sealed_group_reject`. `postedAt` is deliberately NOT here: a
+ * group has no independent posting instant, and a second timestamp on the header
+ * could disagree with its legs with no constraint able to say which is right.
+ */
+export const finLedgerEntryGroups = pgTable(
+  'fin_ledger_entry_groups',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    eventType: text('event_type').notNull(),
+    sourceType: text('source_type').notNull(),
+    sourceId: uuid('source_id').notNull(),
+    reversalOfGroup: uuid('reversal_of_group'),
+    // Cached totals. Never the proof of balance: the deferred trigger recomputes
+    // them from the legs, so a miscounted cache cannot validate itself.
+    totalDebit: numeric('total_debit', { precision: 19, scale: 4 })
+      .notNull()
+      .default('0'),
+    totalCredit: numeric('total_credit', { precision: 19, scale: 4 })
+      .notNull()
+      .default('0'),
+    entryCount: integer('entry_count'),
+    sealedAt: timestamp('sealed_at', { withTimezone: true }),
+    createdBy: uuid('created_by'),
+    correlationId: uuid('correlation_id'),
+  },
+  (t) => [
+    unique('fin_leg_groups_ten_id_uq').on(t.tenantId, t.id),
+    // IDEMPOTENCY. One origin per business event per source row. Conditional
+    // uniqueness is an INDEX, not a constraint: PostgreSQL does not accept a
+    // WHERE clause on a UNIQUE constraint, and the intent is specifically
+    // partial.
+    uniqueIndex('fin_leg_groups_origin_uq')
+      .on(t.tenantId, t.eventType, t.sourceId)
+      .where(sql`${t.reversalOfGroup} is null`),
+    // ONE REVERSAL PER TARGET. Enforced by the index and not only by the body:
+    // two concurrent reversal transactions both pass F4's SELECT ... FOR UPDATE
+    // on the target, and the second must lose here.
+    uniqueIndex('fin_leg_groups_reversal_uq')
+      .on(t.tenantId, t.reversalOfGroup)
+      .where(sql`${t.reversalOfGroup} is not null`),
+    foreignKey({
+      name: 'fin_leg_groups_reversal_fk',
+      columns: [t.tenantId, t.reversalOfGroup],
+      foreignColumns: [t.tenantId, t.id],
+    }).onDelete('restrict'),
+    // Only meaningful once sealed: an unsealed group is mid-write and its totals
+    // are written by the deferred trigger rather than asserted here.
+    check(
+      'fin_leg_groups_balanced_ck',
+      sql`${t.sealedAt} is null or (${t.totalDebit} = ${t.totalCredit} and ${t.entryCount} is not null)`,
+    ),
+  ],
+);
+
+/**
+ * 0026. The legs of a posting.
+ *
+ * `amount > 0` together with an explicit `direction` is the standard
+ * representation, and it is what makes the balanced-group check a plain SUM
+ * comparison. `studentId` / `invoiceId` are denormalised so AR aging can read the
+ * LEDGER rather than the invoice table; because that is the point, both are
+ * FK-backed — an unconstrained denormalised column would be the opposite. Both
+ * stay nullable (a leg can be a tenant-level posting with no student) and a
+ * composite FK permits NULL.
+ *
+ * There is deliberately NO FK to `tenants` here. The tenant is anchored by the
+ * composite references alone: every leg names an account, a group, a student and
+ * an invoice that are all tenant-scoped, and a single-column `tenants(id)`
+ * reference would add a dependency without adding a guarantee.
+ */
+export const finLedgerEntries = pgTable(
+  'fin_ledger_entries',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    entryGroupId: uuid('entry_group_id').notNull(),
+    accountCode: text('account_code').notNull(),
+    direction: text('direction').notNull(),
+    amount: numeric('amount', { precision: 19, scale: 4 }).notNull(),
+    studentId: uuid('student_id'),
+    invoiceId: uuid('invoice_id'),
+    postedAt: timestamp('posted_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('fin_leg_entries_ten_id_uq').on(t.tenantId, t.id),
+    // AR aging reads (tenant_id, student_id). Partial, because most legs are
+    // tenant-level postings naming no student.
+    index('fin_leg_entries_ar_idx')
+      .on(t.tenantId, t.studentId, t.accountCode)
+      .where(sql`${t.studentId} is not null`),
+    foreignKey({
+      name: 'fin_leg_entries_group_fk',
+      columns: [t.tenantId, t.entryGroupId],
+      foreignColumns: [finLedgerEntryGroups.tenantId, finLedgerEntryGroups.id],
+    }).onDelete('restrict'),
+    // A business-key reference. finLedgerAccounts carries UNIQUE
+    // (tenant_id, code) precisely so a leg may name an account by code.
+    foreignKey({
+      name: 'fin_leg_entries_account_fk',
+      columns: [t.tenantId, t.accountCode],
+      foreignColumns: [finLedgerAccounts.tenantId, finLedgerAccounts.code],
+    }),
+    foreignKey({
+      name: 'fin_leg_entries_student_fk',
+      columns: [t.tenantId, t.studentId],
+      foreignColumns: [students.tenantId, students.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'fin_leg_entries_invoice_fk',
+      columns: [t.tenantId, t.invoiceId],
+      foreignColumns: [finInvoices.tenantId, finInvoices.id],
+    }).onDelete('restrict'),
+    check(
+      'fin_leg_entries_direction_ck',
+      sql`${t.direction} in ('debit','credit')`,
+    ),
+    check('fin_leg_entries_amount_positive_ck', sql`${t.amount} > 0`),
+    // Redundant against the check above, and named explicitly rather than folded
+    // into it: `amount <> 0` is the invariant the ledger relies on when it
+    // reasons about single-leg groups, and a constraint the reader can find by
+    // name is worth more than one fewer line of DDL.
+    check('fin_leg_entries_nonzero_ck', sql`${t.amount} <> 0`),
+  ],
+);
+
+export const finReconciliationBatches = pgTable(
+  'fin_reconciliation_batches',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    batchNo: text('batch_no').notNull(),
+    status: text('status').notNull().default('open'),
+    statementFileId: uuid('statement_file_id'),
+    statementRef: text('statement_ref').notNull(),
+    statementPeriodStart: date('statement_period_start').notNull(),
+    statementPeriodEnd: date('statement_period_end').notNull(),
+    statementTotal: numeric('statement_total', { precision: 19, scale: 4 }),
+    matchedTotal: numeric('matched_total', { precision: 19, scale: 4 }),
+    varianceAmount: numeric('variance_amount', { precision: 19, scale: 4 }).notNull().default('0'),
+    varianceReason: text('variance_reason'),
+    varianceTolerance: numeric('variance_tolerance', { precision: 19, scale: 4 }).notNull().default('0'),
+    completionHash: text('completion_hash'),
+    completionSnapshot: jsonb('completion_snapshot'),
+    completedBy: uuid('completed_by'),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
+    createdBy: uuid('created_by').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('fin_recon_batches_ten_id_uq').on(t.tenantId, t.id),
+    unique('fin_recon_batches_no_uq').on(t.tenantId, t.batchNo),
+    foreignKey({
+      name: 'fin_recon_batches_file_fk',
+      columns: [t.tenantId, t.statementFileId],
+      foreignColumns: [files.tenantId, files.id],
+    }).onDelete('restrict'),
+    check('fin_recon_batches_period_ck', sql`${t.statementPeriodEnd} >= ${t.statementPeriodStart}`),
+    check('fin_recon_batches_status_ck', sql`${t.status} IN ('open','matching','completed','cancelled')`),
+    check(
+      'fin_recon_batch_state_ck',
+      sql`(${t.status} = 'completed' AND ${t.completionHash} IS NOT NULL AND ${t.completionSnapshot} IS NOT NULL AND ${t.completedAt} IS NOT NULL AND ${t.completedBy} IS NOT NULL)
+          OR (${t.status} <> 'completed' AND ${t.completionHash} IS NULL AND ${t.completionSnapshot} IS NULL AND ${t.completedAt} IS NULL AND ${t.completedBy} IS NULL)`,
+    ),
+    check(
+      'fin_recon_batch_variance_ck',
+      sql`${t.varianceAmount} = 0 OR ${t.status} <> 'completed' OR (${t.varianceReason} IS NOT NULL AND length(btrim(${t.varianceReason})) > 0)`,
+    ),
+    check(
+      'fin_recon_batch_cancel_ck',
+      sql`(${t.status} = 'cancelled' AND ${t.cancelledAt} IS NOT NULL) OR (${t.status} <> 'cancelled' AND ${t.cancelledAt} IS NULL)`,
+    ),
+  ],
+);
+
+export const finReconciliationMatches = pgTable(
+  'fin_reconciliation_matches',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    batchId: uuid('batch_id').notNull(),
+    paymentId: uuid('payment_id').notNull(),
+    statementLineRef: text('statement_line_ref'),
+    matchedAmount: numeric('matched_amount', { precision: 19, scale: 4 }).notNull(),
+    isFinal: boolean('is_final').notNull().default(false),
+    matchedBy: uuid('matched_by').notNull(),
+    matchedAt: timestamp('matched_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('fin_recon_matches_ten_id_uq').on(t.tenantId, t.id),
+    foreignKey({
+      name: 'fin_recon_matches_batch_fk',
+      columns: [t.tenantId, t.batchId],
+      foreignColumns: [finReconciliationBatches.tenantId, finReconciliationBatches.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'fin_recon_matches_payment_fk',
+      columns: [t.tenantId, t.paymentId],
+      foreignColumns: [finPayments.tenantId, finPayments.id],
+    }).onDelete('restrict'),
+    unique('fin_recon_tenant_batch_payment_uq').on(t.tenantId, t.batchId, t.paymentId),
+    check('fin_recon_matches_amount_ck', sql`${t.matchedAmount} > 0`),
+    uniqueIndex('fin_recon_payment_final_uq')
+      .on(t.tenantId, t.paymentId)
+      .where(sql`${t.isFinal}`),
   ],
 );

@@ -5,21 +5,33 @@ import { getEnv } from '@sms/config';
 
 /**
  * 0022 fee-structure trigger INVENTORY + freeze-behaviour proofs, run against the
- * REAL roles and the disposable test database. Requires migrations 0001..0022.
+ * REAL roles and the disposable test database. Requires migrations 0001..0025.
  *
  * Everything asserted here is read from the live catalog or provoked against the
  * live database. No migration text is searched, so a later, correct rewrite of
  * 0022 that keeps the same object graph still passes.
  *
+ * SCOPE AFTER 0023–0025. This suite owns the 0022 INVENTORY, not the phase's
+ * whole trigger graph. 0023–0025 add 20 further trg_fin_* functions and 24
+ * further bindings, so the exact counts below are stated against the 7 tables and
+ * 6 functions that 0022 itself installed, scoped in the catalog query rather than
+ * by filtering the result. That is a tightening of the WHERE clause, not a
+ * relaxation of the assertion: the 8 triples, their event sets, their enabled
+ * state, their SECURITY INVOKER posture, their revoked ACLs and the "nothing
+ * binds a 0022 guard anywhere else" rule are all still compared exactly, and a
+ * later migration that rebound or dropped one of them fails here.
+ *
  * Section A -- inventory (7 tables, 8 bindings, 6 functions):
- *   * the exact (table, trigger, function) binding set, and that nothing else in
- *     the public schema carries a trg_fin_* function;
+ *   * the exact (table, trigger, function) binding set of 0022, and that none of
+ *     those 6 functions is bound to any other table;
  *   * the decoded event set of every binding (NOT "it has a trigger"), because
  *     the freeze guarantees only exist if the row-level ops are all bound;
  *   * every binding is enabled and SECURITY INVOKER, so the guard runs with the
  *     caller's rights instead of escalating;
- *   * all six functions are revoked from PUBLIC (owner-only EXECUTE);
- *   * no trg_fin_* trigger is bound to a 0021 foundation table.
+ *   * all six functions are revoked from PUBLIC (owner-only EXECUTE), and none is
+ *     overloaded;
+ *   * no trg_fin_* trigger is bound to a 0021 foundation table, and every 0023–0025
+ *     table carries at least one, so their guards cannot be silently dropped.
  *
  * Section B -- live behaviour (all refusals are SQLSTATE 55000):
  *   * a draft structure accepts child writes and cascades on delete;
@@ -37,9 +49,11 @@ import { getEnv } from '@sms/config';
  *     item cannot walk out of a committed run into a draft one;
  *   * the one legal write to a committed item -- attaching the invoice it
  *     produced, once, changing nothing else -- is accepted, while a re-attach or
- *     an attach that also re-prices the row is refused.
+ *     an attach that also re-prices the row is refused. 0023 added
+ *     fin_bri_invoice_fk, so the attached invoice is now a REAL fin_invoices row
+ *     in the same tenant rather than a bare uuid, and the fixture creates one.
  *
- * Opt-in: RUN_RUNTIME_SECURITY_TESTS=1 (requires PostgreSQL + migration 0022).
+ * Opt-in: RUN_RUNTIME_SECURITY_TESTS=1 (requires PostgreSQL + migration 0025).
  */
 const enabled = process.env.RUN_RUNTIME_SECURITY_TESTS === '1';
 const describeDb = enabled ? describe : describe.skip;
@@ -108,6 +122,34 @@ const EXPECTED_FUNCTIONS = [
   'trg_fin_structure_child_freeze',
   'trg_fin_structure_publish_freeze',
   'trg_fin_target_validate',
+] as const;
+
+/** The 7 tables 0022 creates. Every binding below lives on one of these. */
+const T0022 = [
+  'fin_fee_structures',
+  'fin_fee_structure_items',
+  'fin_fee_installment_plans',
+  'fin_fee_structure_targets',
+  'fin_fee_assignments',
+  'fin_billing_runs',
+  'fin_billing_run_items',
+] as const;
+
+/**
+ * The 8 tables 0023–0025 create. fin_challans arrives with 0023, not 0024.
+ * Their guards are owned by their own suites; this file asserts only that each of
+ * them still carries at least one, so a later migration cannot drop a whole
+ * table's trigger layer without failing here.
+ */
+const T0023_0025 = [
+  'fin_invoices',
+  'fin_invoice_items',
+  'fin_invoice_adjustments',
+  'fin_challans',
+  'fin_payments',
+  'fin_payment_allocations',
+  'fin_receipts',
+  'fin_refunds',
 ] as const;
 
 /** Decodes pg_trigger.tgtype bit flags into the event names they represent. */
@@ -401,6 +443,7 @@ describeDb('0022 finance trigger inventory + freeze behaviour (live catalogs)', 
            join pg_namespace n on n.oid = c.relnamespace
           where n.nspname = 'public' and not t.tgisinternal
             and p.proname like 'trg\\_fin%'
+            and c.relname in (${T0022.map((t) => `'${t}'`).join(',')})
           order by c.relname, t.tgname`,
       );
       expect(rows.map((r) => `${r.table_name}|${r.trigger_name}|${r.fn}`).sort()).toEqual(
@@ -416,7 +459,8 @@ describeDb('0022 finance trigger inventory + freeze behaviour (live catalogs)', 
            join pg_proc p on p.oid = t.tgfoid
            join pg_namespace n on n.oid = c.relnamespace
           where n.nspname = 'public' and not t.tgisinternal
-            and p.proname like 'trg\\_fin%'`,
+            and p.proname like 'trg\\_fin%'
+            and c.relname in (${T0022.map((t) => `'${t}'`).join(',')})`,
       );
       expect(rows).toHaveLength(8);
       for (const r of rows) {
@@ -432,14 +476,25 @@ describeDb('0022 finance trigger inventory + freeze behaviour (live catalogs)', 
       }
     });
 
-    it('defines exactly the 6 expected trigger functions, and nothing else', async () => {
+    it('defines all 6 expected trigger functions, exactly once each', async () => {
+      // Scoped to the 0022 names. 0023–0025 add 20 more trg_fin_* functions and
+      // they are asserted by their own suites; what matters here is that these
+      // six still EXIST and are not overloaded, because a second definition with
+      // different arguments would be a different function wearing the same name.
       const rows = await mig(
-        `select p.proname as fn from pg_proc p
+        `select p.proname as fn, p.pronargs::int as nargs
+           from pg_proc p
            join pg_namespace n on n.oid = p.pronamespace
-          where n.nspname = 'public' and p.proname like 'trg\\_fin%'
-          order by 1`,
+          where n.nspname = 'public'
+            and p.proname in (${EXPECTED_FUNCTIONS.map((f) => `'${f}'`).join(',')})
+          order by 1, 2`,
       );
-      expect(rows.map((r) => r.fn)).toEqual([...EXPECTED_FUNCTIONS].sort());
+      expect(rows.map((r) => String(r.fn))).toEqual([...EXPECTED_FUNCTIONS].sort());
+      for (const r of rows) {
+        // Every 0022 guard is a no-argument trigger function. A same-named
+        // overload would be silently bound instead of the reviewed body.
+        expect(Number(r.nargs), `${String(r.fn)} is overloaded`).toBe(0);
+      }
     });
 
     it('leaves every binding enabled and SECURITY INVOKER', async () => {
@@ -452,7 +507,8 @@ describeDb('0022 finance trigger inventory + freeze behaviour (live catalogs)', 
            join pg_language l on l.oid = p.prolang
            join pg_namespace n on n.oid = c.relnamespace
           where n.nspname = 'public' and not t.tgisinternal
-            and p.proname like 'trg\\_fin%'
+            and p.proname in (${EXPECTED_FUNCTIONS.map((f) => `'${f}'`).join(',')})
+            and c.relname in (${T0022.map((t) => `'${t}'`).join(',')})
           order by 1`,
       );
       expect(rows).toHaveLength(8);
@@ -478,7 +534,8 @@ describeDb('0022 finance trigger inventory + freeze behaviour (live catalogs)', 
            join pg_namespace n on n.oid = p.pronamespace
            cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
            left join pg_roles r on r.oid = a.grantee
-          where n.nspname = 'public' and p.proname like 'trg\\_fin%'
+          where n.nspname = 'public'
+            and p.proname in (${EXPECTED_FUNCTIONS.map((f) => `'${f}'`).join(',')})
           order by p.proname, r.rolname`,
       );
       expect(rows).toHaveLength(6);
@@ -492,18 +549,19 @@ describeDb('0022 finance trigger inventory + freeze behaviour (live catalogs)', 
       }
     });
 
-    it('binds no trg_fin_* trigger to any table outside the 7 0022 tables', async () => {
+    it('binds no 0022 trigger function to any table outside the 7 0022 tables', async () => {
+      // Scoped by FUNCTION NAME rather than by table, so the direction of the
+      // check is explicit: 0022's guards belong to 0022's tables. The 0023–0025
+      // tables legitimately carry their own, differently-named guards.
       const rows = await mig(
-        `select c.relname as table_name
+        `select c.relname as table_name, t.tgname as trigger_name
            from pg_trigger t
            join pg_class c on c.oid = t.tgrelid
            join pg_proc p on p.oid = t.tgfoid
            join pg_namespace n on n.oid = c.relnamespace
           where n.nspname = 'public' and not t.tgisinternal
-            and p.proname like 'trg\\_fin%'
-            and c.relname not in ('fin_fee_structures','fin_fee_structure_items',
-                                  'fin_fee_installment_plans','fin_fee_structure_targets',
-                                  'fin_fee_assignments','fin_billing_runs','fin_billing_run_items')`,
+            and p.proname in (${EXPECTED_FUNCTIONS.map((f) => `'${f}'`).join(',')})
+            and c.relname not in (${T0022.map((t) => `'${t}'`).join(',')})`,
       );
       expect(rows).toEqual([]);
     });
@@ -521,6 +579,49 @@ describeDb('0022 finance trigger inventory + freeze behaviour (live catalogs)', 
                               'fin_document_counters','fin_fee_heads')`,
       );
       expect(rows).toEqual([]);
+    });
+
+    it('keeps the 0023–0025 per-table trigger counts exact, plus 0028 A9 on fin_refunds', async () => {
+      // These eight tables are largely trigger-driven by design — a derived
+      // due_date, a stamped invoice number, a frozen line, a recomputed balance —
+      // so a table quietly losing a guard would be a silent loss of a guarantee
+      // that no behavioural assertion notices. Counting per table rather than
+      // asserting "at least one" also pins the deliberate exception: 0028 adds
+      // fin_refunds_state_trg (`trg_fin_refund_state`, adaptation A9) to
+      // fin_refunds, taking its bound count from 1 to 2.
+      //
+      // fin_payments carries NO trigger of its own. Its integrity is enforced
+      // from the other side — the allocation guards own the sum-of-allocations
+      // invariant and the refund link, and fin_invoices own the balance the
+      // payment is recorded against. A guard on the header would see only the
+      // row it is on and could not see the allocations it is balancing, so the
+      // absence is the design rather than an omission, and pinning it to 0 keeps
+      // a later "let's just add one here" from bypassing the reviewed graph.
+      // Driven from pg_class, not from pg_trigger: a LEFT JOIN from the table
+      // list is what makes the zero observable. Grouping the trigger rows would
+      // return nothing at all for fin_payments and the zero would silently
+      // pass by absence rather than by assertion.
+      const rows = await mig(
+        `select c.relname as table_name,
+                count(t.oid) filter (where p.proname like 'trg\\_fin%')::int as n
+           from pg_class c
+           join pg_namespace n on n.oid = c.relnamespace
+           left join pg_trigger t on t.tgrelid = c.oid and not t.tgisinternal
+           left join pg_proc p on p.oid = t.tgfoid
+          where n.nspname = 'public' and c.relkind = 'r'
+            and c.relname in (${T0023_0025.map((t) => `'${t}'`).join(',')})
+          group by 1 order by 1`,
+      );
+      expect(rows.map((r) => `${String(r.table_name)}=${Number(r.n)}`)).toEqual([
+        'fin_challans=1',
+        'fin_invoice_adjustments=4',
+        'fin_invoice_items=4',
+        'fin_invoices=5',
+        'fin_payment_allocations=8',
+        'fin_payments=0',
+        'fin_receipts=1',
+        'fin_refunds=2',
+      ]);
     });
   });
 
@@ -726,6 +827,19 @@ describeDb('0022 finance trigger inventory + freeze behaviour (live catalogs)', 
 
     it('accepts attaching the produced invoice exactly once, and nothing else', async () => {
       uid.invoice = randomUUID();
+      // 0023 added fin_bri_invoice_fk, so the attached value is no longer an
+      // unconstrained uuid: it must be a REAL fin_invoices row in the item's own
+      // tenant, or the statement dies on the FK rather than on the freeze this
+      // test is about. Seeding the parent first keeps the refusal under test
+      // attributable to the guard. due_date is left unset and derived from the
+      // published structure's first plan by trg_fin_invoice_header_guard, and the
+      // draft status leaves invoice_no NULL, which is what the attach path needs.
+      await mig(
+        `insert into fin_invoices
+           (id, tenant_id, student_id, academic_year_id, enrollment_id, structure_id, created_by)
+         values (${q(u('invoice'))}, ${q(u('tenantA'))}, ${q(u('studentA2'))},
+                 ${q(u('yearA'))}, ${q(u('enrollA2'))}, ${q(u('published'))}, ${q(u('userA'))})`,
+      );
       // The single legal write to a committed item: attach the invoice it
       // produced, changing no other column.
       await mig(

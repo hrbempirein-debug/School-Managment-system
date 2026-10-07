@@ -151,6 +151,27 @@ const DOMAIN_ERRORS: ReadonlyArray<{ re: RegExp; code: string; status: number; m
   { re: /grading band gradePoint is required/i, code: 'grading_band_point_required', status: 409, message: 'Each grading band requires a grade point' },
   { re: /grading band label .* appears more than once in this scale/i, code: 'grading_band_duplicate_label', status: 409, message: 'Grading band labels must be unique within a scale' },
   { re: /grading bands that produced a result cannot be edited/i, code: 'grading_bands_result_immutable', status: 409, message: 'These grading bands have produced a result and cannot be edited; create a new version' },
+  // Phase 7 refunds (0028 F11/F12). The refund command service pre-checks most of
+  // these, but the handlers are SECURITY DEFINER functions that can still raise
+  // (e.g. under concurrency), and the mapping keeps a stable client code.
+  { re: /refund .* not found in this tenant/i, code: 'refund_not_found', status: 404, message: 'Refund not found' },
+  { re: /may not be approved by the actor who requested it/i, code: 'refund_self_approval_forbidden', status: 403, message: 'A refund may not be approved by the actor who requested it' },
+  { re: /may not be rejected by the actor who requested it/i, code: 'refund_self_rejection_forbidden', status: 403, message: 'A refund may not be rejected by the actor who requested it' },
+  { re: /actor lacks fees\.refunds\.approve/i, code: 'refund_approve_forbidden', status: 403, message: 'You lack permission to approve refunds' },
+  { re: /actor lacks fees\.refunds\.process/i, code: 'refund_process_forbidden', status: 403, message: 'You lack permission to process refunds' },
+  { re: /refund_already_decided/i, code: 'refund_already_decided', status: 409, message: 'This refund has already been decided' },
+  { re: /refund_not_approved/i, code: 'refund_not_approved', status: 409, message: 'This refund has not been approved' },
+  { re: /refund .* is .*, not requested/i, code: 'refund_not_requested', status: 409, message: 'This refund is not in a requested state' },
+  { re: /refund .* is .*, not approved/i, code: 'refund_not_approved', status: 409, message: 'This refund is not in an approved state' },
+  { re: /rejection_reason_required/i, code: 'refund_reason_required', status: 422, message: 'A rejection reason is required' },
+  { re: /disbursement_reference_required/i, code: 'refund_disbursement_reference_required', status: 422, message: 'A disbursement reference is required' },
+  { re: /postRefundApproval handles only the approve action/i, code: 'refund_invalid_action', status: 409, message: 'Invalid refund approval action' },
+  { re: /postRefundProcess handles process or reject/i, code: 'refund_invalid_action', status: 409, message: 'Invalid refund processing action' },
+  { re: /proposed allocation .* does not exist in this tenant/i, code: 'refund_allocation_not_found', status: 409, message: 'A proposed allocation does not exist' },
+  { re: /proposed allocation .* is not an applied allocation/i, code: 'refund_allocation_invalid', status: 409, message: 'A proposed allocation is not an applied allocation' },
+  { re: /proposed reversal of .* exceeds the applied allocation/i, code: 'refund_allocation_exceeds', status: 409, message: 'A proposed reversal exceeds the applied allocation' },
+  { re: /proposed allocation for .* carries a non-positive amount/i, code: 'refund_allocation_invalid', status: 409, message: 'A proposed allocation has a non-positive amount' },
+  { re: /refund .* proposed no allocations/i, code: 'refund_has_no_allocations', status: 409, message: 'This refund proposes no allocations' },
 ];
 
 export interface PgErrorLike {
