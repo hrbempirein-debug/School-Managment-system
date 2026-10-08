@@ -40,15 +40,51 @@ export const studentReportCardJobSchema = z.object({
 });
 export type StudentReportCardJob = z.infer<typeof studentReportCardJobSchema>;
 
+/**
+ * The closed set of queue categories the worker knows how to consume. Adding a
+ * queue is a deliberate, reviewable act: `JOB_NAME_TO_QUEUE` below must map every
+ * `JobName` onto one of these, and the router in `@sms/jobs` refuses anything else.
+ */
+export const JOB_QUEUE_NAMES = ['events', 'mail', 'reports'] as const;
+export type JobQueueName = (typeof JOB_QUEUE_NAMES)[number];
+export const jobQueueNameSchema = z.enum(JOB_QUEUE_NAMES);
+
 export interface JobPayload {
-  name: string;
-  queue: string;
+  name: JobName;
+  queue: JobQueueName;
   data: unknown;
 }
 
-export const JOB_NAME_TO_QUEUE: Record<string, string> = {
+/**
+ * AUTHORITATIVE job-name → queue-category map (D1 remediation).
+ *
+ * This is the single source of truth for routing. Two properties are load-bearing:
+ *
+ *  1. The value type is `JobQueueName`, not `string`, so a typo fails to compile.
+ *  2. The key type is the `JobName` union, so adding a member to `jobNameSchema`
+ *     without mapping it here is a compile error.
+ *
+ * Routing MUST derive from this table. An earlier binary ternary in
+ * `apps/worker/src/worker.ts` (`job.queue === 'mail' ? mail : events`) silently
+ * collapsed `reports` onto `events`, which is why `report.studentReportCard`
+ * never reached its consumer.
+ */
+export const JOB_NAME_TO_QUEUE: Readonly<Record<JobName, JobQueueName>> = {
   'event.process': 'events',
   'event.process.single': 'events',
   'mail.stub.send': 'mail',
   'report.studentReportCard': 'reports',
+};
+
+/**
+ * Per-job payload contracts, keyed by the same `JobName` union. The router
+ * validates the payload against the schema for the job it is about to route, so a
+ * malformed payload fails closed instead of being handed to a consumer that will
+ * misread it.
+ */
+export const JOB_PAYLOAD_SCHEMAS: Readonly<Record<JobName, z.ZodTypeAny>> = {
+  'event.process': eventProcessJobSchema,
+  'event.process.single': eventProcessJobSchema,
+  'mail.stub.send': mailStubSendJobSchema,
+  'report.studentReportCard': studentReportCardJobSchema,
 };

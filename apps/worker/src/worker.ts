@@ -7,7 +7,8 @@ import { outboxEventSchema, outboxEventTypeSchema } from '@sms/contracts';
 import { createDb, type Db, type Tx, withGuc } from '@sms/db';
 import { failEvent, dispatchPendingEvents, markProcessed, OUTBOX_JOB } from '@sms/events';
 import { createRedis } from '@sms/redis';
-import { createQueues, type QueueDelegates } from '@sms/jobs';
+import { createQueues, resolveQueueForJob, type QueueDelegates } from "@sms/jobs";
+import { assertEventTenant } from "./tenant-invariant.js";
 import { createStorageProvider, type StorageProvider } from '@sms/storage';
 import { makePromotionHandler } from './promotion.js';
 import { makeScanHandler } from './documents.js';
@@ -57,6 +58,7 @@ export async function runEventHandler(
   event: OutboxEvent,
   handlers: Record<string, OutboxHandler>,
 ): Promise<JobPayload[]> {
+  assertEventTenant(event);
   const actor =
     (typeof event.payload['actorUserId'] === 'string' && event.payload['actorUserId']) ||
     (typeof event.payload['userId'] === 'string' ? event.payload['userId'] : undefined);
@@ -68,25 +70,44 @@ export async function runEventHandler(
     async (tx) => {
       const handler = handlers[event.eventType];
       if (!handler) throw new Error(`no handler registered for event type '${event.eventType}'`);
-      await handler({ tx, event, defer: (job) => deferred.push(job) });
+      await handler({
+        tx,
+        event,
+        defer: (job) => {
+          // D1: validate routing WHILE the transaction is still open, so an
+          // unroutable job rolls the handler back and leaves `processed_at`
+          // NULL for the redrive. Validating after commit would record the
+          // failure on an already-acked row where nothing ever looks for it.
+          resolveQueueForJob(job);
+          deferred.push(job);
+        },
+      });
       await markProcessed(tx, event.id);
     },
   );
   return deferred;
 }
 
-/** Enqueue a deferred job on its queue. Failures propagate so BullMQ redrives. */
-async function enqueueDeferred(
+/**
+ * Deliver a deferred job to its queue. Failures propagate so BullMQ redrives.
+ *
+ * D1: routing is resolved by `resolveQueueForJob` — an explicit table lookup
+ * over `JOB_NAME_TO_QUEUE`. There is no ternary, no default queue and no
+ * fallback: an unknown job name, a declared queue that contradicts the table, or
+ * a malformed payload all throw. Routing is resolved before the wiring check so
+ * an unroutable job is rejected even on a worker with no queues attached.
+ */
+export async function enqueueDeferred(
   queues: QueueDelegates | undefined,
   job: JobPayload,
   log: Logger,
 ): Promise<void> {
+  const queueName = resolveQueueForJob(job);
   if (!queues) {
-    log('warn', 'deferred job dropped: no queues wired into the worker', job);
+    log('warn', 'deferred job dropped: no queues wired into the worker', { ...job, queue: queueName });
     return;
   }
-  const target: Queue | undefined =
-    job.queue === 'mail' ? (queues.mail as Queue) : (queues.events as Queue);
+  const target: Queue = queues[queueName];
   await target.add(job.name, job.data);
 }
 

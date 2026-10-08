@@ -142,6 +142,24 @@ export const outboxEventTypeSchema = z.enum([
   'exam.published',
   'report_card.generated',
   'result.corrected',
+  // ── Phase 7 finance (D2 remediation) ──────────────────────────────────────
+  // These three are emitted BY THE DATABASE from `app_finance_emit_event` in
+  // `0028_phase7_finance_security.sql` (refund.approved at :1144, refund.rejected
+  // at :1241, refund.processed at :1291) — the exact strings, unrenamed.
+  //
+  // They were missing from this enum while being written into `outbox_events`,
+  // so every refund approval produced a row the worker could never validate:
+  // `processEvent` failed `outboxEventSchema.safeParse`, `processed_at` stayed
+  // NULL, and the row cycled through the redrive forever (a permanent poison
+  // pill). Registering them is the whole of the fix — they are classified
+  // INTENTIONALLY_NOOP until Phase 8 builds the notification channel.
+  //
+  // `refund.approved` / `refund.processed` also name ledger event types in
+  // `0026_fin_ledger.sql:160,162` (`fin_ledger_event_types`). Same string,
+  // different catalog — that coincidence is deliberate and documented there.
+  'refund.approved',
+  'refund.rejected',
+  'refund.processed',
 ]);
 
 export type OutboxEventType = z.infer<typeof outboxEventTypeSchema>;
