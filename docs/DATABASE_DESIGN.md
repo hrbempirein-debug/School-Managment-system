@@ -84,7 +84,7 @@ deletion is a `school_migrator` admin operation only):
 | Table | Purpose | Notes |
 |---|---|---|
 | `students` | Student master | `student_no` unique(tenant_id, student_no), name, dob, gender, status (`applicant|active|transferred|graduated|alumni`), `primary_campus_id`, photo file_id, RESTRRICT delete |
-| `guardians` | Guardian record | may link `user_id NULL` for portal |
+| `guardians` | Guardian record | may link `user_id NULL` for portal — such contact-only rows are **not** Phase 8 communication recipients (C-4, blocking-decision §20.4) |
 | `student_guardians` | Relationships | (`student_id`,`guardian_id`,`relation`) unique; `is_primary`, `can_pickup bool` |
 | `enrollments` | Student ∈ academic year/class | unique(tenant_id, student_id, academic_year_id); `class_id`, `section_id`, `status`, `roll_no` unique(tenant_id, section_id, roll_no) WHERE active |
 | `student_documents` | Files | `file_id FK`, `doc_type`, student FK; RLS tenant |
@@ -233,7 +233,15 @@ Invariants enforced in the DATABASE, not in application code (each has a test in
 
 ## 13. Communication (`com_*`)
 
-`notification_templates`, `notifications` (tenant, user/student target, `status`, dedupe key), `announcements` (audience scope jsonb + materialized recipient query stored), `message_threads`/`messages` (school community messaging), `outbox_events` (§14), `email_outbox`/`sms_outbox` job rows or handled purely via jobs.
+`notification_templates`, `notifications`, `announcements` (audience scope jsonb + materialized recipient query stored), `message_threads`/`messages` (school community messaging), `outbox_events` (§14). Design corrections C-1…C-7 (Phase 8 blocking-decision report §20) bind this domain:
+
+- `notifications` carries **exactly one** of `recipient_user_id` / `recipient_student_id` / `recipient_guardian_id` — enforced by a DB **CHECK** (all-NULL and multi-populated forbidden); that canonical identity drives RLS, dedupe, audience resolution, delivery creation, audit, and permission checks (C-1).
+- Notification **RLS** references those actual recipient columns (user → self; student → `students.user_id`; guardian → `guardians.user_id`), always with the tenant predicate, `OR app_privileged()` at the end (C-2).
+- `notifications.body` is **canonical/template-resolved content**; each per-channel delivery row stores an **immutable rendering snapshot** (`subject`, `body`, `bodyHtml`, channel-normalized content) created once and reused by retries — template edits never touch existing deliveries (C-3).
+- Recipients must be **account-linked** (`guardians.user_id` / `students.user_id` NOT NULL + active account); contact-only guardian rows are never recipients; `student_guardians.deleted_at IS NULL` etc. enforced via the single canonical resolver (C-4).
+- Dedupe key ≡ `(tenant_id, logical communication identity, canonical recipient identity, channel)`, hash pre-image recipient-bound, UNIQUE-enforced (C-5; DEL-1).
+- Per-tenant/channel/day quota counters with **pre-flight aggregate validation** (no partial silent send) plus row-level `FOR UPDATE` backstop (C-6; ABUSE-1).
+- Failure/history views expose only **sanitized operational metadata** (channel, provider, status, failure category, safe code/reason, attempts, timestamps, correlation/idempotency ids) — never raw `last_error`, raw payloads, or provider material (C-7; DEL-2). Delivery/provider job rows are handled via the outbox/jobs path of §14; `email_outbox`/`sms_outbox` standalone job tables are not used.
 
 ## 14. Outbox & jobs (`evt_*`, `job_*`)
 

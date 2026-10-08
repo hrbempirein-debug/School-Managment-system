@@ -56,7 +56,7 @@ Job names: `notification.send`, `invoice.generate`, `report.studentReportCard`, 
 
 ## 6. Idempotency & deduplication
 
-- Natural keys: `notification.send` keyed `(user_id, template, dedupe_key)`; `invoice.generate` keyed `(student_id, academic_year_id, invoice_no)`.
+- Natural keys: `notification.send` keyed `(tenant_id, logical communication identity, canonical recipient identity, channel)` — recipient-bound per C-5 (blocking-decision §20.5); `invoice.generate` keyed `(student_id, academic_year_id, invoice_no)`.
 - Money jobs (payroll, invoice batch) also guarded by DB constraints (unique invoice_no) — double enqueue cannot double-charge.
 - API-triggered jobs (export) create `job_runs` first inside request transaction → enqueue after commit.
 

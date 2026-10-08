@@ -330,6 +330,7 @@ Additional gap: **campus is not an RLS boundary.** `memberships.campus_id uuid` 
    - **`isNull(studentGuardians.deletedAt)`** ← the missing one
 3. `homework.ts:163-172` additionally MUST gain `isNull(students.deletedAt)` (it is missing there too).
 4. An isolation test MUST seed (a) a soft-deleted link, (b) a soft-deleted guardian, (c) a soft-deleted student, and assert **zero** recipients from each — for announcements *and* messages, not just attendance reads.
+5. **Account-linked recipients only (C-4, binding).** Every Phase 8 recipient must resolve to an authenticated application account. For guardian recipients: `guardians.user_id IS NOT NULL` (`0005:139` — the column is nullable, so contact-only guardians exist) **and** the linked `users` row must be a valid, active account. For student recipients: `students.user_id IS NOT NULL` (`0013:38` — added nullable). Contact-only guardian/student records are **never** Phase 8 communication recipients — an audience selector, recipient resolver, consent evaluator, or delivery creator must never admit one merely because the contact row carries an `email` or `phone`. Resolution **fails closed** when no account-linked recipient exists. `student_guardians.deleted_at IS NULL` remains mandatory (rule 2). Contact-only guardian communication is deferred to a later phase with its own explicit consent/contact model.
 
 ### 6.4 DECISION D5-2 — campus is an additive narrowing filter, never a widening one
 
@@ -358,7 +359,7 @@ Phase 8 event payloads will be the first to plausibly carry contact data (`to`, 
 2. The worker resolves contact details from the database **at send time**, inside the handler transaction, with an explicit `tenant_id = event.tenantId` predicate (§3.4 rule 1).
 3. Consequence: redaction (`D4`) becomes **defence in depth**, not the primary control. Shallow top-level redaction is then *acceptable*, because there is nothing deep to redact.
 4. Raw provider payloads are **out of scope** — `fin_webhook_raw_payloads` is explicitly *not created* by `0029` (`docs/PHASE_7_FINANCE_DESIGN.md:13248`), and Phase 8 declares no inbound webhooks (§10).
-5. Message bodies live in `notifications.body` / `messages.body`, tenant-scoped + RLS, never in the outbox.
+5. Message bodies live in `notifications.body` / `messages.body`, tenant-scoped + RLS, never in the outbox. **Amended by C-3:** `notifications.body` is the **canonical, template-resolved notification content only**. Each created delivery additionally stores its own **immutable channel-specific rendering snapshot** (see §20.3) — a retry never re-renders, and a later template edit never mutates an already-created delivery's content.
 
 **Rationale:** this is the single cheapest decision in the audit. It removes an entire class of retention/disclosure risk without any schema, dependency, or infrastructure change.
 
@@ -413,7 +414,8 @@ Three competing idempotency surfaces already exist: `outbox_events.attempts`, `i
 1. Phase 8 **does not create `job_runs`.** It would be a fourth source of truth.
 2. Provider-send dedupe is a **UNIQUE constraint on `notifications (tenant_id, dedupe_key, channel)`**, written in the same transaction as the notification insert. A duplicate insert is the ack.
 3. `docs/DATABASE_DESIGN.md:243` §14 `job_runs` row is corrected (§14, `DOC-5`).
-4. Outbound message idempotency key is derived deterministically: `sha256(eventType | aggregateId | notificationId)` — matches the pattern already used at `exams.ts:528` (`idempotencyKey: event.id`).
+4. Outbound message idempotency key is derived deterministically: `sha256(eventType | aggregateId | notificationId)` — matches the pattern already used at `exams.ts:528` (`idempotencyKey: event.id`). **Amended by C-5 (binding):** the hash pre-image MUST contain the canonical recipient identity and the channel — `sha256(eventType | aggregateId | canonicalRecipientId | channel)` — or equivalently `notificationId` itself MUST be deterministically derived from `(logical communication, canonical recipient, channel)`. A random per-row UUID minted during fanout is forbidden: it breaks recipient-binding under audience union and fanout replay.
+5. **C-5 union/replay semantics (binding):** the physical key is equivalent to `(tenant_id, logical communication identity, canonical recipient identity, channel)`. A recipient selected by class ∪ role ∪ explicit targeting receives **one** notification row per channel; a re-executed fanout (outbox reprocessing, BullMQ redelivery, API retry) collides on the UNIQUE constraint and the duplicate insert **is** the ack; a different channel is a separate row. Audience **provenance** (which targeting paths selected the recipient) may be recorded separately for audit/debugging — never as duplicate notification rows. Provider-send retries (§9.2 rule 4) operate on the already-created row/delivery and never re-enter fanout, so they cannot duplicate or re-charge.
 
 ### 9.2 DECISION DEL-2 — DLQ for Phase 8 means a **read-only failure surface**, not a new queue
 
@@ -430,6 +432,8 @@ Three competing idempotency surfaces already exist: `outbox_events.attempts`, `i
 2. "DLQ **visible**" is satisfied. "Dedicated DLQ **queue** + replay tool" remains Phase 13, unchanged.
 3. `docs/EVENT_ARCHITECTURE.md:119` gains one sentence recording this reading; `docs/DEVELOPMENT_ROADMAP.md:102` is **not** reworded (it is the user-approved charter).
 4. Retry policy for provider sends: **5 attempts, exponential backoff from 2 s** — identical to the dispatcher's (`dispatcher.ts:84-85`), so there is one retry story, not two.
+5. **C-7 sanitized projection (binding):** the failure endpoint and any tenant-facing failure/history surface MUST project only safe operational metadata: `channel`, `provider`, delivery status, failure category, safe error code, safe human-readable reason, attempt count, timestamps, correlation identifier, idempotency identifier. It MUST NOT expose raw `last_error` (`dispatcher.ts:106` stores the raw error string, 2 KB cap), raw event payloads, raw job payloads, provider credentials/tokens/authorization headers, raw provider request/response material, unnecessary raw phone numbers or email addresses, or unnecessary full message bodies. Provider adapters normalize errors to category + safe code **at the provider boundary**. Outbox poison/failure visibility follows the same rule: `outbox_events` rows and `failEvent` output are **internal/privileged** diagnostics; the tenant-facing DLQ view is a sanitized projection, never a column dump of the outbox row.
+6. **C-7 internal retention:** raw internal diagnostics, if retained at all, remain internal and privileged — accessible only outside the tenant-facing surface — and are never projected through `GET …/communications/failures` or any failure/history view.
 
 ### 9.3 DECISION CONSENT-1 — preferences are first-class rows, evaluated at resolve time
 
@@ -451,6 +455,9 @@ Evidence (D8): `apps/api/src/app.ts:113-119` registers Fastify rate limit with `
 3. The quota is per **calendar day per channel**, because SMS cost is per-message per-day, not per-minute.
 4. Exceeding the quota marks notifications `blocked_quota` (visible in the DLQ view of §9.2) — it does **not** 500 the request and does **not** silently drop.
 5. The per-IP limiter stays as-is for HTTP volumetric protection. Two distinct controls, two distinct purposes.
+6. **C-6 pre-flight aggregate validation (binding, primary layer):** before **any** delivery/notification rows are created for a fanout, the system MUST validate the requested bounded fanout size against the applicable remaining quota/cap as an aggregate pre-flight check. If the operation exceeds the permitted bound there is **NO PARTIAL SILENT SEND**: the operation fails visibly into a terminal `blocked_quota` state (operation-level), no delivery rows are created for it, and recipients not admitted receive nothing. The design MUST distinguish `accepted` recipients, `suppressed/rejected` recipients, and `terminal operation failure` — never an ambiguous partially-successful state described as success. Fanout remains bounded and asynchronous via the outbox/worker path (§14 rule: no unbounded synchronous fanout).
+7. **C-6 row-level concurrency backstop (binding, retained):** the rule-2 `SELECT … FOR UPDATE` checked-and-incremented counter inside the notification-insert transaction remains — it is the race-condition backstop against concurrent fanouts (T16). It MUST NOT be removed; pre-flight does not replace it. A mid-fanout exhaustion discovered by the backstop rolls the operation into the same visible terminal/suppressed outcome as rule 6 — never a silent partial.
+8. **C-6 retry non-bypass (binding):** quota is charged once at fanout admission (notification row creation). Provider-send retries (§9.2 rule 4) reuse the created notification/delivery and MUST NOT re-increment the counter; outbox reprocessing collides with the C-5 dedupe key before any new quota consumption. Retry paths therefore cannot bypass the quota.
 
 ### 9.5 DECISION FEEDBACK-1 — no fake providers in prod paths; explicit `disabled` state
 
@@ -672,6 +679,13 @@ Already resolved by §9.4 (ABUSE-1) and §10.2 (DEP-1). Remaining item:
 | **CFG-1** | All Phase 8 config in `envSchema`; `.env.example` ↔ schema test | **P2** | no | no | no |
 | **MIG-1** | Migrations `0030`–`0034`; `0029` reserved | **P2** (allocation) | **YES** (allocation) | — | — |
 | **DOC-1..8** | Correct eight documentation drifts | **P2** | no | — | — |
+| **C-1** | Exactly-one recipient identity, DB-enforced CHECK | **P0** | **YES** | yes (`0030`) | no |
+| **C-2** | Canonical notification RLS on actual recipient columns | **P0** | **YES** | yes (`0030`) | no |
+| **C-3** | Immutable per-delivery rendering snapshot | **P1** | **YES** | yes (`0030`/`0032`) | no |
+| **C-4** | Account-linked recipients only; contact-only excluded | **P0** | **YES** | yes (`0030`/`0032`) | no |
+| **C-5** | Recipient-bound deterministic dedupe (amends DEL-1) | **P0** | **YES** | yes (`0032`) | no |
+| **C-6** | Quota preflight + row-lock backstop (amends ABUSE-1) | **P1** | **YES** | yes (`0030`/`0032`) | no |
+| **C-7** | Sanitized failure visibility (amends DEL-2) | **P1** | **YES** | yes (`0032`) | no |
 
 ---
 
@@ -704,4 +718,87 @@ Everything else (P1/P2) is resolvable at contract level without touching code, s
 **Explicitly NOT done in this audit, per the standing prohibition:** no migration created, executed, or modified; no communication table, API route, permission, provider, webhook, or queue introduced; no dependency installed; no commit, stage, branch, or config change; `0029` untouched; `migrations-not-authorized/` untouched; test suites not re-run (they mutate `school_saas_dev` / `school_saas_test`); `school_saas_dev` not queried.
 
 ---
-*Generated by the Phase 8 readiness gate (prompt 2 of 2). Read-only.*
+
+## 20. Design corrections C-1…C-7 — binding amendments (baseline closure gate)
+
+Recorded from the Phase 8 pre-implementation baseline closure report (baseline `0da5e5c`). These amendments are **binding** for every Phase 8 design and implementation artifact. Where an earlier section of this report conflicts with §20, **§20 governs.** Migration mapping stays inside the approved `0030`–`0033` allocation (§14); `0029` remains reserved; `0034` remains unallocated.
+
+### 20.1 C-1 — exactly one recipient identity (DB-enforced)
+
+1. The notification model carries exactly three candidate recipient columns: `recipient_user_id`, `recipient_student_id`, `recipient_guardian_id`.
+2. **Exactly ONE must be populated.** All-NULL is forbidden. Two- or three-populated is forbidden.
+3. Enforcement is a **database CHECK constraint** on `notifications` (shipped in `0030`) — application validation alone is insufficient. Failure of the invariant must fail closed (insert rejected).
+4. The selected canonical recipient identity is the single identity that drives: **RLS, deduplication, audience resolution, delivery creation, audit/history, and permission checks.** No subsystem may read a different recipient column than the one selected by the constraint.
+
+### 20.2 C-2 — canonical notification RLS
+
+1. Notification RLS MUST reference the actual canonical recipient columns from C-1 (or a canonical relationship derived from them) — never a conceptual/generic `user_id` unless `user_id` is genuinely the canonical column.
+2. Explicit visibility rules, per recipient type:
+   - **user recipient** (`recipient_user_id`): visible when `recipient_user_id = app_current_user_id()` within the tenant scope.
+   - **student recipient** (`recipient_student_id`): visible to the authenticated user linked to that student (`students.user_id = app_current_user_id()` for the matching student row) within the tenant scope.
+   - **guardian recipient** (`recipient_guardian_id`): visible to the authenticated user linked to that guardian (`guardians.user_id = app_current_user_id()` for the matching guardian row) within the tenant scope — with `guardians.deleted_at IS NULL` and `student_guardians.deleted_at IS NULL` respected by the underlying relationship.
+3. All policies additionally carry the mandatory tenant predicate (`tenant_id = app_current_tenant_id()`) and end in `OR app_privileged()` per §14 rule 3. Runtime access remains fail closed.
+4. **Worker security model unchanged:** `assertEventTenant(event)` remains the first statement of handler execution (`apps/worker/src/worker.ts:61`); `tenantIdOf(event)` remains authoritative for event tenant identity; worker operations continue using explicit `tenant_id = event.tenantId` predicates (D3-1). This correction does not redesign worker privileges/RLS.
+5. Account-linked recipient resolution (C-4) remains explicit in every visibility path.
+
+### 20.3 C-3 — immutable per-delivery content snapshot
+
+1. `notifications.body` = **canonical / template-resolved notification content only.**
+2. Each **delivery** (one per channel) stores its own immutable channel-specific rendering snapshot: `subject`, `body`, `bodyHtml`, channel-normalized content (applicable fields per channel).
+3. Lifecycle: `delivery created → render once → snapshot stored → every retry reuses the same snapshot`.
+4. **A template modification after delivery creation MUST NOT alter an existing delivery's content.** Template edits affect only future deliveries. Rendering is deterministic and auditable.
+5. No architecture text may assume one generic `body` string serves all channels or is re-rendered per attempt.
+
+### 20.4 C-4 — account-linked recipients only
+
+1. Phase 8 audience/recipient resolution MUST require a resolvable authenticated application account: guardian recipients require `guardians.user_id IS NOT NULL` plus a valid, active linked `users` account; student recipients require `students.user_id IS NOT NULL` plus a valid account.
+2. **Contact-only guardian records (`user_id IS NULL`, possibly carrying `email`/`phone`) are NOT Phase 8 delivery recipients.** Never send because a contact row contains an address. Resolution fails closed when no account-linked recipient exists.
+3. Soft-unlinked relationships remain excluded: `student_guardians.deleted_at IS NULL` (plus `guardians.deleted_at IS NULL`, `students.deleted_at IS NULL`) — D5-1's five predicates are mandatory in every resolution.
+4. Contact-only guardian communication is deferred to a later phase with its own explicit consent/contact model.
+5. Applied consistently across: audience resolution, guardian targeting, recipient resolution, consent evaluation (C-4 makes CONSENT-1's `(tenant_id, user_id, channel)` preference key well-defined for every recipient), delivery creation, RLS (§20.2), and the isolation-test invariants.
+
+### 20.5 C-5 — recipient-bound deterministic deduplication (amends §9.1 DEL-1)
+
+Binding amendment recorded in §9.1 rules 4–5: the dedupe identity is equivalent to `(tenant_id, logical communication identity, canonical recipient identity, channel)`; the hash pre-image contains the canonical recipient identity and channel; DB uniqueness enforces it; multi-path audience union and fanout replay cannot duplicate deliveries; provenance is stored separately, never as duplicate rows. Reconciled with T13 (duplicate provider send on retry — the unique constraint is the ack), announcement audience union semantics (union then dedupe at insert), retries, idempotency, and outbox reprocessing (§9.1 rule 5).
+
+### 20.6 C-6 — fanout quota preflight + concurrency backstop (amends §9.4 ABUSE-1)
+
+Binding amendment recorded in §9.4 rules 6–8: aggregate pre-flight validation before any delivery rows are created (no partial silent send; explicit accepted / suppressed / terminal states), the row-level `SELECT … FOR UPDATE` backstop retained and not removed, and retry paths charged once at admission so retries cannot bypass quota.
+
+### 20.7 C-7 — sanitized failure visibility (amends §9.2 DEL-2)
+
+Binding amendment recorded in §9.2 rules 5–6: tenant-facing failure/history views project only safe operational metadata; raw `last_error`, raw event/job payloads, credentials/tokens/headers, provider material, unnecessary raw contact details, and unnecessary full bodies are never tenant-visible; adapters normalize errors at the provider boundary; internal raw diagnostics remain internal/privileged; outbox poison visibility follows the same rule.
+
+### 20.8 G8 — provider fail-closed (reconfirmed, unchanged)
+
+FEEDBACK-1 (§9.5) + DEP-1 (§10.2) remain consistent with G8, branch-for-branch: production + configured real provider → real attempt (reachable only after DEP-1/2 approval); production + missing provider → fail closed (`blocked_missing_provider`, never a drop, never fake success); production + `console` → boot failure unless the explicit `ALLOW_CONSOLE_PROVIDER` override; development/test + explicit console → permitted; provider runtime failure → bounded, idempotent 5-attempt retry/failure state machine (§9.2 rule 4). The path `provider unavailable → pretend sent → delivery = success` must never exist.
+
+### 20.9 Migration allocation reconciliation (C-1…C-7 ⊆ `0030`–`0033`)
+
+| Correction | Migration home | Content |
+|---|---|---|
+| C-1 | `0030` | recipient columns + exactly-one CHECK on `notifications` |
+| C-2 | `0030` (`0032` for deliveries RLS, shipped with its table) | notification RLS on canonical recipient relationships + isolation-test registration |
+| C-3 | `0030` (canonical `notifications.body`) / `0032` (delivery snapshot columns) | immutable per-delivery snapshot |
+| C-4 | `0030` (FK/resolver contract) / `0032` (delivery-time account-link assertion) | account-linked-only enforcement + tests |
+| C-5 | `0032` | recipient-bound dedupe UNIQUE constraint (per §17 DEL-1 row) |
+| C-6 | `0030`/`0032` | quota counter table + preflight/terminal-state semantics |
+| C-7 | `0032` | delivery failure category/safe-code fields; sanitized view projection |
+
+`0029` = RESERVED (untouched). `0034` = RESERVED / **UNALLOCATED** — no correction consumes it. Nothing requires `0035+`. **No migration is created by this gate.**
+
+### 20.10 Reconciliation with the eight supporting Phase 8 decisions
+
+| Supporting decision | Status vs C-1…C-7 |
+|---|---|
+| 1. Snapshot-at-dispatch audience resolution | **Consistent** — audience fixed at dispatch; C-5 dedupes the resolved set at insert. |
+| 2. `announcement.published` as the one new event type | **Consistent** — its `aggregateId` feeds C-5's logical-communication identity. |
+| 3. Six Phase-8 permissions | **Consistent, one count discrepancy reported, not silently resolved:** PERM-1 §12.3 rule 4's table lists **seven** rows (`communication.send`, `announcements.manage`, `announcements.read`, `communication.templates.manage`, `messages.send`, `communication.failures.read`, `communication.preferences.manage`), while the approved gate decision counts **six** (the seven minus `communication.preferences.manage`). C-7's `communication.failures.read` is present under either count. The table is left unchanged; the 6-vs-7 count must be confirmed at the next implementation-readiness review. |
+| 4. TMPL-1 template model | **Consistent** — render-at-delivery with escaped substitution (TMPL-1 rule 5) feeds C-3's once-rendered immutable snapshot. |
+| 5. DEL-1 dedupe model | **Corrected** by C-5 (§20.5) — recipient-bound pre-image. |
+| 6. CONSENT-1 opt-out preferences | **Consistent** — resolve-time filtering before notification rows exist, so suppressed recipients never contend with C-5/C-6; its `(tenant_id, user_id, channel)` key is well-defined because C-4 makes every recipient account-linked. |
+| 7. WH-1 zero inbound provider webhooks | **Consistent** — C-7 concerns outbound-facing failure reads only. |
+| 8. DEP-1/2 no new dependencies | **Consistent** — C-7's provider-boundary normalization is a design requirement for future approved adapters; nothing is installed here. |
+
+---
+*Generated by the Phase 8 readiness gate (prompt 2 of 2). §20 (C-1…C-7) added by the Phase 8 design-correction reconciliation gate — documentation only, no code/schema/dependency changes.*
