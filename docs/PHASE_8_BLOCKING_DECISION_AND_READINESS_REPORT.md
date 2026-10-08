@@ -70,7 +70,7 @@ Design documents that describe Phase 8 as if it existed:
 
 - `docs/DEVELOPMENT_ROADMAP.md:93-101` — goal, DB, API, FE, worker, tests, security, acceptance.
 - `docs/DATABASE_DESIGN.md:234` — §13 `com_*` naming.
-- `docs/EVENT_ARCHITECTURE.md:109` — Phase 8 emits `notification.requested`, `announcement.published`.
+- `docs/EVENT_ARCHITECTURE.md:109` — claimed Phase 8 emits `notification.requested`, `announcement.published` (superseded: row corrected at the final implementation-readiness gate to one new event, `announcement.published` — see §20.11).
 - `docs/PHASE_7_FINANCE_DESIGN.md:278` — dunning deferred to Phase 8.
 
 **Conclusion:** there is no legacy to preserve inside Phase 8 itself. Every Phase 8 decision is a first-time contract. The *blockers* are therefore not Phase 8 code — they are pre-existing defects and contract ambiguities in Phases 1–7 that Phase 8 will step on.
@@ -571,7 +571,7 @@ A **third** copy exists: `packages/db/src/security/finance-rbac.test.ts:62` — 
 1. **Parity test (Phase 8 must add):** a test that reads every `rp.permission` value the migrations can materialise (extracted from `packages/db/migrations/*.sql`) and asserts `⊆ PERMISSION_CATALOG`. Mirrors the D2 three-way parity test.
 2. The **21 `fees.*` strings must be added to `PERMISSION_CATALOG`** — or explicitly retired from DB grants. Leaving them DB-only is an unenforceable grant, which is worse than no grant (it looks like access in an audit and behaves like none at runtime). **Recommendation: add all 21.** This is a contract change in `packages/permissions`, no migration required.
 3. `finance-rbac.test.ts:62`'s inline copy of the 25 must be derived from `PERMISSION_CATALOG`, not hand-maintained — eliminating the third source of truth.
-4. Phase 8 introduces, minimally:
+4. Phase 8 introduces, minimally, **six** permissions (count fixed by rule 6 at the final implementation-readiness gate):
 
 | Permission | Scope | Routes |
 |---|---|---|
@@ -581,9 +581,12 @@ A **third** copy exists: `packages/db/src/security/finance-rbac.test.ts:62` — 
 | `communication.templates.manage` | tenant | template override CRUD |
 | `messages.send` | tenant | post to thread |
 | `communication.failures.read` | tenant | the DLQ view of §9.2 |
-| `communication.preferences.manage` | tenant | admin-side preference management |
+
+`communication.preferences.manage` is **not** part of the Phase 8 set — see rule 6.
 
 5. `ROLE_TEMPLATES` additions (contract, not implementation): `school_owner` + `principal` receive all; `teacher` receives `messages.send` + `announcements.read`; `parent`/`student` receive **only** `messages.send` (they reply in threads) and self-scoped announcement read — **never** `communication.send`, **never** `announcements.manage`. Roadmap `:101` names `communication.send` as *the* permission; the split above keeps send/manage separate so the portal templates cannot become a broadcast vector.
+
+6. **Count = six (resolved at the final implementation-readiness gate; supersedes the seven-row table previously shown in rule 4).** The exact Phase 8 set is the six strings in rule 4; `0033` MUST materialise those six strings and no seventh. `communication.preferences.manage` is **deferred, not dropped to make the count equal six**: no Phase 8-chartered surface consumes it — roadmap `:97`/`:100` preferences are user-facing self-service, and CONSENT-1 (§9.3) preferences are absent-row-enabled opt-out rows read/written at self-scope by the account owner, which needs no catalog permission (the same self-scoping pattern the `announcements.read` row documents for portal routes). An admin-side preference-management surface is not chartered for Phase 8; shipping an unused permission would be an unenforceable grant with nothing to check it against — the exact failure rule 2 forbids. If a later phase charters that surface, it adds the permission in the same change as the surface itself. **Frozen role map for the six** (restated so count and roles read together): `school_owner` + `principal` → all six; `teacher` → `messages.send` + `announcements.read`; `parent` + `student` → `messages.send` only (their announcement visibility is route-level self-scoping, not the `announcements.read` permission); every other role → none of the six.
 
 ---
 
@@ -793,12 +796,42 @@ FEEDBACK-1 (§9.5) + DEP-1 (§10.2) remain consistent with G8, branch-for-branch
 |---|---|
 | 1. Snapshot-at-dispatch audience resolution | **Consistent** — audience fixed at dispatch; C-5 dedupes the resolved set at insert. |
 | 2. `announcement.published` as the one new event type | **Consistent** — its `aggregateId` feeds C-5's logical-communication identity. |
-| 3. Six Phase-8 permissions | **Consistent, one count discrepancy reported, not silently resolved:** PERM-1 §12.3 rule 4's table lists **seven** rows (`communication.send`, `announcements.manage`, `announcements.read`, `communication.templates.manage`, `messages.send`, `communication.failures.read`, `communication.preferences.manage`), while the approved gate decision counts **six** (the seven minus `communication.preferences.manage`). C-7's `communication.failures.read` is present under either count. The table is left unchanged; the 6-vs-7 count must be confirmed at the next implementation-readiness review. |
+| 3. Six Phase-8 permissions | **Resolved at the final implementation-readiness gate:** PERM-1 §12.3 rule 4's table corrected to exactly the six approved strings; PERM-1 rule 6 fixes the count at six and records the deferral rationale for `communication.preferences.manage`. The six: `communication.send`, `announcements.manage`, `announcements.read`, `communication.templates.manage`, `messages.send`, `communication.failures.read` (C-7's `communication.failures.read` present). |
 | 4. TMPL-1 template model | **Consistent** — render-at-delivery with escaped substitution (TMPL-1 rule 5) feeds C-3's once-rendered immutable snapshot. |
 | 5. DEL-1 dedupe model | **Corrected** by C-5 (§20.5) — recipient-bound pre-image. |
 | 6. CONSENT-1 opt-out preferences | **Consistent** — resolve-time filtering before notification rows exist, so suppressed recipients never contend with C-5/C-6; its `(tenant_id, user_id, channel)` key is well-defined because C-4 makes every recipient account-linked. |
 | 7. WH-1 zero inbound provider webhooks | **Consistent** — C-7 concerns outbound-facing failure reads only. |
 | 8. DEP-1/2 no new dependencies | **Consistent** — C-7's provider-boundary normalization is a design requirement for future approved adapters; nothing is installed here. |
 
+### 20.11 Final implementation-readiness freezes (final gate, documentation only)
+
+**Migration contracts `0030`–`0033` — frozen, nothing executed:**
+
+| Migration | Frozen content |
+|---|---|
+| `0030` `com_foundation.sql` | `notification_templates` (system rows `tenant_id IS NULL` + per-tenant override, TMPL-1), `notifications` (C-1 exactly-one-recipient CHECK over the recipient FK columns; C-3 canonical `body`; C-2 canonical recipient columns; C-4 account-linked recipient FKs), `announcements`, `message_threads`/`messages`, quota counter table (C-6); every tenant table ships `ENABLE ROW LEVEL SECURITY` + `FORCE ROW LEVEL SECURITY` + policies ending `OR app_privileged()` + isolation-test registration (§14 rule 3) |
+| `0031` `com_templates.sql` | system template seed + override mechanics per TMPL-1; tenant write rule `NOT (tenant_id IS NULL)` (TMPL-1 rule 3) |
+| `0032` `com_send_and_budget.sql` | `notification_deliveries` (C-3 immutable per-delivery snapshot; C-4 delivery-time account-link assertion; C-5 recipient-bound dedupe UNIQUE; C-7 failure category/safe code + sanitized projection; deliveries RLS + isolation registration); ABUSE-1 checked-and-incremented budget guard; D2-1 DB-side event-type guard rejecting `outbox_events.event_type` writes outside `outboxEventTypeSchema` |
+| `0033` `com_permissions.sql` | exactly the six strings of PERM-1 rules 4/6 backfilled into `role_permissions` per the frozen role map (rule 6) — and no seventh; the 21 `fees.*` catalog strings (PERM-1 rule 2) if not already landed; registers the PERM-1 rule 1 migration-declared ⊆ `PERMISSION_CATALOG` parity test |
+
+`0029` = RESERVED (untouched); `0034` = RESERVED / UNALLOCATED (unchanged from §14/§20.9). No migration is created by this gate.
+
+**Event contract:** Phase 8 introduces **exactly one** new outbox event type: `announcement.published` (supporting decision 2). `notification.requested` is not an event — absent from `outboxEventTypeSchema`, never to be added by Phase 8; `EVENT_ARCHITECTURE.md` phase row 8 corrected accordingly. Payloads carry identifiers only (PII-1); tenant identity via `tenantId` with `assertEventTenant`/`tenantIdOf` as the first invariant in `runEventHandler` (D3-1). Fanout runs on the `events` queue and creates notification rows keyed by C-5; send jobs go through the fail-closed `JOB_NAME_TO_QUEUE` router (D1-1) onto the Phase 8 `mail`/`sms`/`push` queues, retries 5× exponential like the dispatcher (DEL-2), bounded by C-6 preflight. Delivery idempotency = C-5 unique insert + delivery state machine; `job_runs` is not used or created for Phase 8 — wherever JOB_ARCHITECTURE's `job_runs` mechanics mention notification/delivery jobs, **DEL-1/C-5 govern**.
+
+**DOC-1…DOC-8 classification (final gate):**
+
+| ID | Classification | Phase 8 impact |
+|---|---|---|
+| DOC-1 | deferred — historical baseline block in a Phase 7 state doc | none |
+| DOC-2 | deferred — historical Pending block; `0029` stays reserved and no `0030+` exists | none |
+| DOC-3 | **closed** — fixed in `0da5e5c` | none |
+| DOC-4 | deferred — row overstates Phase 7 emissions; Phase 8's contract is row 8 (corrected) + the code enum | none |
+| DOC-5 | deferred for the generic layer; Phase 8 slice **closed by the DEL-1 freeze above** | none — dedupe ambiguity resolved explicitly |
+| DOC-6 | **closed** by DEL-2 + the `EVENT_ARCHITECTURE.md:119` sentence (`baac4c0`) | none |
+| DOC-7 | deferred — redrive phrasing is cosmetic; D2-1 DB guard (`0032`) + C-7 sanitized view govern | none |
+| DOC-8 | deferred — `communication.*` section lands with the implementation doc pass; frozen contract is PERM-1 rules 4–6 | none |
+
+No DOC item is a Phase 8 blocker: once the freezes above are recorded, none touches a frozen security invariant, migration, event contract, permission, recipient model, delivery state, or tenancy rule.
+
 ---
-*Generated by the Phase 8 readiness gate (prompt 2 of 2). §20 (C-1…C-7) added by the Phase 8 design-correction reconciliation gate — documentation only, no code/schema/dependency changes.*
+*Generated by the Phase 8 readiness gate (prompt 2 of 2). §20 (C-1…C-7) added by the Phase 8 design-correction reconciliation gate. §20.11 (six-permission resolution, one-event freeze, `0030`–`0033` contracts, DOC-1…DOC-8 classification) added by the Phase 8 final implementation-readiness gate — documentation only, no code/schema/dependency changes.*

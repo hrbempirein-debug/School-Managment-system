@@ -106,7 +106,7 @@ Phase-gated catalog (grows with modules):
 | 5 | `attendance.marked`, `leave.approved` |
 | 6 | `exam.published`, `report_card.generated`, `result.corrected` (+ the `exam.result.compute` COMMAND, see below) |
 | 7 | `invoice.created`, `invoice.issued`, `payment.received`, `refund.processed`, `invoice.voided` |
-| 8 | `notification.requested`, `announcement.published` |
+| 8 | `announcement.published` (one new type — the approved Phase 8 event set; `notification.requested` was never registered and is only a naming example in §3) |
 | 10 | `payroll.posted` |
 | 11 | `subscription.changed`, `entitlement.exceeded` |
 | 12 | `ai.tool.invoked` (audited sample / always for sensitive tools) |
