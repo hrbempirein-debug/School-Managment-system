@@ -3,6 +3,7 @@ import { enrollments, promotionBatches, promotionItems, students, type Tx } from
 import { writeAudit } from '@sms/audit';
 import { enqueueOutbox } from '@sms/events';
 import type { OutboxEvent } from '@sms/contracts';
+import { tenantIdOf } from './tenant-invariant.js';
 
 type Logger = (level: 'info' | 'warn' | 'error', msg: string, data?: unknown) => void;
 
@@ -17,7 +18,8 @@ export type PromotionHandler = (deps: PromotionHandlerDeps) => Promise<void>;
  * Executor for `promotion.batch.execute` (POST /promotion-batches/:id/execute enqueues it).
  *
  * Runs inside runEventHandler's system transaction (app_privileged, app.rls cleared), so
- * tenant scoping is DATA-based: every read/write filters on event.payload.tenantId. Per item:
+ * tenant scoping is DATA-based: every read/write filters on the authoritative envelope
+ * `event.tenantId` (see `tenantIdOf`), never on a payload-carried copy. Per item:
  *   * student live + active  -> insert an 'active' enrollment in the item's to_academic_year_id;
  *     a 23505 on enrollments_student_year_uq means the student is already promoted there and is
  *     treated as an idempotent success.
@@ -29,10 +31,10 @@ export type PromotionHandler = (deps: PromotionHandlerDeps) => Promise<void>;
  */
 export function makePromotionHandler(log: Logger): PromotionHandler {
   return async ({ tx, event }) => {
-    const tenantId = typeof event.payload['tenantId'] === 'string' ? event.payload['tenantId'] : null;
+    const tenantId = tenantIdOf(event);
     const batchId = typeof event.payload['batchId'] === 'string' ? event.payload['batchId'] : null;
-    if (!tenantId || !batchId) {
-      throw new Error("promotion.batch.execute requires string 'tenantId' and 'batchId' in payload");
+    if (!batchId) {
+      throw new Error("promotion.batch.execute requires string 'batchId' in payload");
     }
 
     const batch = await tx

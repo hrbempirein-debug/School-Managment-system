@@ -303,7 +303,7 @@ describeDb('student document scan hook (real PG + temp storage)', () => {
       withSystem(db, async (tx) =>
         makeScanHandler(silentLog, storage)({ tx, event: event({ tenantId: tenantA, documentId: null }) }),
       ),
-    ).rejects.toThrow(/requires string 'tenantId' and 'documentId'/);
+    ).rejects.toThrow(/requires string 'documentId' in payload/);
   });
 
   it('12. a second run after a successful clean transitions nothing (idempotency end-to-end)', async () => {

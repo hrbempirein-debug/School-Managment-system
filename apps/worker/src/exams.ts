@@ -1,19 +1,17 @@
 import { createHash } from 'node:crypto';
-import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import {
   academicTerms,
+  activeGuardianStudentEmails,
   enrollments,
   examSubjects,
   exams,
   files,
-  guardians,
   marks,
   reportCards,
   reportCardSubjects,
   students,
-  studentGuardians,
   subjects,
-  users,
   type Tx,
 } from '@sms/db';
 import { writeAudit } from '@sms/audit';
@@ -21,6 +19,7 @@ import { enqueueOutbox } from '@sms/events';
 import { studentReportCardJobSchema, type JobPayload, type OutboxEvent } from '@sms/contracts';
 import type { StorageProvider } from '@sms/storage';
 import { renderReportCardPdf, type ReportCardLine } from './report-pdf.js';
+import { tenantIdOf } from './tenant-invariant.js';
 
 type Logger = (level: 'info' | 'warn' | 'error', msg: string, data?: unknown) => void;
 
@@ -35,12 +34,6 @@ export type ExamHandler = (deps: ExamHandlerDeps) => Promise<void>;
 
 /** Channel used for the Phase 6 publication stub; Phase 8 owns real delivery. */
 const PUBLISH_TEMPLATE = 'exam.result.published';
-
-function tenantIdOf(event: OutboxEvent): string {
-  const tenantId = typeof event.payload['tenantId'] === 'string' ? event.payload['tenantId'] : event.tenantId;
-  if (!tenantId) throw new Error('exam event requires a tenantId');
-  return tenantId;
-}
 
 function examIdOf(event: OutboxEvent): string {
   const examId = event.payload['examId'];
@@ -537,9 +530,11 @@ export function makeReportCardGeneratedHandler(log: Logger): ExamHandler {
  *
  * Recipients are the LIVE guardians of the students ON this exam, resolved from
  * the exam's own roster — so a notification can only ever reach a family already
- * linked to a student who took the exam. The handler only DEFERS: a rolled-back
- * publication sends nothing. Phase 8 replaces the stub channel with real
- * provider adapters.
+ * linked to a student who took the exam. Resolution goes through
+ * `activeGuardianStudentEmails`, which requires the link, the guardian AND the
+ * student row to be live (D5-1) — a soft-unlinked guardian is not a recipient.
+ * The handler only DEFERS: a rolled-back publication sends nothing. Phase 8
+ * replaces the stub channel with real provider adapters.
  */
 export function makePublishNotificationHandler(log: Logger): ExamHandler {
   return async ({ tx, event, defer }) => {
@@ -553,24 +548,7 @@ export function makePublishNotificationHandler(log: Logger): ExamHandler {
     }
     const studentIds = studentsOnExam.map((s) => s.studentId);
 
-    const recipients = await tx
-      .selectDistinct({ studentId: studentGuardians.studentId, email: users.email })
-      .from(studentGuardians)
-      .innerJoin(
-        guardians,
-        and(
-          eq(guardians.tenantId, studentGuardians.tenantId),
-          eq(guardians.id, studentGuardians.guardianId),
-        ),
-      )
-      .innerJoin(users, eq(users.id, guardians.userId))
-      .where(
-        and(
-          eq(studentGuardians.tenantId, tenantId),
-          inArray(studentGuardians.studentId, studentIds),
-        ),
-      )
-      .execute();
+    const recipients = await activeGuardianStudentEmails(tx, tenantId, studentIds);
 
     let deferred = 0;
     for (const row of recipients) {

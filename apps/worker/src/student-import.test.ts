@@ -435,7 +435,7 @@ describeDb('student CSV import executor (real PG + temp storage)', () => {
       withSystem(db, async (tx) =>
         makeStudentImportHandler(silentLog, storage)({ tx, event: event({ tenantId, importId: null }) }),
       ),
-    ).rejects.toThrow(/requires string 'tenantId' and 'importId'/);
+    ).rejects.toThrow(/requires string 'importId' in payload/);
   });
 
   it('15. buildHandlers wires student.import.submitted to the import executor (storage-aware)', async () => {

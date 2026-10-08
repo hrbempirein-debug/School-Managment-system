@@ -1,16 +1,15 @@
-import { and, count, countDistinct, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, count, countDistinct, eq, isNull, sql } from 'drizzle-orm';
 import {
   attendanceDays,
   enrollments,
-  guardians,
   students,
-  studentGuardians,
-  users,
+  activeGuardianStudentEmails,
   type Db,
   type Tx,
 } from '@sms/db';
 import { writeAudit } from '@sms/audit';
 import type { JobPayload, OutboxEvent } from '@sms/contracts';
+import { tenantIdOf } from './tenant-invariant.js';
 
 type Logger = (level: 'info' | 'warn' | 'error', msg: string, data?: unknown) => void;
 
@@ -27,12 +26,6 @@ export type AttendanceHandler = (deps: AttendanceHandlerDeps) => Promise<void>;
 const LATE_TEMPLATE = 'attendance.student.late';
 const LEAVE_DECISION_TEMPLATE = 'attendance.leave.decision';
 
-function tenantIdOf(event: OutboxEvent): string {
-  const tenantId = typeof event.payload['tenantId'] === 'string' ? event.payload['tenantId'] : event.tenantId;
-  if (!tenantId) throw new Error('attendance event requires a tenantId');
-  return tenantId;
-}
-
 function dateOf(event: OutboxEvent): string {
   const date = event.payload['attendanceDate'];
   if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -46,9 +39,12 @@ function dateOf(event: OutboxEvent): string {
  *
  * Recipients are the LIVE guardians of the student (their portal users), so the
  * notification can only ever reach a family that is already linked to the
- * student. The handler runs inside the system transaction and therefore only
- * DEFERS the job: the BullMQ enqueue happens after the commit, so a rolled-back
- * mark can never produce a "your child was late" message.
+ * student. Resolution goes through `activeGuardianStudentEmails`, which
+ * requires the link, the guardian AND the student row to be live (D5-1) — a
+ * soft-unlinked guardian is not a recipient. The handler runs inside the system
+ * transaction and therefore only DEFERS the job: the BullMQ enqueue happens
+ * after the commit, so a rolled-back mark can never produce a "your child was
+ * late" message.
  */
 export function makeLateNotificationHandler(log: Logger): AttendanceHandler {
   return async ({ tx, event, defer }) => {
@@ -84,21 +80,9 @@ export function makeLateNotificationHandler(log: Logger): AttendanceHandler {
     }
 
     const ids = late.map((r) => r.studentId);
-    const recipients = await tx
-      .selectDistinct({ studentId: studentGuardians.studentId, email: users.email })
-      .from(studentGuardians)
-      .innerJoin(
-        guardians,
-        and(eq(guardians.tenantId, studentGuardians.tenantId), eq(guardians.id, studentGuardians.guardianId)),
-      )
-      .innerJoin(users, eq(users.id, guardians.userId))
-      .where(
-        and(
-          eq(studentGuardians.tenantId, tenantId),
-          inArray(studentGuardians.studentId, ids),
-        ),
-      )
-      .execute();
+    // D5-1: the canonical recipient resolver. It joins students and filters all
+    // three `deleted_at` columns, so a soft-unlinked guardian gets NOTHING.
+    const recipients = await activeGuardianStudentEmails(tx, tenantId, ids);
 
     let deferred = 0;
     for (const row of late) {

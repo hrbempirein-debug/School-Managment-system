@@ -5,6 +5,7 @@ import { writeAudit } from '@sms/audit';
 import { detectDocumentType, DOCUMENT_MIME } from '@sms/core';
 import type { OutboxEvent } from '@sms/contracts';
 import type { StorageProvider } from '@sms/storage';
+import { tenantIdOf } from './tenant-invariant.js';
 
 type Logger = (level: 'info' | 'warn' | 'error', msg: string, data?: unknown) => void;
 
@@ -46,10 +47,10 @@ interface ScanDecision {
  */
 export function makeScanHandler(log: Logger, storage?: StorageProvider): DocumentScanHandler {
   return async ({ tx, event }) => {
-    const tenantId = typeof event.payload['tenantId'] === 'string' ? event.payload['tenantId'] : null;
+    const tenantId = tenantIdOf(event);
     const documentId = typeof event.payload['documentId'] === 'string' ? event.payload['documentId'] : null;
-    if (!tenantId || !documentId) {
-      throw new Error("student.document.uploaded requires string 'tenantId' and 'documentId' in payload");
+    if (!documentId) {
+      throw new Error("student.document.uploaded requires string 'documentId' in payload");
     }
 
     const doc = await tx

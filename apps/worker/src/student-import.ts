@@ -14,6 +14,7 @@ import { getEnv } from '@sms/config';
 import { parseCsv } from '@sms/core';
 import { normalizeImportHeader, type OutboxEvent, type StudentImportColumn } from '@sms/contracts';
 import type { StorageProvider } from '@sms/storage';
+import { tenantIdOf } from './tenant-invariant.js';
 
 type Logger = (level: 'info' | 'warn' | 'error', msg: string, data?: unknown) => void;
 
@@ -116,7 +117,8 @@ async function recordResult(
  * Async executor for `student.import.submitted` (POST /students/import enqueues it).
  *
  * Runs inside runEventHandler's system transaction (app_privileged, app.rls cleared),
- * so every read/write is DATA-scoped on event.payload.tenantId. Flow:
+ * so every read/write is DATA-scoped on the authoritative envelope
+ * `event.tenantId` (see `tenantIdOf`), never on a payload-carried copy. Flow:
  *   1. Claim: guarded single-winner UPDATE student_imports submitted -> processing.
  *      A missing row, or one already claimed/completed/failed, is a no-op ack so
  *      redrives + concurrent deliveries converge without double work.
@@ -140,10 +142,10 @@ export function makeStudentImportHandler(
   storage?: StorageProvider,
 ): StudentImportHandler {
   return async ({ tx, event }) => {
-    const tenantId = typeof event.payload['tenantId'] === 'string' ? event.payload['tenantId'] : null;
+    const tenantId = tenantIdOf(event);
     const importId = typeof event.payload['importId'] === 'string' ? event.payload['importId'] : null;
-    if (!tenantId || !importId) {
-      throw new Error("student.import.submitted requires string 'tenantId' and 'importId' in payload");
+    if (!importId) {
+      throw new Error("student.import.submitted requires string 'importId' in payload");
     }
 
     const imp = await tx

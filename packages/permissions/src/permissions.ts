@@ -129,6 +129,31 @@ export const PERMISSION_CATALOG: readonly Permission[] = Object.freeze([
   'exams.mark',
   'exams.publish',
   'exams.correct',
+  // Finance — core capabilities (Phase 7). The 25 `fees.*` permissions are the
+  // system-wide finance catalog defined in §20.5 and backfilled by migration
+  // 0028: structures, assignments, invoices, payments, adjustments, receipts,
+  // reconciliation, ledger, reports and the portal view.
+  'fees.structures.read',
+  'fees.structures.manage',
+  'fees.assignments.read',
+  'fees.assignments.manage',
+  'fees.invoices.read',
+  'fees.invoices.create',
+  'fees.invoices.issue',
+  'fees.invoices.void',
+  'fees.payments.read',
+  'fees.payments.collect',
+  'fees.payments.reverse',
+  'fees.adjustments.read',
+  'fees.adjustments.create',
+  'fees.adjustments.approve',
+  'fees.receipts.read',
+  'fees.receipts.reissue',
+  'fees.reconciliation.read',
+  'fees.reconciliation.manage',
+  'fees.ledger.read',
+  'fees.reports.read',
+  'fees.portal.read',
   // Finance — refund command surface (Phase 7). Four deliberately separate
   // capabilities: `request` files a refund, `read` sees the queue, `approve`
   // decides approve/reject and `process` disburses. `approve` and `process` are
@@ -141,6 +166,41 @@ export const PERMISSION_CATALOG: readonly Permission[] = Object.freeze([
 ]);
 
 export const PERMISSION_SET: ReadonlySet<Permission> = new Set(PERMISSION_CATALOG);
+
+/**
+ * The Phase 7 finance permissions, DERIVED from the catalog so that the 25
+ * `fees.*` strings have exactly one definition site in the whole codebase.
+ * Role templates below compose their finance grants from this list instead of
+ * repeating the literals — a new finance permission is therefore visible to the
+ * template matrix the moment it is catalogued.
+ */
+export const FEES_PERMISSIONS: readonly Permission[] = Object.freeze(
+  PERMISSION_CATALOG.filter((p) => p.startsWith('fees.')),
+);
+
+/**
+ * Phase 7 §20.5 per-role finance membership — the ONE fact the catalog cannot
+ * state (the catalog knows which permissions exist, not who holds them).
+ * This is a faithful mirror of the immutable `0028_phase7_finance_security.sql`
+ * §20.5 backfill: that migration reconfigured tenants that already existed,
+ * `ROLE_TEMPLATES` is the forward path for tenants created afterwards, and the
+ * two MUST describe the same end state. Nothing here re-declares a permission
+ * identifier that the catalog does not own.
+ */
+const ACCOUNTANT_FEES_EXCLUSIONS: readonly Permission[] = Object.freeze([
+  // Structure/assignment authoring is an owner act, and the portal view is a
+  // parent/student grant — exactly the three §20.5 withholds from the accountant.
+  'fees.structures.manage',
+  'fees.assignments.manage',
+  'fees.portal.read',
+]);
+
+/** §20.5: the cashier holds EXACTLY these three — never `fees.receipts.reissue` (P1-03). */
+const CASHIER_PERMISSIONS: readonly Permission[] = Object.freeze([
+  'fees.payments.read',
+  'fees.payments.collect',
+  'fees.receipts.read',
+]);
 
 export type RoleScope = 'platform' | 'tenant';
 
@@ -247,6 +307,10 @@ export const ROLE_TEMPLATES: readonly RoleTemplate[] = Object.freeze([
       'exams.mark',
       'exams.publish',
       'exams.correct',
+      // Phase 7 §20.5: the owner holds ALL finance permissions (structures,
+      // assignments, invoices, payments, adjustments, receipts, reconciliation,
+      // ledger, reports, portal and the four refund commands).
+      ...FEES_PERMISSIONS,
     ],
   },
   {
@@ -287,6 +351,9 @@ export const ROLE_TEMPLATES: readonly RoleTemplate[] = Object.freeze([
       'exams.manage',
       'exams.publish',
       'exams.correct',
+      // Phase 7 §20.5: the principal is read-only over finance and holds
+      // EXACTLY `fees.reports.read` among the 25 `fees.*`.
+      'fees.reports.read',
     ],
   },
   {
@@ -311,7 +378,29 @@ export const ROLE_TEMPLATES: readonly RoleTemplate[] = Object.freeze([
     scope: 'tenant',
     name: 'Accountant',
     description: 'Finance staff (finance module lands in a later phase)',
-    permissions: ['tenant.read', 'users.read', 'audit.read'],
+    // Phase 7 §20.5: the accountant holds every finance permission EXCEPT the
+    // three exclusions (structure/assignment authoring and the family portal
+    // view) — 22 of the 25 `fees.*`. Derived from the catalog so the grant can
+    // never drift from the permission list it selects from.
+    permissions: [
+      'tenant.read',
+      'users.read',
+      'audit.read',
+      ...FEES_PERMISSIONS.filter((p) => !ACCOUNTANT_FEES_EXCLUSIONS.includes(p)),
+    ],
+  },
+  {
+    code: 'cashier',
+    scope: 'tenant',
+    name: 'Cashier',
+    description: 'Cashier role (POS fee collection)',
+    // Phase 7 §20.1/§20.5 (OD-11): a tenant-scoped system role holding EXACTLY
+    // three permissions. Deliberately a template so a fresh tenant can collect
+    // cash at the point of sale; it is created WITHOUT a membership, exactly as
+    // the 0028 backfill created it — assigning a user to it is an owner act.
+    // `fees.receipts.reissue` is deliberately absent (P1-03): a cashier may read
+    // a receipt but never mint a superseding one.
+    permissions: [...CASHIER_PERMISSIONS],
   },
   {
     code: 'parent',
@@ -323,14 +412,16 @@ export const ROLE_TEMPLATES: readonly RoleTemplate[] = Object.freeze([
     // `exams.read` is the portal grant; the self-scoped endpoint additionally
     // relationship-scopes to linked children, so this can never expose another
     // family's results. No manage/mark/publish/correct — ever.
-    permissions: ['tenant.read', 'homework.read', 'attendance.read', 'attendance.request_leave', 'exams.read'],
+    // Phase 7 §20.5: the family portal grant is EXACTLY `fees.portal.read`.
+    permissions: ['tenant.read', 'homework.read', 'attendance.read', 'attendance.request_leave', 'exams.read', 'fees.portal.read'],
   },
   {
     code: 'student',
     scope: 'tenant',
     name: 'Student',
     description: 'Student portal',
-    permissions: ['tenant.read', 'homework.read', 'attendance.read', 'attendance.request_leave', 'exams.read'],
+    // Phase 7 §20.5: the family portal grant is EXACTLY `fees.portal.read`.
+    permissions: ['tenant.read', 'homework.read', 'attendance.read', 'attendance.request_leave', 'exams.read', 'fees.portal.read'],
   },
 ]);
 
@@ -365,6 +456,27 @@ export function assertCatalogConsistent(): void {
     if (template.scope === 'tenant' && template.permissions.some((p) => p.startsWith('platform.'))) {
       throw new AppError(`Tenant role "${template.code}" contains a platform permission`);
     }
+  }
+  // D9: a catalog permission that no role template grants is unreachable at
+  // runtime, because authorization reads `role_permissions` and a fresh tenant
+  // is provisioned from ROLE_TEMPLATES alone. Every permission MUST therefore
+  // be reachable from at least one template of its own scope, otherwise the
+  // catalog silently advertises a capability no tenant can ever hold. (This is
+  // exactly the gap the Phase 7 `fees.*` / `cashier` backfill left behind.)
+  const reachable = {
+    platform: new Set<string>(),
+    tenant: new Set<string>(),
+  } as const;
+  for (const template of ROLE_TEMPLATES) {
+    for (const p of template.permissions) reachable[template.scope].add(p);
+  }
+  const unreachable = [...seen].filter(
+    (p) => !reachable[isPlatformPermission(p) ? 'platform' : 'tenant'].has(p),
+  );
+  if (unreachable.length > 0) {
+    throw new AppError(
+      `Permission(s) granted by no role template of their scope (a fresh tenant could never hold them): ${unreachable.join(', ')}`,
+    );
   }
 }
 
