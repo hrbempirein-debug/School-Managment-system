@@ -275,7 +275,7 @@ contradiction from recurring.
 | **Fee credit notes as standalone documents** | A credit note is a full document lifecycle (its own numbering, ledger, portal surface) | Credits are **signed adjustment rows** on the invoice (§15.2) |
 | **Arrears / balance carry-forward across academic years** | Changes what a new year's invoice means; needs a product decision (§32, OD-10) | Prior-year arrears are **visible in reports** but never auto-carried into a new invoice |
 | **Payroll, library fines, transport fees as producers** | Phase 9 / Phase 10 | Consumers of the finance model; Phase 9 will post fines as `fee_adjustments` |
-| **Dunning reminders** | Roadmap lists it, but it is a notification feature | Phase 8 (`com_*`). Phase 7 emits `fee.invoice.overdue` for Phase 8 to consume |
+| **Dunning reminders** | Roadmap lists it, but it is a notification feature | **Phase 9+ backlog — blocked on a scheduler primitive** (Phase 8 blocking-decision §5.6). Phase 7 does NOT emit `fee.invoice.overdue`; no such event exists |
 | **Platform-level cross-tenant finance analytics** | §19 forbids inheriting the generic platform bypass | No platform finance access at all in Phase 7 |
 | **Payroll** | Phase 10 | — |
 
@@ -12311,7 +12311,7 @@ fee.invoice.adjusted        fee.payment.reversed         fee.refund.processed
 fee.challan.issued          fee.receipt.issued           fee.refund.rejected
 fee.fee_structure.published fee.reconciliation.completed
 fee.finance_document.generated
-fee.billing.run.completed   fee.invoice.overdue          fee.parent.notification.requested
+fee.billing.run.completed   (fee.invoice.overdue / fee.parent.notification.requested are NOT emitted — reclassified Phase 9+ backlog, blocking-decision §5.6)
 fee.reconciliation.drift
 ```
 
@@ -12382,8 +12382,8 @@ event may never reach the `logEvent(type)` fallback.
 | `fee.reconciliation.completed` | **HANDLED** | enqueue a reconciliation-summary artifact; emit alert if variance > 0 | `finance-024` |
 | `fee.reconciliation.drift` | **HANDLED** | enqueue a high-severity alert; **must** be actionable, never a no-op. This row previously had a twin for `fee.reconciliation.exception`, which no publisher ever emitted; both rows are one event and only one remains | `finance-024` |
 | `fee.fee_structure.published` | **INTENTIONALLY_NOOP** | publication is synchronous; there is no deferred work | `finance-024` |
-| `fee.invoice.overdue` | **INTENTIONALLY_NOOP** | **deferred to Phase 8.** Phase 7 emits the event; the notification channel (SMS/email) does not exist until Phase 8. Documented NOOP with reason. | `finance-024` asserts the no-op and asserts the event is emitted |
-| `fee.parent.notification.requested` | **INTENTIONALLY_NOOP** | **deferred to Phase 8** for the same reason | `finance-024` |
+| `fee.invoice.overdue` | *(not emitted)* | **documentation corrected** (Phase 8 blocking-decision `DOC-3`/§5.6). Phase 7 does NOT emit this event — 0 emissions, 0 enum members, no `finance-024` test. Dunning is reclassified to the **Phase 9+ backlog, blocked on a scheduler primitive**. | — |
+| `fee.parent.notification.requested` | *(not emitted)* | **documentation corrected** (Phase 8 blocking-decision `DOC-3`/§5.6). Phase 7 does NOT emit this event — 0 emissions, 0 enum members. Reclassified to the **Phase 9+ backlog, blocked on a scheduler primitive**. | — |
 
 ### 24.2 The registry gate, which must be updated, not bypassed
 
@@ -12860,7 +12860,7 @@ as including and excluding late fees. **Adjudicated, with both halves stated:**
 | Late-fee **representation** — `fin_invoice_adjustments.type = 'late_fee'`, posting `Dr 1200 / Cr 4200` | **IN SCOPE — supported seam** |
 | Manual entry of a late fee by finance staff | **IN SCOPE**, requires `fees.adjustments.create`, audited with a reason |
 | `challan.status = 'expired'` as a collections marker | **IN SCOPE**, with **no** fee effect (§10.2) |
-| Dunning **reminders** (SMS/email) | **OUT OF SCOPE** — Phase 8 (`com_*`). Phase 7 emits `fee.invoice.overdue` as an explicitly-NOOP event (§24.1) for Phase 8 to consume. |
+| Dunning **reminders** (SMS/email) | **OUT OF SCOPE** — reclassified to the **Phase 9+ backlog, blocked on a scheduler primitive** (Phase 8 blocking-decision §5.6). Phase 7 does NOT emit `fee.invoice.overdue`; the event does not exist (§24.1's NOOP disposition is corrected above). |
 
 **The boundary is therefore a single sentence:** *Phase 7 can record a late fee that a human decided
 to charge; it will never decide to charge one.* The `late_fee` adjustment type and the
@@ -14278,7 +14278,7 @@ a special case in `0028`.
 - **Migrations:** `0028`.
 - **APIs:** all of §21.3's portal endpoints; the staff endpoints land with their subphases.
 - **UI:** 4 nav sections; 2 portal surfaces.
-- **Worker events:** `fee.parent.notification.requested` (NOOP).
+- **Worker events:** none — the dunning event `fee.parent.notification.requested` is NOT emitted (reclassified Phase 9+ backlog, blocking-decision §5.6).
 - **Tests:** FI-014, plus the `finance-020` backfill/checksum assertions; all seven §28.3 negative cases; the principal/parent/student matrix.
 - **Security gates:** **the phase's hard gate.** The `0020`-style post-condition assertions must pass
   or the migration fails; the checksum assertion must prove no custom role was widened; the
@@ -14293,7 +14293,7 @@ a special case in `0028`.
 - **Migrations:** `0029`.
 - **APIs:** `/finance/gateways/:provider/webhook` (the only public finance route).
 - **UI:** artifact download/preview; receipt reprint.
-- **Worker events:** `fee.finance_document.generated` (NOOP), `fee.invoice.overdue` (NOOP).
+- **Worker events:** `fee.finance_document.generated` (NOOP). `fee.invoice.overdue` is NOT emitted (reclassified Phase 9+ backlog, blocking-decision §5.6).
 - **Tests:** `finance-029` artifact crash-convergence; all **six** §27.5 webhook dispositions;
   the **uniform 200 / `{"status":"ignored"}` assertion across the four pre-authorization
   failures**; signature forgery and replay; the authenticated `/webhook/verify` self-check; the

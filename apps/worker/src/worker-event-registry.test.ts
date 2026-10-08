@@ -6,14 +6,14 @@ import { buildHandlers, type EventHandlerDeps, type OutboxHandler } from './work
  * Every declared production event, classified, with no silent omission.
  *
  * WHY THIS FILE IS SEPARATE FROM outbox-integration.test.ts
- * That suite's test 8 already pins the catalog at 93 and asserts registry/catalog
+ * That suite's test 8 already pins the catalog at 96 and asserts registry/catalog
  * parity, so "a declared type has no handler" is already covered. Parity is not
  * classification: parity cannot tell a real side-effecting handler from a log-only
  * acknowledgement. A regression that quietly demoted `exam.result.compute` to a
  * log-only handler would leave test 8 green while silently stopping every result
  * computation in the system.
  *
- * The recovery requirement is that all 93 declared events land in exactly one of:
+ * The recovery requirement is that all 96 declared events land in exactly one of:
  *
  *   HANDLED            - owns a real, side-effecting handler
  *   INTENTIONALLY_NOOP - deliberately log-only, acked with a log line and nothing else
@@ -66,14 +66,32 @@ const SHARED_HANDLER_PAIRS: ReadonlyArray<readonly [OutboxEventType, OutboxEvent
   ['leave.approved', 'leave.rejected'],
 ];
 
+/**
+ * D2 remediation: the Phase 7 finance events the DATABASE writes into
+ * `outbox_events` via `app_finance_emit_event` (`0028:1144,1241,1291`).
+ *
+ * They were absent from `outboxEventTypeSchema` while being emitted, so every
+ * refund approval produced a row `processEvent` could never validate: the
+ * envelope failed `safeParse`, `processed_at` stayed NULL, and the row was
+ * re-driven forever. Pinning them here means (a) they stay registered, and
+ * (b) their disposition — INTENTIONALLY_NOOP until Phase 8 — is stated rather
+ * than merely implied by falling outside HANDLED.
+ */
+const FINANCE_DEFERRED_NOOP: readonly OutboxEventType[] = [
+  'refund.approved',
+  'refund.rejected',
+  'refund.processed',
+];
+
 const catalog = outboxEventTypeSchema.options as unknown as readonly OutboxEventType[];
 
 describe('outbox event registry: every declared event is classified', () => {
   it('pins the declared catalog', () => {
     // 89 through Phase 5; Phase 6 adds exam.result.compute, exam.published,
-    // report_card.generated and result.corrected.
-    expect(catalog.length).toBe(93);
-    expect(new Set(catalog).size, 'the catalog contains a duplicate event type').toBe(93);
+    // report_card.generated and result.corrected; the D2 remediation adds the
+    // three Phase 7 finance events the database was already emitting.
+    expect(catalog.length).toBe(96);
+    expect(new Set(catalog).size, 'the catalog contains a duplicate event type').toBe(96);
   });
 
   it('registers exactly the catalog: no missing type, no extra type', () => {
@@ -95,9 +113,26 @@ describe('outbox event registry: every declared event is classified', () => {
     }
   });
 
-  it('the remaining 84 are INTENTIONALLY_NOOP - accounted for, none unclassified', () => {
+  it('D2: the three Phase 7 finance events are declared, registered and classified NOOP', () => {
+    expect(FINANCE_DEFERRED_NOOP.length).toBe(3);
+    const registry = buildHandlers(silentLog);
+    for (const t of FINANCE_DEFERRED_NOOP) {
+      expect(catalog, `${t} is missing from outboxEventTypeSchema — the D2 poison loop`).toContain(t);
+      expect(typeof registry[t], `${t} has no worker handler`).toBe('function');
+      // Disposition: deliberately log-only until Phase 8 builds the channel.
+      expect(HANDLED.includes(t), `${t} must stay out of HANDLED until Phase 8`).toBe(false);
+    }
+    // They must not be aliased onto a real side-effecting handler by accident.
+    for (const t of FINANCE_DEFERRED_NOOP) {
+      for (const h of HANDLED) {
+        expect(registry[t], `${t} must not share ${h}'s handler`).not.toBe(registry[h]);
+      }
+    }
+  });
+
+  it('the remaining 87 are INTENTIONALLY_NOOP - accounted for, none unclassified', () => {
     const noop = catalog.filter((t) => !HANDLED.includes(t));
-    expect(noop.length, 'catalog minus HANDLED is not the expected 84').toBe(84);
+    expect(noop.length, 'catalog minus HANDLED is not the expected 87').toBe(87);
     // The three buckets partition the catalog and cover it completely: nothing is
     // left in an unstated state, which is the "no silent omission" requirement.
     expect(HANDLED.length + noop.length).toBe(catalog.length);
@@ -142,7 +177,7 @@ describe('outbox event registry: every declared event is classified', () => {
     }
   });
 
-  it('structural: all 84 no-op bindings are distinct, i.e. per-type log-only closures', () => {
+  it('structural: all 87 no-op bindings are distinct, i.e. per-type log-only closures', () => {
     const registry = buildHandlers(silentLog);
     const noopTypes = catalog.filter((t) => !HANDLED.includes(t));
     const seen = new Map<OutboxHandler, OutboxEventType>();
@@ -152,7 +187,7 @@ describe('outbox event registry: every declared event is classified', () => {
       expect(prior, `${t} shares its log-only handler with ${prior}`).toBeUndefined();
       seen.set(fn, t);
     }
-    expect(seen.size).toBe(84);
+    expect(seen.size).toBe(87);
   });
 
   it('behavioural: a no-op writes only to the logger and never touches the database', async () => {
@@ -175,7 +210,7 @@ describe('outbox event registry: every declared event is classified', () => {
     );
 
     const noopTypes = catalog.filter((t) => !HANDLED.includes(t));
-    // Every no-op, not a sample: the guarantee is "all 84", so all 84 are exercised.
+    // Every no-op, not a sample: the guarantee is "all 87", so all 87 are exercised.
     for (const t of noopTypes) {
       const deferred: unknown[] = [];
       const event = { id: 'e-1', tenantId: 't-1', aggregateId: 'a-1', eventType: t } as OutboxEvent;
@@ -188,11 +223,11 @@ describe('outbox event registry: every declared event is classified', () => {
     }
 
     // And they are actually logging, not silently resolving.
-    expect(lines.length, 'the 84 no-op handlers produced no log output at all').toBe(84);
+    expect(lines.length, 'the 87 no-op handlers produced no log output at all').toBe(87);
     expect(lines.every((l) => l.message.includes('outbox:'))).toBe(true);
-    expect(new Set(lines.map((l) => l.message)).size, 'each no-op should log its own event type').toBe(84);
+    expect(new Set(lines.map((l) => l.message)).size, 'each no-op should log its own event type').toBe(87);
     // `registry` is the same construction as `registryWithSpy`; referenced so the
     // unused-variable intent is explicit rather than accidental.
-    expect(Object.keys(registry).length).toBe(93);
+    expect(Object.keys(registry).length).toBe(96);
   });
 });

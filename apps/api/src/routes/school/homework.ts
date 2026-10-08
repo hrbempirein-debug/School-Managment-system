@@ -15,6 +15,9 @@ import {
   studentGuardians,
   guardians,
   enrollments,
+  guardianStudentLinkJoin,
+  linkStudentJoin,
+  activeGuardianScope,
   withTenant,
   type Tx,
 } from '@sms/db';
@@ -150,14 +153,15 @@ export async function parentScopesClass(
   const row = await tx
     .select({ id: enrollments.id })
     .from(guardians)
-    .innerJoin(studentGuardians, eq(studentGuardians.guardianId, guardians.id))
-    .innerJoin(students, eq(students.id, studentGuardians.studentId))
-    .innerJoin(enrollments, eq(enrollments.studentId, students.id))
+    .innerJoin(studentGuardians, guardianStudentLinkJoin())
+    .innerJoin(students, linkStudentJoin())
+    .innerJoin(
+      enrollments,
+      and(eq(enrollments.tenantId, students.tenantId), eq(enrollments.studentId, students.id)),
+    )
     .where(
       and(
-        eq(guardians.tenantId, ctx.tenantId ?? ''),
-        eq(guardians.userId, ctx.userId),
-        isNull(guardians.deletedAt),
+        activeGuardianScope(ctx),
         eq(enrollments.classId, classId),
         isNull(enrollments.deletedAt),
       ),
@@ -245,14 +249,8 @@ export async function resolveHomeworkContext(
     const rows = await tx
       .selectDistinct({ class: acdClasses })
       .from(guardians)
-      .innerJoin(
-        studentGuardians,
-        and(eq(studentGuardians.tenantId, guardians.tenantId), eq(studentGuardians.guardianId, guardians.id)),
-      )
-      .innerJoin(
-        students,
-        and(eq(students.tenantId, studentGuardians.tenantId), eq(students.id, studentGuardians.studentId)),
-      )
+      .innerJoin(studentGuardians, guardianStudentLinkJoin())
+      .innerJoin(students, linkStudentJoin())
       .innerJoin(
         enrollments,
         and(eq(enrollments.tenantId, students.tenantId), eq(enrollments.studentId, students.id)),
@@ -263,10 +261,7 @@ export async function resolveHomeworkContext(
       )
       .where(
         and(
-          eq(guardians.tenantId, ctx.tenantId ?? ''),
-          eq(guardians.userId, ctx.userId),
-          isNull(guardians.deletedAt),
-          isNull(students.deletedAt),
+          activeGuardianScope(ctx),
           isNull(enrollments.deletedAt),
           eq(enrollments.status, 'active'),
           isNull(acdClasses.deletedAt),

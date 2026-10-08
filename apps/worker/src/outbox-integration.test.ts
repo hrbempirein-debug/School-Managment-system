@@ -419,13 +419,13 @@ const c = (
   });
 
   // ── Sections 11-12, 15: handler registry, unknown/malformed, retry ────────
-  it('8. every declared event type (93) has exactly one registered handler; registry count equals catalog count', () => {
+  it('8. every declared event type (96) has exactly one registered handler; registry count equals catalog count', () => {
     const registry = buildHandlers(silentLog);
     const catalog = Object.values(outboxEventTypeSchemaOptions);
     // 89 through Phase 5; Phase 6 adds exam.result.compute, exam.published,
     // report_card.generated and result.corrected. Pinning the number is the point:
     // a new event type must be registered deliberately, never drift in.
-    expect(catalog.length).toBe(93);
+    expect(catalog.length).toBe(96);
     expect(Object.keys(registry).length).toBe(catalog.length);
     for (const t of catalog) {
       expect(typeof registry[t]).toBe('function');

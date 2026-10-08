@@ -6,12 +6,11 @@ import {
   periods,
   enrollments,
   students,
-  guardians,
-  studentGuardians,
   teacherAssignments,
   attendanceDays,
   attendancePeriods,
   staffAttendance,
+  parentReadableStudentIds,
   withTenant,
   type Tx,
 } from '@sms/db';
@@ -134,27 +133,11 @@ export async function readableStudentIds(
     return rows.map((r) => r.studentId);
   }
   if (vis === 'parent') {
-    const rows = await tx
-      .selectDistinct({ studentId: studentGuardians.studentId })
-      .from(guardians)
-      .innerJoin(
-        studentGuardians,
-        and(
-          eq(studentGuardians.tenantId, guardians.tenantId),
-          eq(studentGuardians.guardianId, guardians.id),
-        ),
-      )
-      .innerJoin(students, and(eq(students.tenantId, studentGuardians.tenantId), eq(students.id, studentGuardians.studentId)))
-      .where(
-        and(
-          eq(guardians.tenantId, ctx.tenantId ?? ''),
-          eq(guardians.userId, ctx.userId),
-          isNull(guardians.deletedAt),
-          isNull(students.deletedAt),
-        ),
-      )
-      .execute();
-    return rows.map((r) => r.studentId);
+    // D5-1: delegated to the single canonical resolver in @sms/db/relations.
+    // It applies all five predicates, including `student_guardians.deleted_at`
+    // — the one this branch used to drop, which kept a soft-unlinked guardian
+    // reading (and, in Phase 8, receiving announcements for) the former child.
+    return parentReadableStudentIds(tx, ctx);
   }
   if (vis === 'student') {
     const rows = await tx
