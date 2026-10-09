@@ -163,6 +163,20 @@ export const PERMISSION_CATALOG: readonly Permission[] = Object.freeze([
   'fees.refunds.read',
   'fees.refunds.approve',
   'fees.refunds.process',
+  // Communication (Phase 8). Six capabilities, frozen by §12.3 rule 6 / §20.11:
+  //   * `communication.send`      — send a templated notification (roadmap :101).
+  //   * `announcements.manage`    — create/update/delete announcements.
+  //   * `announcements.read`      — list announcements (portal read paths use
+  //                                 self-scoping, not this permission).
+  //   * `communication.templates.manage` — template override CRUD.
+  //   * `messages.send`           — post to a thread (parent/student reply path).
+  //   * `communication.failures.read`    — the sanitized §9.2 DLQ view.
+  'communication.send',
+  'announcements.manage',
+  'announcements.read',
+  'communication.templates.manage',
+  'messages.send',
+  'communication.failures.read',
 ]);
 
 export const PERMISSION_SET: ReadonlySet<Permission> = new Set(PERMISSION_CATALOG);
@@ -177,6 +191,22 @@ export const PERMISSION_SET: ReadonlySet<Permission> = new Set(PERMISSION_CATALO
 export const FEES_PERMISSIONS: readonly Permission[] = Object.freeze(
   PERMISSION_CATALOG.filter((p) => p.startsWith('fees.')),
 );
+
+/**
+ * The six Phase 8 communication permissions (frozen by §12.3 rule 6 / §20.11).
+ * Single definition site for the literals so the grant sets below can never
+ * drift from the permission list they select from. They span three namespaces
+ * (`communication.*`, `announcements.*`, `messages.*`), so — unlike the
+ * `fees.*` block — they are enumerated explicitly rather than prefix-filtered.
+ */
+export const COMMUNICATION_PERMISSIONS: readonly Permission[] = Object.freeze([
+  'communication.send',
+  'announcements.manage',
+  'announcements.read',
+  'communication.templates.manage',
+  'messages.send',
+  'communication.failures.read',
+]);
 
 /**
  * Phase 7 §20.5 per-role finance membership — the ONE fact the catalog cannot
@@ -311,6 +341,8 @@ export const ROLE_TEMPLATES: readonly RoleTemplate[] = Object.freeze([
       // assignments, invoices, payments, adjustments, receipts, reconciliation,
       // ledger, reports, portal and the four refund commands).
       ...FEES_PERMISSIONS,
+      // Phase 8 §12.3 rule 6: the owner holds ALL six communication permissions.
+      ...COMMUNICATION_PERMISSIONS,
     ],
   },
   {
@@ -354,6 +386,8 @@ export const ROLE_TEMPLATES: readonly RoleTemplate[] = Object.freeze([
       // Phase 7 §20.5: the principal is read-only over finance and holds
       // EXACTLY `fees.reports.read` among the 25 `fees.*`.
       'fees.reports.read',
+      // Phase 8 §12.3 rule 6: the principal holds ALL six communication permissions.
+      ...COMMUNICATION_PERMISSIONS,
     ],
   },
   {
@@ -371,7 +405,11 @@ export const ROLE_TEMPLATES: readonly RoleTemplate[] = Object.freeze([
     permissions: ['tenant.read', 'users.read',
       'timetable.read', 'homework.read', 'homework.create', 'homework.update', 'homework.delete',
       'attendance.read', 'attendance.mark',
-      'exams.read', 'exams.mark'],
+      'exams.read', 'exams.mark',
+      // Phase 8 §12.3 rule 6: the teacher holds EXACTLY `messages.send`
+      // (reply to threads) and `announcements.read` — never `communication.send`
+      // and never `announcements.manage`.
+      'messages.send', 'announcements.read'],
   },
   {
     code: 'accountant',
@@ -413,7 +451,11 @@ export const ROLE_TEMPLATES: readonly RoleTemplate[] = Object.freeze([
     // relationship-scopes to linked children, so this can never expose another
     // family's results. No manage/mark/publish/correct — ever.
     // Phase 7 §20.5: the family portal grant is EXACTLY `fees.portal.read`.
-    permissions: ['tenant.read', 'homework.read', 'attendance.read', 'attendance.request_leave', 'exams.read', 'fees.portal.read'],
+    permissions: ['tenant.read', 'homework.read', 'attendance.read', 'attendance.request_leave', 'exams.read', 'fees.portal.read',
+      // Phase 8 §12.3 rule 6: parent/student portal hold EXACTLY `messages.send`
+      // (reply in threads) — never `communication.send`, never `announcements.manage`;
+      // announcement visibility is route-level self-scoping, not `announcements.read`.
+      'messages.send'],
   },
   {
     code: 'student',
@@ -421,7 +463,10 @@ export const ROLE_TEMPLATES: readonly RoleTemplate[] = Object.freeze([
     name: 'Student',
     description: 'Student portal',
     // Phase 7 §20.5: the family portal grant is EXACTLY `fees.portal.read`.
-    permissions: ['tenant.read', 'homework.read', 'attendance.read', 'attendance.request_leave', 'exams.read', 'fees.portal.read'],
+    permissions: ['tenant.read', 'homework.read', 'attendance.read', 'attendance.request_leave', 'exams.read', 'fees.portal.read',
+      // Phase 8 §12.3 rule 6: parent/student portal hold EXACTLY `messages.send`
+      // (reply in threads) — never `communication.send`, never `announcements.manage`.
+      'messages.send'],
   },
 ]);
 

@@ -33,8 +33,8 @@ import { createTenantTransaction } from '../../api/src/routes/tenants.js';
  *
  * Two layers:
  *  (1) STATIC set algebra (no DB — always runs):
- *        catalog(114) == template-union(114)            — no orphan permission
- *        tenant-union(106) == catalog minus platform.*(8)
+ *        catalog(120) == template-union(120)            — no orphan permission
+ *        tenant-union(112) == catalog minus platform.*(8)
  *        the 25 `fees.*` are reachable from tenant templates
  *        ROLE_TEMPLATES' finance matrix == 0028 §20.5 backfill, row for row
  *  (2) LIVE (RUN_RUNTIME_SECURITY_TESTS=1): TWO disposable tenants are
@@ -43,7 +43,7 @@ import { createTenantTransaction } from '../../api/src/routes/tenants.js';
  *          - the seven tenant roles (incl. `cashier`) exist, system, tenant-scoped
  *          - per role, permissions equal ROLE_TEMPLATES exactly
  *          - the tenant union equals the authoritative tenant permission set
- *            (106) as an EXACT SET — missing/extra/duplicates/invalid reported
+ *            (112) as an EXACT SET — missing/extra/duplicates/invalid reported
  *          - every one of the 25 `fees.*` is asserted individually
  *          - `cashier` holds exactly its three §20.5 permissions
  *          - no unrelated role receives a permission outside the §20.5 matrix
@@ -154,21 +154,21 @@ async function migrationFinanceMatrix(): Promise<Map<string, Set<string>>> {
 // ---------------------------------------------------------------- static ---
 
 describe('D9 permission parity — STATIC set algebra (no DB required)', () => {
-  it('catalog is exactly 114 unique permissions; every template permission resolves', () => {
-    expect(cat).toHaveLength(114);
-    expect(new Set(cat)).toHaveLength(114);
+  it('catalog is exactly 120 unique permissions; every template permission resolves', () => {
+    expect(cat).toHaveLength(120);
+    expect(new Set(cat)).toHaveLength(120);
     for (const t of ROLE_TEMPLATES) {
       for (const p of t.permissions) expect(catSet.has(p)).toBe(true);
     }
   });
 
   it('template union == the whole catalog (no permission is granted by no template)', () => {
-    expect(tplUnion.size).toBe(114);
+    expect(tplUnion.size).toBe(120);
     expect([...catSet].filter((p) => !tplUnion.has(p))).toEqual([]);
   });
 
-  it('tenant template union is exactly the 106 tenant-scoped catalog permissions', () => {
-    expect(tenantUnion.size).toBe(106);
+  it('tenant template union is exactly the 112 tenant-scoped catalog permissions', () => {
+    expect(tenantUnion.size).toBe(112);
     expect(tenantUnion).toEqual(EXPECTED_TENANT_PERMISSIONS);
     const platformUnion = new Set(platformTemplates.flatMap((t) => t.permissions));
     expect(platformUnion.size).toBe(8);
@@ -204,10 +204,10 @@ describe('D9 permission parity — STATIC set algebra (no DB required)', () => {
     expect([...mig].filter((p) => !catSet.has(p))).toEqual([]);
   });
 
-  it('catalog == template-union ∪ migration-declared (114, zero unexplained gap)', async () => {
+  it('catalog == template-union ∪ migration-declared (120, zero unexplained gap)', async () => {
     const mig = await migrationDeclaredPermissions();
     const union = new Set([...tplUnion, ...mig]);
-    expect(union.size).toBe(114);
+    expect(union.size).toBe(120);
     expect(union).toEqual(catSet);
   });
 
@@ -446,7 +446,7 @@ describe.skipIf(!LIVE)('D9 permission parity — LIVE bootstrap via the producti
             `  expected count: ${EXPECTED_TENANT_PERMISSIONS.size}\n  actual count:   ${actual.size}\n`,
         );
       }
-      expect(actual.size).toBe(106);
+      expect(actual.size).toBe(112);
     }
   });
 
@@ -550,7 +550,7 @@ describe.skipIf(!LIVE)('D9 permission parity — LIVE bootstrap via the producti
 
   it('existing-tenant fixture: a legacy (pre-Phase-7) tenant configuration is left untouched', async () => {
     // A tenant provisioned BEFORE the fix looks like this: six roles, the
-    // 81-permission union, no cashier and no fees.*. It must be inert to the fix.
+    // 87-permission union, no cashier and no fees.*. It must be inert to the fix.
     const legacyTenant = randomUUID();
     const legacyUser = randomUUID();
     await withSystem(db, async (tx) => {
@@ -592,10 +592,10 @@ describe.skipIf(!LIVE)('D9 permission parity — LIVE bootstrap via the producti
       });
 
     const before = await readLegacy();
-    // A pre-Phase-7 tenant: 6 roles (no cashier), 134 permission ROWS whose
-    // unique union is the documented legacy 81 — zero `fees.*`.
-    expect(before.length).toBe(134);
-    expect(new Set(before.map((l) => l.split('|')[1])).size).toBe(81);
+    // A pre-Phase-8 tenant: 6 roles (no cashier), 150 permission ROWS whose
+    // unique union is the documented legacy 87 — zero `fees.*`.
+    expect(before.length).toBe(150);
+    expect(new Set(before.map((l) => l.split('|')[1])).size).toBe(87);
     expect(before.some((l) => l.split('|')[1]!.startsWith('fees.'))).toBe(false);
 
     // Provision ANOTHER fresh tenant through production after the legacy fixture exists.

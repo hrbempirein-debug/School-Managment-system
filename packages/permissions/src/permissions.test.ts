@@ -319,3 +319,53 @@ describe('Phase 4.2 grade-level/subject/assignment permissions', () => {
     for (const p of PHASE_4_2_MUTATING) expect(principal).not.toContain(p);
   });
 });
+
+const PHASE_8_COMMUNICATION_PERMISSIONS = Object.freeze([
+  'communication.send',
+  'announcements.manage',
+  'announcements.read',
+  'communication.templates.manage',
+  'messages.send',
+  'communication.failures.read',
+]);
+
+describe('Phase 8 communication permissions', () => {
+  it('registers every Phase 8 permission exactly once', () => {
+    for (const p of PHASE_8_COMMUNICATION_PERMISSIONS) {
+      expect(isRegisteredPermission(p)).toBe(true);
+      expect(PERMISSION_CATALOG.filter((x) => x === p)).toHaveLength(1);
+    }
+  });
+
+  it('scopes every Phase 8 permission to the tenant namespace', () => {
+    for (const p of PHASE_8_COMMUNICATION_PERMISSIONS) {
+      expect(isPlatformPermission(p)).toBe(false);
+    }
+  });
+
+  it('school_owner and principal hold all six communication permissions', () => {
+    for (const code of ['school_owner', 'principal']) {
+      const perms = permissionForTemplate(code);
+      for (const p of PHASE_8_COMMUNICATION_PERMISSIONS) expect(perms).toContain(p);
+    }
+  });
+
+  it('teacher holds exactly messages.send and announcements.read', () => {
+    const teacher = permissionForTemplate('teacher');
+    expect(teacher).toContain('messages.send');
+    expect(teacher).toContain('announcements.read');
+    for (const p of PHASE_8_COMMUNICATION_PERMISSIONS) {
+      if (p !== 'messages.send' && p !== 'announcements.read') expect(teacher).not.toContain(p);
+    }
+  });
+
+  it('parent and student hold messages.send only (never management/send)', () => {
+    for (const code of ['parent', 'student']) {
+      const perms = permissionForTemplate(code);
+      expect(perms).toContain('messages.send');
+      for (const p of PHASE_8_COMMUNICATION_PERMISSIONS) {
+        if (p !== 'messages.send') expect(perms).not.toContain(p);
+      }
+    }
+  });
+});
