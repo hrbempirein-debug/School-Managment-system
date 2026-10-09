@@ -233,7 +233,7 @@ Invariants enforced in the DATABASE, not in application code (each has a test in
 
 ## 13. Communication (`com_*`)
 
-`notification_templates`, `notifications`, `announcements` (audience scope jsonb + materialized recipient query stored), `message_threads`/`messages` (school community messaging), `outbox_events` (§14). Design corrections C-1…C-7 (Phase 8 blocking-decision report §20) bind this domain:
+`notification_templates`, `notifications`, `announcements` (audience scope jsonb + materialized recipient query stored), `message_threads`/`message_thread_participants`/`messages` (school community messaging; `message_thread_participants` is the canonical membership table), `communication_preferences` (CONSENT-1 Phase 8 channel-wide opt-out rows keyed `(tenant_id, user_id, channel)`; category-specific preferences deferred), `communication_quotas` (per-tenant/channel/day send counters), `outbox_events` (§14). Design corrections C-1…C-7 (Phase 8 blocking-decision report §20) bind this domain:
 
 - `notifications` carries **exactly one** of `recipient_user_id` / `recipient_student_id` / `recipient_guardian_id` — enforced by a DB **CHECK** (all-NULL and multi-populated forbidden); that canonical identity drives RLS, dedupe, audience resolution, delivery creation, audit, and permission checks (C-1).
 - Notification **RLS** references those actual recipient columns (user → self; student → `students.user_id`; guardian → `guardians.user_id`), always with the tenant predicate, `OR app_privileged()` at the end (C-2).
