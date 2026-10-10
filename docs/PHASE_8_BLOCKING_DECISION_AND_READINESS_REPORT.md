@@ -606,13 +606,13 @@ Already resolved by §9.4 (ABUSE-1) and §10.2 (DEP-1). Remaining item:
 |---|---|
 | Last used number | `0028` |
 | Reserved | **`0029`** — `fin_artifacts_webhooks.sql` (**do not touch**) |
-| **Phase 8 allocation** | **`0030` – `0034`** (5 files) |
+| **Phase 8 allocation** | **`0030` – `0036`** (7 files) — `0035`/`0036` added by the explicitly authorized allocation revision (§22) |
 | Quarantined | `packages/db/migrations-not-authorized/*` — never move, never copy into `migrations/` |
 | Runner ordering | lexicographic filename sort (`packages/db/src/cli/migrate.ts:32`) — verified against duplicate prefixes (`0025_*` ×6, `0028_*` ×2) |
 
 **Contract:**
 
-1. One file per number in `0030`–`0034`. The `0025`/`0028` multi-file-per-number pattern works but is a needless ordering hazard for a new phase.
+1. One file per number in `0030`–`0036` (§22 adds `0035`/`0036`; `0034` remains reserved/unallocated). The `0025`/`0028` multi-file-per-number pattern works but is a needless ordering hazard for a new phase.
 2. `0030` `com_foundation.sql` (eight foundation tables + RLS + isolation-test registration), `0031` `com_templates.sql` (**seed/override mechanics only — no new tables**), `0032` `com_send_and_budget.sql` (incl. DB-side event-type guard from D2-1 rule 3), `0033` `com_permissions.sql` (permission + role-template backfill), `0034` reserved for forward remediation. `0030` creates exactly: `notification_templates`, `notifications`, `announcements`, `message_threads`, `message_thread_participants`, `messages`, `communication_preferences`, `communication_quotas` (see §20.11 for the frozen per-table contract).
 3. Every `0030`–`0033` tenant table MUST ship with `ENABLE ROW LEVEL SECURITY` + `FORCE ROW LEVEL SECURITY` + policies ending in `OR app_privileged()` + an isolation test registration, per `docs/DATABASE_DESIGN.md:19`.
 4. **Nothing above is executed in this gate.** These are the numbers Phase 8 will ask for.
@@ -788,7 +788,7 @@ FEEDBACK-1 (§9.5) + DEP-1 (§10.2) remain consistent with G8, branch-for-branch
 | C-6 | `0030`/`0032` | quota counter table + preflight/terminal-state semantics |
 | C-7 | `0032` | delivery failure category/safe-code fields; sanitized view projection |
 
-`0029` = RESERVED (untouched). `0034` = RESERVED / **UNALLOCATED** — no correction consumes it. Nothing requires `0035+`. **No migration is created by this gate.**
+`0029` = RESERVED (untouched). `0034` = RESERVED / **UNALLOCATED** — no correction consumes it. Nothing *in this gate* requires `0035+`; the allocation was later extended to `0035`/`0036` under explicit authorization (§22). **No migration is created by this gate.**
 
 ### 20.10 Reconciliation with the eight supporting Phase 8 decisions
 
@@ -836,4 +836,331 @@ FEEDBACK-1 (§9.5) + DEP-1 (§10.2) remain consistent with G8, branch-for-branch
 No DOC item is a Phase 8 blocker: once the freezes above are recorded, none touches a frozen security invariant, migration, event contract, permission, recipient model, delivery state, or tenancy rule.
 
 ---
+
+## 21. User-confirmed Phase 8 decisions — documentation record
+
+**Nature.** Documentation-only. This section records user-confirmed decisions and preserves
+prior approvals. It authorizes no code, schema, migration, seed, dependency, or configuration
+change, and creates/executes no migration.
+
+**Baseline of this record:** branch `master` @ `0f38b449c90a75ace8277a3e73da973e164c192b`;
+staged/unstaged tracked changes none; migration `0030_com_foundation.sql` committed; `0031`+
+absent; `0029` absent/reserved. Applied 2026-10-09 by read-only baseline verification plus this
+single-document edit.
+
+### 21.0 Preserved prior approvals (P1–P6)
+
+- **P1–P6 principles are approved as previously recorded in the decision conversation.** That
+  approval is **conversational**, not repository-local: **no canonical P1–P6 text is present in
+  the repository baseline**, and this record neither locates nor restates it. The approval is
+  preserved without re-litigation.
+- **All unresolved sub-decisions of P1–P6 remain unresolved.** Nothing in §21.1–§21.3 resolves
+  any of them, and none is inferred from the decisions below.
+
+### 21.1 Decision — Guardian revocation (CONFIRMED)
+
+1. The immutable historical recipient snapshot is preserved.
+2. For an **undelivered** notification, a confirmed guardian-link revocation triggers
+   **terminal suppression**.
+3. The audience is **not** re-resolved or retargeted.
+4. **Audit requirement approved; audit contract not approved.** Recording *who / when / why* is
+   approved. The exact audit fields, retention rules, and tenant-facing visibility remain
+   **unapproved** (§21.4) and are subject to the approved privacy-safe audit-field contract.
+5. Proposed migration ownership: **`0032`** (delivery-state mechanics are allocated there,
+   §20.11). This is a **proposal only**; `0032` remains unauthorized.
+
+**Not implemented by this record.** No delivery state machine, no migration, no code.
+
+### 21.2 Decision — Published announcement content protection (CONFIRMED)
+
+1. A **published** announcement's `title`/`body` must be protected at **both** the application
+   level and the **database** level.
+2. Application enforcement **and** a database-level guard/trigger are required.
+3. Migration **`0031` is DML-only** and cannot contain this schema change (frozen scope:
+   "seed/override mechanics only — no new tables", §14 rule 2 / §20.11 / `0030` header).
+4. **Database-trigger migration placement is UNRESOLVED.** No migration is assigned for it, and
+   no reserved migration is repurposed (§21.5).
+
+### 21.3 Decision — External delivery quotas & provider (CONFIRMED)
+
+1. External delivery **remains disabled** until quota caps and provider selection are
+   **explicitly approved**.
+2. Do **not** enable a provider, add an adapter, choose numeric caps, or enable any outbound
+   channel.
+3. This decision is **not** authorization to implement quota enforcement.
+
+### 21.4 Gate status (kept separate from the confirmed decisions above)
+
+| Item | Status |
+|---|---|
+| D1–D8 (template contract decisions) | **NOT APPROVED** (template-contract record §2 records all UNAPPROVED) |
+| Initial template catalog rows (the two `announcement.published` rows) | **NOT APPROVED** (§2.5) |
+| English message copy, placeholders, escaping, rendering details | **NOT APPROVED** (D7 sub-decisions) |
+| Audit *who/when/why* requirement (§21.1 rule 4) | **APPROVED** |
+| Exact audit fields, retention rules, tenant-facing audit visibility | **NOT APPROVED** |
+| C-7 / DEL-2 safe failure-view contract | **NOT APPROVED** (no per-facet approval recorded; §20.7 records binding design text only) |
+| Provider choices and dependencies (`DEP-1`, `DEP-2`) | **UNAPPROVED** — external delivery **DISABLED** (§9.5, §10.2) |
+| Migration `0031` | **BLOCKED / UNAUTHORIZED** |
+| Migration `0032` | **UNAUTHORIZED** (proposed owner for §21.1; not authorized) |
+| Migration `0033` | **UNAUTHORIZED** |
+| Migration `0034` | **RESERVED / UNALLOCATED** (§20.11; see §21.7) |
+| Migration `0029` | **RESERVED / QUARANTINED** (untouched) |
+
+### 21.5 Database-trigger migration placement — UNRESOLVED (no assignment)
+
+No migration is assigned to the §21.2 guard. The candidates below are enumerated only to show
+why none is selected; **no reserved migration is repurposed**, and no later migration is claimed.
+
+| Candidate | Source evidence | Assessment |
+|---|---|---|
+| `0030` | §14 rule 1 (one file per number); migrations immutable/forward-only | **Not selected** — already applied; cannot be edited |
+| `0031` | §14 rule 2; §20.11; `0030` header | **Not selected** — DML/seed only; cannot host DDL |
+| `0032` | §20.11 (frozen: delivery snapshot, dedupe, quota, event-type guard) | **Not selected** — announcement content protection is not delivery mechanics |
+| `0033` | §20.11 (frozen: six permissions backfill) | **Not selected** — permissions only |
+| `0034` | §14 rule 2 vs §20.9/§20.11 conflict (§21.7) | **Not selected** — reserved/unallocated; must not be repurposed |
+| New number `0035+` | §14 allocation table (`0030`–`0034`) | **Not selected** — would require explicit authorization to extend the frozen allocation |
+
+Shape precedent only (not placement): the Phase-6 published report-card freeze
+(`0018_phase6_final_result_snapshot_integrity.sql`) and the Phase-7 fee-structure publish freeze
+(`PHASE_7_0022_CHECKPOINT_REPORT.md`, D1/D2) evidence that post-publication immutability is a
+**DDL** guard; they do not establish which Phase-8 migration owns the announcement guard.
+
+> **Superseded for `0036`:** the placement above records the pre-authorization state. Under explicit
+> authorization the allocation was extended with `0035`/`0036`, and **`0036` now owns the
+> announcement lifecycle/content-immutability guard** (§22).
+
+### 21.6 `notifications` RLS vs `student_guardians.deleted_at` — **RESOLVED by migration `0035`**
+
+**Earlier design state (historical — superseded).** As first recorded in this report,
+`notifications_select` (`0030:284-307`) joined `guardians.deleted_at IS NULL` but did **not**
+reference `student_guardians.deleted_at`, while C-2 (§20.2 rule 2) requires the latter to be
+respected. At that time a soft-unlinked `student_guardians` row did **not**, by itself, remove
+notification visibility at the database layer, and the issue was recorded as a **security issue
+requiring a separately scoped remediation with its own regression tests**. (The §21.1 terminal
+suppression governs **delivery eligibility for an undelivered notification only**; it never
+resolved database read access, RLS visibility, or delivered-history visibility.)
+
+**Implemented resolution (migration `0035_com_guardian_context_rls.sql`).** The read path now
+resolves guardian visibility through an explicit, tenant-bound student context set, so a
+guardian-addressed notification is visible only under the approved live-link privacy invariant:
+
+1. **Valid live guardian identity is required.** `notifications_select` (`0035:378-409`) enters the
+   guardian branch only when `recipient_guardian_id IS NOT NULL` and the joined `guardians` row
+   satisfies `g.user_id = app_current_user_id()`, `g.deleted_at IS NULL`, and
+   `g.tenant_id = notifications.tenant_id` (`0035:392-404`).
+2. **At least one context must exist.** The branch also calls `fn_notification_scope_ok(...)`
+   (`0035:162-204`), which for a guardian-addressed notification requires `EXISTS` at least one
+   context row (`0035:178-182`) and rejects an empty context set.
+3. **Every context student must be live and live-linked to the notification's guardian.** The same
+   predicate rejects the notification when any context row's student is soft-deleted or lacks a live
+   `student_guardians` link to that guardian (`0035:183-202`), using the per-row helper
+   `fn_notification_context_row_valid` (`0035:125-150`).
+4. **If any one context fails the predicate, the guardian cannot see the notification.** The
+   predicate is the exclusive `NOT EXISTS(NOT(...))` form (`0035:159-161`), so an inner-join shape
+   cannot silently drop an invalid context and pass. Revoking one guardian-student link (or
+   soft-deleting one student) hides the entire notification, delivered history included
+   (`0035:15-21`, `0035:371-377`).
+5. The student branch (`0035:383-391`) and the privileged escape (`0035:408`) are unchanged.
+
+This is the read-time **ALL-context visibility** rule of `0035`. It is distinct from the
+commit-time **integrity** guarantees of the deferred constraint triggers (`0035:359-369`), and from
+§21.1 terminal suppression for an undelivered notification. It does **not** claim that every
+concurrency interleaving has been empirically verified (see §22.2–§22.3). The earlier open
+statement above is retained only as historical context and is no longer an open security issue.
+
+### 21.7 Source-backed corrections and terminology
+
+1. **`0034` conflict.** §14 rule 2 reads "`0034` reserved for forward remediation"; §20.9 and
+   §20.11 read "`0034` = RESERVED / **UNALLOCATED**". Per this report's own precedence rule
+   ("Where an earlier section of this report conflicts with §20, §20 governs"), §20.11 governs:
+   `0034` is **reserved/unallocated**.
+2. **`0031` cannot host the guard.** Confirmed by the frozen scope (§14 rule 2; §20.11;
+   `0030` header lines 11–18).
+
+---
 *Generated by the Phase 8 readiness gate (prompt 2 of 2). §20 (C-1…C-7) added by the Phase 8 design-correction reconciliation gate. §20.11 (six-permission resolution, one-event freeze, `0030`–`0033` contracts, DOC-1…DOC-8 classification) added by the Phase 8 final implementation-readiness gate — documentation only, no code/schema/dependency changes.*
+
+---
+
+## 22. Migration allocation revision — `0035` / `0036` (explicitly authorized)
+
+**Nature.** Documentation-only. This section records an explicitly authorized revision of the Phase 8
+migration allocation to add two consecutive numbers. It creates, renumbers, renames, edits, or
+executes no migration, and changes no code, schema, data, seed, dependency, or configuration.
+
+**Authorization.** The human owner explicitly authorized extending the frozen Phase 8 allocation
+(§14, §20.9, §21.5) with two new consecutive numbers, `0035` and `0036`, while preserving `0029`
+(reserved), `0030` (immutable / committed), the assigned purposes of `0031`–`0033`, and `0034`
+(reserved / unallocated).
+
+**Assignments (originally recorded as design allocations — `0035`/`0036` are now reported as implemented as untracked working-tree files, not committed and not part of the migration history; see §22.1).**
+
+| Number | Concern | Contents |
+|---|---|---|
+| `0035` | Guardian notification context & RLS | `notifications` `UNIQUE (tenant_id, id)` anchor; `notification_student_contexts`; tenant-aware composite FKs; one context row per relevant student; `ENABLE` + `FORCE ROW LEVEL SECURITY` + isolation-test registration; recreated `notifications_select` bearing the approved live-link privacy invariant; `DEFERRABLE INITIALLY DEFERRED` scope/context consistency constraint trigger; per-notification transaction-scoped advisory-lock serialization (`fn_lock_notification_parent`), **not** parent-row `FOR UPDATE` (see §22.1). |
+| `0036` | Announcement lifecycle & content immutability | draft-only insert; `status` ↔ `published_at` consistency; approved status-transition graph; freeze of `title`/`body` when the prior status is `published`/`cancelled`; server-owned write-once `published_at`; immutable identity/audit fields; denial of ordinary runtime deletion. |
+
+**Preserved allocations.** `0029` reserved / quarantined (untouched); `0030` immutable / committed;
+`0031` = template seed/override mechanics (DML-only, unauthorized); `0032` = delivery mechanics
+(unauthorized); `0033` = permission SQL backfill (unauthorized); `0034` = reserved / unallocated.
+
+**Approved design decisions carried with this revision** (design finalization only):
+
+1. Guardian model = Option 3 (`notification_student_contexts`); C-5 unchanged; one notification per
+   guardian per channel, one context row per relevant student.
+2. Multi-child visibility = **ALL-context**. A student-scoped guardian notification is visible only
+   while *every* student represented in its context remains live-linked to that guardian; any revoked
+   or soft-deleted link hides the entire notification, delivered history included. Undelivered
+   suppression remains the delivery state machine's separate responsibility.
+3. Classification = `student_scoped` default. `non_student_scoped` is **not defined** (no categories
+   approved) and must **not** be creatable through ordinary tenant API paths; it stays unavailable
+   until categories, authorization rules, and validation requirements receive explicit approval.
+   Fail-closed visibility is preserved — a `student_scoped` notification without a valid context is
+   hidden. Consequence to track: until categories are approved, guardian notifications are
+   student-scoped and context-requiring, so context-less guardian notices are hidden by design.
+4. Announcement soft deletion = Option A, one-way (`NULL` → timestamp only), without changing
+   `status`, `title`, `body`, or `published_at`; not a purge; does not bypass content immutability or
+   retention controls.
+5. `notifications` `UNIQUE (tenant_id, id)` anchor approved. Verify the actual schema before
+   implementing; do not duplicate an equivalent existing constraint.
+6. Scope integrity via a `DEFERRABLE INITIALLY DEFERRED` constraint trigger evaluated at commit.
+   A committed `student_scoped` guardian notification requires ≥1 valid context row; a
+   `non_student_scoped` notification requires none. An invalid state aborts the transaction; the
+   check must not fail merely because context rows are inserted later in the same transaction.
+7. Context foreign keys = tenant-aware composite. `ON DELETE CASCADE` is acceptable for subordinate
+   context rows on physical deletion of a notification or student, provided it cannot bypass
+   authorization, retention, or privileged-purge restrictions. Ordinary runtime roles gain no
+   hard-delete capability; student soft deletion and guardian-link revocation are handled by
+   visibility predicates and the delivery suppression mechanism, not by FK cascades.
+8. Privileged purge of published/cancelled announcements remains **PROHIBITED** until a separate
+   retention policy is explicitly approved. No purge code, privileges, or assumed retention periods.
+
+### 22.1 Implemented reconciliation — `0035` transaction-scoped advisory-lock serialization
+
+The assignment above states the `0035` design intent. `0035_com_guardian_context_rls.sql` was
+subsequently implemented and audited; this subsection reconciles the description with the actual
+source. It documents the **implemented** strategy (not a proposal, and not a `FOR UPDATE` strategy)
+and changes no migration.
+
+**Implemented strategy (source inspection).** `0035` serializes context-set validation per
+notification with a **transaction-scoped advisory lock**, not a parent-row `FOR UPDATE`:
+
+- The helper `fn_lock_notification_parent(p_tenant, p_notif_id)` (`0035:216-227`) executes
+  `pg_advisory_xact_lock(hashtext(p_tenant::text), hashtext(p_notif_id::text))`; the advisory-lock
+  key is the **`(tenant_id, notification_id)` pair**. The function is `SECURITY INVOKER`, uses the
+  fixed `search_path` (`pg_catalog, public, pg_temp`), has `PUBLIC` execute revoked, and is granted
+  to `school_app_rw`.
+- **Call paths that acquire the lock**, all on the same `(tenant_id, notification_id)` key:
+  - the parent `notifications` constraint trigger, before re-reading and validating (`0035:244`);
+  - the context trigger on `INSERT` (`0035:271`);
+  - the context trigger on `UPDATE` (`0035:294-304`);
+  - the context trigger on `DELETE` (`0035:341`).
+- **Canonical ascending order** for a reassignment that touches two parents: when a context row
+  moves between notifications, the OLD and NEW parents are locked in ascending `(tenant_id,
+  notification_id)` order (`0035:294-304`), so mirrored reassignments cannot deadlock AB-BA.
+- **Re-read and validate after the locks are acquired:** every check locks first and then re-reads
+  the current parent/context state, never trusting stale `OLD`/`NEW` images
+  (`0035:244-250`, `0035:271-287`, `0035:306-333`, `0035:341-352`).
+- **Reason the implementation moved away from parent-row `FOR UPDATE`** (recorded in the migration
+  source header, `0035:29-46`): the immediate composite FK from `notification_student_contexts`
+  already takes a `FOR KEY SHARE` lock on the NEW parent at statement time; `FOR KEY SHARE`
+  conflicts with `FOR UPDATE`, so two mirrored reassignments hold opposite parents and a later
+  `FOR UPDATE` on both parents in canonical order deadlocks AB-BA (surfaced as SQLSTATE `40P01` by
+  the H2 gate). Advisory locks do not conflict with the FK's row locks, so both mirrored updates
+  acquire the two per-notification locks in canonical order and serialize instead of deadlocking.
+  Both the child trigger and the parent trigger take the same lock, so a concurrent parent
+  reclassification and a child change also serialize (`0035:40-41`).
+- **Intended protection:** a concurrent context mutation cannot commit a guardian-addressed
+  notification without a valid context set; the deferred parent trigger (`0035:235-253`) and context
+  trigger (`0035:261-355`) both re-validate the surviving set under the lock at commit
+  (`0035:358-369`). Link revocation is deliberately **not** serialized here — revoked-link
+  visibility is a read-time predicate (`0035:43-46`; see §22.3).
+
+This is not a claim that advisory locks eliminate every possible concurrency risk. §22.2–§22.3
+separate behaviour demonstrated by source inspection, behaviour supported by recorded test results,
+and concurrency behaviour that remains unverified.
+
+### 22.2 Concurrency evidence — demonstrated, recorded, and unverified
+
+To avoid overstating the guarantee, the H-section evidence is separated into three classes.
+
+1. **Demonstrated by source inspection (this documentation task).** The advisory-lock helper and its
+   call paths, the canonical two-parent lock ordering, the post-lock re-read, the deferred
+   commit-time triggers, and the ALL-context visibility predicate are present and shaped as
+   described in §22.1 and §21.6 (`0035:125-150`, `:162-204`, `:216-227`, `:235-253`, `:261-355`,
+   `:359-369`, `:378-409`). Inspection proves the code is present as stated; it does **not** by
+   itself prove runtime behaviour under concurrency.
+2. **Supported by recorded test results (not re-executed by this task).** The opt-in runtime suite
+   `packages/db/src/security/phase8-communication.test.ts` (Section H, `:1340-1517`) contains:
+   - **H1** (`:1362-1397`) — two concurrent deletions of the last two contexts of one notification.
+     This is **strong serialization evidence**: an unserialized outcome would likely let both
+     commits succeed and leave zero contexts, whereas the recorded outcome is one refusal
+     (SQLSTATE `55000`) and one success, with one context surviving.
+   - **H2** (`:1399-1464`) — concurrent **mirrored reassignment** of two multi-context notifications.
+     It is **reported to pass with both transactions committing** and demonstrates **absence of the
+     previously observed deadlock for the tested schedule** (the original `FOR UPDATE` approach
+     produced SQLSTATE `40P01`). It does **not independently prove that serialization is
+     necessary**, because the tested final state may also be valid without serialization; treat H2
+     as a deadlock/non-regression gate, **not** a necessity proof. An earlier H2 blurb overstated
+     this; it is corrected here.
+   - **H3a / H3b** (`:1466-1517`) — the two **sequential** commit orders of commit-then-revoke and
+     revoke-then-commit.
+
+   These are **recorded** outcomes. This task did not run the suite and asserts no result beyond what
+   is recorded.
+3. **Unverified concurrency behaviour.** A truly concurrent **in-flight** guardian-link revocation
+   interleaving (a revocation committing while a notification/context transaction is in progress)
+   has **not** been empirically tested. H1 and H2 have different evidentiary strengths: H1 exercises
+   a stronger serialization property than H2. The advisory-lock design is a source-level argument; it
+   is **not** a claim that every interleaving is empirically proven. Verifying that interleaving
+   requires separate test authorization.
+
+### 22.3 Guardian-link revocation — read-time versus commit-time
+
+- **Read-time privacy.** Through `fn_notification_scope_ok` (`0035:162-204`), the visibility
+  predicate (`0035:378-409`) hides a notification as soon as its guardian relationship or any
+  required context becomes invalid. This is a query-time predicate; it needs no lock and hides
+  delivered history too.
+- **Commit-time integrity.** The `DEFERRABLE INITIALLY DEFERRED` constraint triggers
+  (`0035:359-369`) validate the relevant database state at transaction completion; a committed
+  guardian-addressed notification must have a valid context set. The migration source records that
+  link revocation is intentionally not serialized: a concurrent revoker either makes the in-flight
+  transaction fail its commit (fail closed) or commits after it and hides the row at read
+  (`0035:43-46`).
+- **Unverified interleavings.** The recorded tests cover the two **sequential** commit orders
+  (H3a/H3b) but not every possible overlapping transaction schedule. The relevant concurrent
+  in-flight interleaving remains **unverified pending separate test authorization**. A concurrency
+  guarantee is not asserted as empirically proven from reasoning or from sequential tests alone.
+
+### 22.4 Announcement soft-delete versus status change (`0036`)
+
+`trg_announcements_lifecycle` (`0036:40-142`) enforces the soft-delete guard as follows:
+
+- In the **same `UPDATE`** that first changes `deleted_at` from `NULL` to a timestamp, a status
+  change is **refused**: the trigger requires `NEW.status = OLD.status` when `deleted_at` moves
+  (`0036:112-121`).
+- A **later `UPDATE`** (one that does not itself change `deleted_at`) may still move an
+  already-soft-deleted **published** announcement to `cancelled`: the status-transition allow-list
+  permits `published -> cancelled` (`0036:85-92`), and the frozen-content rule still forbids changing
+  `title`/`body`/`audience_scope` (`0036:125-132`). So a soft-deleted published row can be cancelled
+  in a subsequent statement, with its content remaining frozen.
+
+The one-way `deleted_at` rule (`NULL -> timestamp` once, `0036:112-116`) and the same-statement
+status prohibition are as approved in the fourth bullet of §22's *Approved design decisions carried
+with this revision* list (announcement soft deletion = Option A). Whether a **later** status change
+on an already-soft-deleted published row is intended is **not explicitly resolved** by the approved
+decisions: that fourth bullet describes the soft-delete operation itself as not changing status but
+does not address a subsequent separate status `UPDATE`. This is recorded as an **ambiguity requiring
+separate authorization**. This task does not change the trigger, the test suite, or the previously
+approved lifecycle behavior, and does not choose new behavior.
+
+**Supersession (limited).** This section supersedes, **only to the extent of the two added numbers
+`0035`/`0036`**, the following statements: the `0030`–`0034` range in §14 (`:609`, `:615`) and §16
+MIG-1 (`:683`); "Nothing requires `0035+`" in §20.9 (`:791`); and the §21.5 conclusion that no
+migration is assigned to the §21.2 announcement guard (`:911`–`:921`) — `0036` now owns it. All other
+content of §14, §20, and §21 — including `0029` reserved, `0030` immutable, `0031`–`0033` purposes,
+and `0034` reserved / unallocated — is unchanged.
+
+**Not authorized by this revision.** Creating or modifying migration SQL; application code; schema or
+data changes; running migrations or DB-mutating scripts; provider integrations or external delivery;
+unapproved notification categories; commits. A separate implementation authorization is required.
