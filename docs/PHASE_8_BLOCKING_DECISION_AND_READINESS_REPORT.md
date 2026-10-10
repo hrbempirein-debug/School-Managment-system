@@ -1147,12 +1147,22 @@ To avoid overstating the guarantee, the H-section evidence is separated into thr
 
 The one-way `deleted_at` rule (`NULL -> timestamp` once, `0036:112-116`) and the same-statement
 status prohibition are as approved in the fourth bullet of §22's *Approved design decisions carried
-with this revision* list (announcement soft deletion = Option A). Whether a **later** status change
-on an already-soft-deleted published row is intended is **not explicitly resolved** by the approved
-decisions: that fourth bullet describes the soft-delete operation itself as not changing status but
-does not address a subsequent separate status `UPDATE`. This is recorded as an **ambiguity requiring
-separate authorization**. This task does not change the trigger, the test suite, or the previously
-approved lifecycle behavior, and does not choose new behavior.
+with this revision* list (announcement soft deletion = Option A).
+
+**RESOLVED — human owner approval (Option A ratified).** The human owner has explicitly approved
+the following policy: **a published announcement that has already been soft-deleted may
+subsequently transition to `cancelled` in a separate `UPDATE`** that does not itself change
+`deleted_at`. This matches the existing trigger behavior (status-transition allow-list,
+`0036:85-92`, does not consult `deleted_at`; the soft-delete guard, `0036:112-121`, fires only when
+`deleted_at` moves). The soft-delete operation **itself** must still not change `status`
+(`0036:117-119`); one-way `deleted_at`, published-content immutability (`0036:125-132`), and the
+server-owned write-once `published_at` (`0036:96-101`) all remain enforced unchanged. Regression
+coverage: `packages/db/src/security/phase8-communication.test.ts` test G16 asserts the full
+publish → soft-delete → later-cancel sequence with content and `published_at` preservation, plus
+the surviving one-way and content-freeze refusals. This resolution covers **only** this specific
+Option A question; it does not authorize any other lifecycle change, does not resolve the separate
+in-flight guardian-link revocation concurrency question (§22.2–§22.3), and does not claim Phase 8
+completion or release readiness.
 
 **Supersession (limited).** This section supersedes, **only to the extent of the two added numbers
 `0035`/`0036`**, the following statements: the `0030`–`0034` range in §14 (`:609`, `:615`) and §16
