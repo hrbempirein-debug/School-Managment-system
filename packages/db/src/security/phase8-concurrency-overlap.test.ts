@@ -14,9 +14,10 @@ import { getEnv } from '@sms/config';
  * runtime-db.ts); it never touches school_saas_dev.
  *
  * OPTOUT/OPTIN: exactly like the other DB-backed security suites, everything
- * self-skips unless RUN_RUNTIME_SECURITY_TESTS=1. This file is NOT wired into
- * any CI step and does not change the default test selection; it is the C1/C2
- * scoped investigation suite.
+ * self-skips unless RUN_RUNTIME_SECURITY_TESTS=1. It is included by the existing
+ * phase6-security aggregate CI step (`vitest run src/security ...`, which runs
+ * with RUN_RUNTIME_SECURITY_TESTS=1) and does not change the default test
+ * selection; it is the C1/C2 scoped investigation suite.
  *
  * ROLES USED:
  *  - school_migrator (migrator / revoker / fixture sessions): DDL + privileged.
