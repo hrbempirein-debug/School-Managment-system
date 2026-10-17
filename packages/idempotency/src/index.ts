@@ -102,8 +102,11 @@ export async function withIdempotency<T>(
   }
   const tenantId = opts.tenantId ?? null;
   const savepoint = `idem_${randomBytes(6).toString('hex')}`;
+  // eslint-disable-next-line no-restricted-syntax -- Savepoint control statement: the locally generated identifier must be interpolated as SQL, because PostgreSQL cannot parameterize a savepoint name.
   const open = sql.raw(`SAVEPOINT ${savepoint}`);
+  // eslint-disable-next-line no-restricted-syntax -- Savepoint control statement: the locally generated identifier must be interpolated as SQL.
   const rollback = sql.raw(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+  // eslint-disable-next-line no-restricted-syntax -- Savepoint control statement: the locally generated identifier must be interpolated as SQL.
   const release = sql.raw(`RELEASE SAVEPOINT ${savepoint}`);
   await tx.execute(open);
   try {

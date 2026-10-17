@@ -14,20 +14,27 @@
     "dev:worker": "pnpm --filter @sms/worker run dev",
     "build": "pnpm turbo run build",
     "typecheck": "pnpm turbo run typecheck",
+    "lint": "eslint \"packages/idempotency/src/**/*.ts\"",
     "test": "pnpm turbo run test",
     "db:migrate": "pnpm --filter @sms/db run migrate",
     "db:migrate:down": "pnpm --filter @sms/db run migrate:down",
     "db:seed": "pnpm --filter @sms/db run seed",
+    "db:backup": "pnpm --filter @sms/db run db:backup",
+    "db:restore:validate": "pnpm --filter @sms/db run db:restore:validate",
+    "db:restore": "pnpm --filter @sms/db run db:restore",
     "db:bootstrap": "node scripts/bootstrap-check.js",
     "platform:bootstrap-admin": "pnpm --filter @sms/api run platform:bootstrap-admin"
   },
   "devDependencies": {
+    "@eslint/js": "9.39.5",
     "@types/node": "^22.0.0",
     "dotenv": "^16.4.7",
+    "eslint": "9.39.5",
     "pg": "^8.13.1",
     "prettier": "^3.3.0",
     "turbo": "^2.5.0",
     "typescript": "^5.6.0",
+    "typescript-eslint": "8.71.1",
     "vitest": "^3.0.0"
   }
 }

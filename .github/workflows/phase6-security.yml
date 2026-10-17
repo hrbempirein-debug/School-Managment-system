@@ -201,6 +201,9 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      - name: Lint (Task 40 idempotency-scoped baseline)
+        run: pnpm lint
+
       - name: Build
         run: pnpm build
 

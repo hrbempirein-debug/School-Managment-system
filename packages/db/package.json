@@ -22,6 +22,9 @@
     "test": "vitest run",
     "migrate": "tsx src/cli/migrate.ts",
     "migrate:down": "tsx src/cli/migrate-down.ts",
-    "seed": "tsx src/cli/seed.ts"
+    "seed": "tsx src/cli/seed.ts",
+    "db:backup": "tsx src/cli/backup.ts",
+    "db:restore:validate": "tsx src/cli/restore.ts --validate-only",
+    "db:restore": "tsx src/cli/restore.ts --restore"
   }
 }
