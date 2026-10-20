@@ -48,7 +48,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 interface Stmt {
   file: string;
   line: number;
-  op: 'select' | 'insert' | 'update' | 'delete' | 'raw';
+  op: 'select' | 'selectDistinct' | 'insert' | 'update' | 'delete' | 'raw';
   table: string;
   scoped: boolean;
 }

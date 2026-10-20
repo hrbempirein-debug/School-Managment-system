@@ -1,4 +1,12 @@
 import type { FastifyRequest, FastifyReply } from 'fastify';
+
+// Load the Fastify augmentations this module relies on (`auth`/`ctx`/
+// `requestId`/`db`/`redis` and the cookie reply methods). Type-only, so nothing
+// is emitted; it keeps every program that compiles this file (e.g. the worker,
+// which reaches it through the tenants route) seeing the same Fastify surface.
+import type {} from './types.js';
+import type {} from '@fastify/cookie';
+
 import { getEnv } from '@sms/config';
 import { HttpError } from '@sms/core';
 import {

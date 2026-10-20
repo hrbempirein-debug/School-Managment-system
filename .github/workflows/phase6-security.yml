@@ -302,6 +302,81 @@ jobs:
         env:
           RUN_RUNTIME_SECURITY_TESTS: '1'
 
+      # ---------------------------------------------------------------------
+      # PHASE 7-8 GATING (Task 39).
+      #
+      # WHY THIS BLOCK EXISTS. Nothing in this workflow NAMES Phase 7 (Fees +
+      # Finance) or Phase 8 (Communication). Their RUN_RUNTIME_SECURITY_TESTS=1
+      # suites are executed today only as a side effect of the aggregate steps
+      # above ("Phase 3-4 DB security suites" runs all of src/security; "Phase
+      # 2-5 API acceptance suites" runs all of @sms/api; the worker step runs
+      # all of @sms/worker). Coverage that is incidental is coverage nobody can
+      # see: narrow an aggregate, rename a filter, or reorder a step and Phase
+      # 7/8 gating disappears silently. These four steps name the Phase 7/8
+      # gated suites EXPLICITLY, so a Phase 7/8 security regression fails a step
+      # whose name says which phase broke.
+      #
+      # WHY THIS IS ADDITIVE, NOT A REPLACEMENT. Exactly like the four Phase 6
+      # named steps, these steps re-run files that the aggregate steps also run.
+      # Nothing is removed, weakened, or traded away: the aggregates remain the
+      # catch-all (a newly added Phase 7/8 suite is still executed by them), and
+      # this block adds named attribution on top. The named file lists are fixed
+      # on purpose; a renamed/deleted file makes its named step fail closed
+      # (vitest exits non-zero when a filter matches no file) rather than pass
+      # quietly.
+      #
+      # SAME SAFETY RULES AS EVERY OTHER STEP HERE: RUN_RUNTIME_SECURITY_TESTS is
+      # set on the step only (never at job scope), files run serially within each
+      # package (`fileParallelism: false`), every run re-applies migrations via
+      # globalSetup against the ONE disposable database, and the destructive
+      # migration-regression suite is NOT in scope here (it stays a step of its
+      # own above). No secret is printed.
+      - name: Phase 7 finance DB security suites
+        run: >-
+          pnpm --filter @sms/db exec vitest run
+          src/security/finance-cache-maintenance.test.ts
+          src/security/finance-composite-fk.test.ts
+          src/security/finance-fee-structure-date-semantics.test.ts
+          src/security/finance-fee-structure-versioning.test.ts
+          src/security/finance-mfa-encrypt-wrapper.test.ts
+          src/security/finance-payments.test.ts
+          src/security/finance-rbac.test.ts
+          src/security/finance-reconciliation.test.ts
+          src/security/finance-refund-remediation.test.ts
+          src/security/finance-refund-state-machine.test.ts
+          src/security/finance-totp.test.ts
+          src/security/finance-trigger-inventory.test.ts
+        env:
+          RUN_RUNTIME_SECURITY_TESTS: '1'
+
+      - name: Phase 7 finance API acceptance suites
+        run: >-
+          pnpm --filter @sms/api exec vitest run
+          src/security/finance-fee-catalog.acceptance.test.ts
+          src/security/finance-fee-head-write.acceptance.test.ts
+          src/security/finance-fee-structure-lifecycle.acceptance.test.ts
+          src/security/finance-fee-structure-supersede.acceptance.test.ts
+          src/security/finance-refund-stepup.acceptance.test.ts
+        env:
+          RUN_RUNTIME_SECURITY_TESTS: '1'
+
+      - name: Phase 8 communication DB security suites
+        run: >-
+          pnpm --filter @sms/db exec vitest run
+          src/security/phase8-communication.test.ts
+          src/security/phase8-concurrency-overlap.test.ts
+          src/security/phase8-notification-deliveries.test.ts
+        env:
+          RUN_RUNTIME_SECURITY_TESTS: '1'
+
+      - name: Phase 8 communication API suites (announcement publication)
+        run: >-
+          pnpm --filter @sms/api exec vitest run
+          src/security/announcements-publication.acceptance.test.ts
+          src/routes/school/announcements.publication-freeze.contract.test.ts
+        env:
+          RUN_RUNTIME_SECURITY_TESTS: '1'
+
       # B-1: WHY THE DEFAULT SUITE NEEDS A ROOT .env AT ALL.
       #
       # `pnpm test` is `pnpm turbo run test`, and Turbo 2 filters the environment it
