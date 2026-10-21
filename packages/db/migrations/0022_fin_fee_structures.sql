@@ -2536,12 +2536,11 @@ BEGIN
     -- the constraint's declared action could never run. Under RESTRICT the
     -- refusal arrives here, at the layer that can name the reason, and the audit
     -- stamp is left completely untouched by the attempt.
-    -- 23001, restrict_violation, and not 23503 foreign_key_violation: RESTRICT
-    -- reports its own SQLSTATE and refuses at once, where NO ACTION would defer
-    -- the same verdict to the end of the statement. The distinction is the point
-    -- of choosing RESTRICT, so it is asserted exactly rather than as REJECTED.
+    -- PostgreSQL reports foreign key violations from ON DELETE RESTRICT as
+    -- SQLSTATE 23503 (foreign_key_violation); the earlier comment that claimed
+    -- 23001 was incorrect for this implementation.
     v_lbl := array_append(v_lbl, 'D7 a user who published a structure may NOT be deleted');
-    v_exp := array_append(v_exp, '23001');
+    v_exp := array_append(v_exp, '23503');
     v_err := NULL;
     BEGIN
         DELETE FROM users WHERE id = v_user;
