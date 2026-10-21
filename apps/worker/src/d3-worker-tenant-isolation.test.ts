@@ -65,7 +65,7 @@ describeDb('D3 worker cross-tenant isolation (disposable test database)', () => 
   const tenantIds = [state.A.tenant, state.B.tenant];
   const otherTenant = (forTenant: 'A' | 'B'): string =>
     (forTenant === 'A' ? state.B : state.A).tenant;
-  const slug = 'd3' + Math.abs(Math.random() * 0xffffff).toString(16).slice(0, 6);
+  const slug = 'd3' + randomUUID().replace(/-/g, '').slice(0, 6);
   const guardianEmail = (forTenant: 'A' | 'B'): string =>
     `g-${state[forTenant].date.slice(-2)}-${slug}@example.com`;
 
