@@ -697,7 +697,7 @@ describeDb('0022 composite FK, anchors, delete actions, and schema fidelity', ()
         `insert into fin_fee_structure_items (id, tenant_id, structure_id, fee_head_id, amount)
          values (${q(item)}, ${q(u('tenantA'))}, ${q(structure)}, ${q(u('headA'))}, 10.00)`,
       );
-      await migReject(`delete from fin_fee_heads where id = ${q(u('headA'))}`, '23001');
+      await migReject(`delete from fin_fee_heads where id = ${q(u('headA'))}`, '23503');
     });
 
     it('RESTRICT: refuses to delete the publisher of a published structure', async () => {
@@ -712,7 +712,7 @@ describeDb('0022 composite FK, anchors, delete actions, and schema fidelity', ()
         `update fin_fee_structures set status='published', published_at=now(), published_by=${q(publisher)}
           where id = ${q(structure)}`,
       );
-      await migReject(`delete from users where id = ${q(publisher)}`, '23001');
+      await migReject(`delete from users where id = ${q(publisher)}`, '23503');
     });
 
     it('SET NULL: deleting the user who started a run nulls started_by and keeps the run', async () => {
