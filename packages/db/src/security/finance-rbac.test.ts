@@ -127,6 +127,11 @@ describeDb('finance-020 / finance-rbac: §20.5 fees.* backfill and its C∧K run
   let cashierRole = '';
   let feeHeadA = '';
   let feeHeadB = '';
+  // Whether THIS suite created the platform-scope `platform_admin` role, or
+  // reused one another suite already committed (e.g. the API bootstrap suite
+  // in the preceding workflow step). Teardown may only delete it when we
+  // created it, or we would rip a role out from under its owner.
+  let platformRoleCreatedBySuite = false;
 
   beforeAll(async () => {
     const env = getEnv();
@@ -191,7 +196,6 @@ describeDb('finance-020 / finance-rbac: §20.5 fees.* backfill and its C∧K run
       ['teacher', 'teacher', 'tenant', true],
       ['parent', 'parent', 'tenant', true],
       ['student', 'student', 'tenant', true],
-      ['platform', 'platform_admin', 'platform', true],
     ];
     for (const [key, code, scope, isSystem] of legacyRoles) {
       uid[key] = randomUUID();
@@ -200,11 +204,40 @@ describeDb('finance-020 / finance-rbac: §20.5 fees.* backfill and its C∧K run
          values (${q(uid[key])}, ${scope === 'platform' ? 'null' : q(T('tenantA'))}, ${q(scope)}, ${q(code)}, ${q(`Legacy ${code}`)}, ${isSystem})`,
       );
     }
-    // The platform role must end with zero fees.* by template design.
-    await migrator.query(
-      `insert into role_permissions (role_id, permission)
-       values (${q(String(uid.platform))}, 'platform.roles.manage')`,
+
+    // The platform-scope `platform_admin` role is GLOBAL (roles_platform_code_uq
+    // is UNIQUE (code) WHERE scope = 'platform'), so there can be only ONE in the
+    // shared disposable database. Another suite may already have committed it —
+    // the API bootstrap suite (`platform-admin-bootstrap.test.ts`) runs the real
+    // bootstrap CLI in the preceding workflow step and leaves the row behind.
+    // Reuse it when it exists rather than inserting a second one (23505); the
+    // §20.5 property under test is that the platform role holds ZERO fees.*
+    // permissions, and that holds for whichever single platform_admin row exists.
+    const existingPlatform = await mig(
+      `select id from roles where scope = 'platform' and code = 'platform_admin'
+        and tenant_id is null`,
     );
+    if (existingPlatform.length > 0) {
+      platformRole = String(one(existingPlatform).id);
+      platformRoleCreatedBySuite = false;
+    } else {
+      uid.platform = randomUUID();
+      platformRole = String(uid.platform);
+      platformRoleCreatedBySuite = true;
+      // Legacy name/is_system shape, matching 0001's tenant template: is_system,
+      // platform scope, no tenant. Still no fees.* by template design.
+      await migrator.query(
+        `insert into roles (id, tenant_id, scope, code, name, is_system)
+         values (${q(platformRole)}, null, 'platform', 'platform_admin', 'Legacy platform_admin', true)`,
+      );
+      // The platform role must end with zero fees.* by template design. Only a
+      // role this suite created gets this legacy permission; a reused role keeps
+      // whatever its owner provisioned, and the fees.* assertion still applies.
+      await migrator.query(
+        `insert into role_permissions (role_id, permission)
+         values (${q(platformRole)}, 'platform.roles.manage')`,
+      );
+    }
 
     // The custom role: code 'school_owner' (a template code), is_system=false,
     // in tenant B, with a real pre-existing permission. §20.5's is_system
@@ -243,7 +276,6 @@ describeDb('finance-020 / finance-rbac: §20.5 fees.* backfill and its C∧K run
     teacherRole = await roleIdOf('teacher', true, T('tenantA'));
     parentRole = await roleIdOf('parent', true, T('tenantA'));
     studentRole = await roleIdOf('student', true, T('tenantA'));
-    platformRole = String(uid.platform);
     customRole = String(uid.custom);
     cashierRole = await roleIdOf('cashier', true, T('tenantA'));
 
@@ -277,17 +309,26 @@ describeDb('finance-020 / finance-rbac: §20.5 fees.* backfill and its C∧K run
 
   afterAll(async () => {
     const t = `${q(T('tenantA'))}, ${q(T('tenantB'))}`;
+    // The platform-scope role is GLOBAL and shared: delete it (and its legacy
+    // permission) ONLY when this suite created it. A role reused from the API
+    // bootstrap suite belongs to that suite and must survive our teardown.
     const cleanup = [
       `delete from fin_payments where tenant_id in (${t})`,
       `delete from fin_fee_heads where tenant_id in (${t})`,
       `delete from membership_roles where membership_id in
          (${q(T('membershipOwner'))}, ${q(T('membershipPrincipal'))}, ${q(T('membershipCashier'))})`,
       `delete from memberships where tenant_id in (${t})`,
+      ...(platformRoleCreatedBySuite
+        ? [
+            `delete from role_permissions where role_id = ${q(platformRole)}`,
+            `delete from roles where id = ${q(platformRole)}`,
+          ]
+        : []),
       `delete from role_permissions where role_id in
          (${q(ownerRole)}, ${q(accountantRole)}, ${q(principalRole)}, ${q(teacherRole)},
-          ${q(parentRole)}, ${q(studentRole)}, ${q(cashierRole)}, ${q(platformRole)}, ${q(customRole)})`,
+          ${q(parentRole)}, ${q(studentRole)}, ${q(cashierRole)}, ${q(customRole)})`,
       `delete from roles where tenant_id in (${t})
-          or id in (${q(platformRole)}, ${q(customRole)})`,
+          or id = ${q(customRole)}`,
       `delete from guardians where tenant_id in (${t})`,
       `delete from users where id in (${q(T('userOwner'))}, ${q(T('userPrincipal'))}, ${q(T('userCashier'))})`,
       `delete from tenants where id in (${t})`,
