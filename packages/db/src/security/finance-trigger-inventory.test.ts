@@ -549,6 +549,67 @@ describeDb('0022 finance trigger inventory + freeze behaviour (live catalogs)', 
       }
     });
 
+    it('0037: the deferred ledger balance trigger is SECURITY DEFINER, owned by school_migrator, with a pinned search_path', async () => {
+      // 0037_fin_ledger_group_balance_definer_remediation.sql redefines
+      // trg_fin_ledger_group_balance() -- the DEFERRABLE constraint trigger that
+      // writes the ledger group's cached totals at COMMIT -- as SECURITY DEFINER.
+      // It is an INVOKER in 0026, which made its UPDATE run as school_app_rw and
+      // raise 42501, because school_app_rw holds SELECT only on
+      // fin_ledger_entry_groups and the forced RLS UPDATE policy requires
+      // app_privileged() (current_user = 'school_migrator').
+      //
+      // This is asserted as a CATALOG FACT, not by searching migration text: the
+      // function must really be a definer, really be owned by the intended
+      // privileged role (a definer owned by the wrong role is a different
+      // escalation), and really carry the pinned search_path. The posture is
+      // stated separately from the 0022 INVOKER assertion above because this is
+      // the one deliberate exception in the finance trigger inventory.
+      // pronargs = 0 pins the intended no-argument trigger signature: a same-named
+      // overload would otherwise be silently inspected instead of the reviewed body.
+      const r = one(
+        await mig(
+          `select p.prosecdef as definer,
+                  pg_get_userbyid(p.proowner) as owner,
+                  p.proconfig as config
+             from pg_proc p
+             join pg_namespace n on n.oid = p.pronamespace
+            where n.nspname = 'public'
+              and p.proname = 'trg_fin_ledger_group_balance'
+              and p.pronargs = 0`,
+        ),
+      );
+      expect(r.definer).toBe(true);
+      expect(String(r.owner)).toBe('school_migrator');
+      // proconfig is the catalog's normalised representation of `SET` clauses:
+      // one `name=value` array element per clause. Asserted EXACTLY, not by
+      // substring: an added clause (a widened path, a different setting) would
+      // leave the search_path element intact and must still fail here.
+      expect(r.config).toEqual(['search_path=pg_catalog, public, pg_temp']);
+      // The elevation must not have widened EXECUTE. The function stays
+      // owner-only: PUBLIC is revoked and school_app_rw is not granted. The ACL is
+      // exploded rather than pattern-matched (see the 0022 PUBLIC-revoke test),
+      // and it must be EXACTLY the owner's single self-grant: a row count of one,
+      // naming school_migrator, is what a PUBLIC or application-role grant breaks.
+      const acl = await mig(
+        `select coalesce(r.rolname, 'PUBLIC') as grantee, a.privilege_type
+           from pg_proc p
+           join pg_namespace n on n.oid = p.pronamespace
+           cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+           left join pg_roles r on r.oid = a.grantee
+          where n.nspname = 'public'
+            and p.proname = 'trg_fin_ledger_group_balance'
+            and p.pronargs = 0`,
+      );
+      expect(acl).toHaveLength(1);
+      expect(acl.map((row) => String(row.grantee))).toEqual(['school_migrator']);
+      for (const row of acl) {
+        expect(row.privilege_type, `${String(row.grantee)} privilege`).toBe('EXECUTE');
+        expect(String(row.grantee), `${String(row.grantee)} may execute the balance guard`).toBe(
+          'school_migrator',
+        );
+      }
+    });
+
     it('binds no 0022 trigger function to any table outside the 7 0022 tables', async () => {
       // Scoped by FUNCTION NAME rather than by table, so the direction of the
       // check is explicit: 0022's guards belong to 0022's tables. The 0023–0025
